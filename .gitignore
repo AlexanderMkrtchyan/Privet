@@ -24,7 +24,9 @@ server/public/downloads/*.tar.gz
 server/public/downloads/*.deb
 server/public/downloads/*.exe
 server/public/downloads/*.msi
+server/public/downloads/*.zip
 server/public/BUILD_STAMP.txt
+server/public/main.*.js
 dist/
 packaging/out/
 
