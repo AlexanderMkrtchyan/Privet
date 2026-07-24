@@ -107,7 +107,7 @@ jobs:
         id: ver
         shell: bash
         run: |
-          VER=$(python - <<'PY'
+          VER=$(python3 - <<'PY' || python - <<'PY'
           from pathlib import Path
           for line in Path("app/pubspec.yaml").read_text().splitlines():
               if line.startswith("version:"):
