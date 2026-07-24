@@ -107,15 +107,9 @@ jobs:
         id: ver
         shell: bash
         run: |
-          VER=$(python3 - <<'PY' || python - <<'PY'
-          from pathlib import Path
-          for line in Path("app/pubspec.yaml").read_text().splitlines():
-              if line.startswith("version:"):
-                  print(line.split(":",1)[1].strip().split("+",1)[0])
-                  break
-          PY
-          )
+          VER=$(grep '^version:' app/pubspec.yaml | head -1 | sed 's/^version:[[:space:]]*//' | cut -d'+' -f1)
           echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VER"
 
       - name: Compile installer
         shell: pwsh
@@ -151,12 +145,15 @@ jobs:
     name: Publish GitHub Release
     needs: [linux, windows]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # Publish as long as Windows built; Linux is best-effort (runner-specific
+    # packaging can fail, and Linux packages are also shipped from the web host).
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.windows.result == 'success' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Download Linux artifacts
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: linux-packages
@@ -172,8 +169,8 @@ jobs:
         working-directory: dist
         run: |
           ls -lah
-          sha256sum * > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt || true
+          cat SHA256SUMS.txt || true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
