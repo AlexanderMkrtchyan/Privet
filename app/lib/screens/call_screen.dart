@@ -318,7 +318,7 @@ class _MiniCallBar extends StatelessWidget {
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           textAlign: TextAlign.right,
-          style: const TextStyle(
+          style: TextStyle(
             color: PrivetTheme.mist,
             fontSize: 11,
           ),
@@ -362,7 +362,7 @@ class _MiniCallBar extends StatelessWidget {
                 const SizedBox(height: 6),
                 Text(
                   session.showShareStopped ? 'Share stopped' : label,
-                  style: const TextStyle(
+                  style: TextStyle(
                     color: PrivetTheme.mist,
                     fontSize: 11,
                   ),
@@ -790,7 +790,7 @@ class _AmbientBackdrop extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const DecoratedBox(
+    return DecoratedBox(
       decoration: BoxDecoration(
         gradient: RadialGradient(
           center: Alignment(0, -0.35),
@@ -1181,7 +1181,7 @@ class _CallHeader extends StatelessWidget {
                         statusLine,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
+                        style: TextStyle(
                           color: PrivetTheme.mist,
                           fontSize: 11.5,
                         ),
@@ -1222,7 +1222,7 @@ class _StagePlaceholder extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (shareStopped)
-                const Padding(
+                Padding(
                   padding: EdgeInsets.only(bottom: 18),
                   child: Icon(
                     Icons.stop_screen_share_rounded,
@@ -1261,7 +1261,7 @@ class _StagePlaceholder extends StatelessWidget {
               Text(
                 status,
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: PrivetTheme.mist, fontSize: 14),
+                style: TextStyle(color: PrivetTheme.mist, fontSize: 14),
               ),
             ],
           ),
@@ -1323,7 +1323,7 @@ class _PipTile extends StatelessWidget {
                   label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
+                  style: TextStyle(
                     color: PrivetTheme.paper,
                     fontSize: 11,
                     fontWeight: FontWeight.w600,
@@ -1498,13 +1498,13 @@ class _ErrorBanner extends StatelessWidget {
         padding: const EdgeInsets.all(12),
         child: Row(
           children: [
-            const Icon(Icons.error_outline_rounded,
+            Icon(Icons.error_outline_rounded,
                 color: PrivetTheme.paper, size: 20),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
                 message,
-                style: const TextStyle(color: PrivetTheme.paper),
+                style: TextStyle(color: PrivetTheme.paper),
               ),
             ),
           ],
@@ -1574,7 +1574,7 @@ class _CallButton extends StatelessWidget {
                     softWrap: false,
                     overflow: TextOverflow.ellipsis,
                     textAlign: TextAlign.center,
-                    style: const TextStyle(
+                    style: TextStyle(
                         color: PrivetTheme.paper, fontSize: 12),
                   ),
           ),

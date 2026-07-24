@@ -67,14 +67,14 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
           width: widget.width,
           height: widget.height,
           child: _failed
-              ? const Center(
+              ? Center(
                   child: Text(
                     'Video unavailable',
                     style: TextStyle(color: PrivetTheme.mist, fontSize: 13),
                   ),
                 )
               : !_ready
-                  ? const Center(
+                  ? Center(
                       child: SizedBox(
                         width: 28,
                         height: 28,
@@ -109,7 +109,7 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
                                   color: Colors.black.withValues(alpha: 0.45),
                                   shape: BoxShape.circle,
                                 ),
-                                child: const Icon(
+                                child: Icon(
                                   Icons.play_arrow_rounded,
                                   size: 36,
                                   color: PrivetTheme.signal,
@@ -125,7 +125,7 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
                           child: VideoProgressIndicator(
                             _controller,
                             allowScrubbing: true,
-                            colors: const VideoProgressColors(
+                            colors: VideoProgressColors(
                               playedColor: PrivetTheme.signal,
                               bufferedColor: Color(0x55A8E6C3),
                               backgroundColor: Color(0x44FFFFFF),

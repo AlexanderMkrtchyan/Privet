@@ -29,12 +29,13 @@ class PrivetApp extends StatefulWidget {
   State<PrivetApp> createState() => _PrivetAppState();
 }
 
-class _PrivetAppState extends State<PrivetApp> {
+class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
   final PrivetState _state = PrivetState();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _state.addListener(_onChange);
     _state.bootstrap();
     if (kIsWeb) {
@@ -48,18 +49,42 @@ class _PrivetAppState extends State<PrivetApp> {
   void _onChange() => setState(() {});
 
   @override
+  void didChangePlatformBrightness() {
+    // Re-derive palette when the OS switches light/dark (themeMode == system).
+    if (_state.themeMode == ThemeMode.system) setState(() {});
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _state.removeListener(_onChange);
     _state.dispose();
     super.dispose();
   }
 
+  Brightness _effectiveBrightness() {
+    switch (_state.themeMode) {
+      case ThemeMode.light:
+        return Brightness.light;
+      case ThemeMode.dark:
+        return Brightness.dark;
+      case ThemeMode.system:
+        return WidgetsBinding.instance.platformDispatcher.platformBrightness;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Resolve the active palette before building so every PrivetTheme.* getter
+    // returns the right color for this frame.
+    PrivetTheme.apply(
+      brightness: _effectiveBrightness(),
+      accent: _state.accent,
+    );
     return MaterialApp(
       title: 'Privet',
       debugShowCheckedModeBanner: false,
-      theme: PrivetTheme.dark(),
+      theme: PrivetTheme.themeData(),
       home: _state.booting
           ? const Scaffold(
               body: Center(child: CircularProgressIndicator()),

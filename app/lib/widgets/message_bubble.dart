@@ -568,7 +568,7 @@ class MessageBubble extends StatelessWidget {
                                     InkWell(
                                       borderRadius: BorderRadius.circular(8),
                                       onTap: () => close(),
-                                      child: const Padding(
+                                      child: Padding(
                                         padding: EdgeInsets.all(4),
                                         child: Icon(
                                           Icons.close_rounded,
@@ -591,7 +591,7 @@ class MessageBubble extends StatelessWidget {
                                   ),
                                 ],
                                 const SizedBox(height: 6),
-                                const Divider(height: 1, color: PrivetTheme.line),
+                                Divider(height: 1, color: PrivetTheme.line),
                                 const SizedBox(height: 2),
                                 InkWell(
                                   borderRadius: BorderRadius.circular(10),
@@ -796,7 +796,7 @@ class MessageBubble extends StatelessWidget {
                                       ),
                                       child: Row(
                                         children: [
-                                          const Icon(
+                                          Icon(
                                             Icons.delete_outline_rounded,
                                             size: 18,
                                             color: PrivetTheme.danger,
@@ -1140,7 +1140,7 @@ class _SingleMediaBody extends StatelessWidget {
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const ExcludeSemantics(
+                ExcludeSemantics(
                   child: Icon(
                     Icons.attach_file_rounded,
                     color: PrivetTheme.signal,
@@ -1215,7 +1215,7 @@ class _AttachmentTile extends StatelessWidget {
           fit: BoxFit.cover,
           width: width,
           height: height,
-          errorBuilder: (_, error, stack) => const ColoredBox(
+          errorBuilder: (_, error, stack) => ColoredBox(
             color: PrivetTheme.ink,
             child: Center(child: Icon(Icons.broken_image_outlined)),
           ),
@@ -1228,7 +1228,7 @@ class _AttachmentTile extends StatelessWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(
+                      Icon(
                         Icons.play_circle_fill_rounded,
                         color: PrivetTheme.signal,
                         size: 28,
@@ -1240,7 +1240,7 @@ class _AttachmentTile extends StatelessWidget {
                             item.fileName!,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 10, color: PrivetTheme.mist),
+                            style: TextStyle(fontSize: 10, color: PrivetTheme.mist),
                           ),
                         ),
                     ],
@@ -1256,7 +1256,7 @@ class _AttachmentTile extends StatelessWidget {
             padding: const EdgeInsets.all(8),
             child: Row(
               children: [
-                const Icon(Icons.audiotrack_rounded, color: PrivetTheme.signal),
+                Icon(Icons.audiotrack_rounded, color: PrivetTheme.signal),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
@@ -1277,7 +1277,7 @@ class _AttachmentTile extends StatelessWidget {
             padding: const EdgeInsets.all(8),
             child: Row(
               children: [
-                const Icon(Icons.insert_drive_file_rounded,
+                Icon(Icons.insert_drive_file_rounded,
                     color: PrivetTheme.signal),
                 const SizedBox(width: 6),
                 Expanded(
@@ -1346,7 +1346,7 @@ class _DownloadChip extends StatelessWidget {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(
+                    Icon(
                       Icons.download_rounded,
                       size: 15,
                       color: PrivetTheme.signal,
@@ -1396,7 +1396,7 @@ class _ReactionChip extends StatelessWidget {
             height: 32,
             child: Center(
               child: isPlus
-                  ? const Icon(
+                  ? Icon(
                       Icons.add_rounded,
                       size: 20,
                       color: PrivetTheme.mist,
@@ -1529,7 +1529,7 @@ class _ReplyQuote extends StatelessWidget {
       decoration: BoxDecoration(
         color: PrivetTheme.ink.withValues(alpha: 0.35),
         borderRadius: BorderRadius.circular(10),
-        border: const Border(
+        border: Border(
           left: BorderSide(color: PrivetTheme.signal, width: 3),
         ),
       ),

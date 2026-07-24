@@ -59,7 +59,7 @@ class UserNameBlock extends StatelessWidget {
             if (handleText.isNotEmpty)
               TextSpan(
                 text: '  $handleText',
-                style: const TextStyle(
+                style: TextStyle(
                   color: PrivetTheme.mist,
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
@@ -91,7 +91,7 @@ class UserNameBlock extends StatelessWidget {
             handleText,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
+            style: TextStyle(
               color: PrivetTheme.signal,
               fontSize: 12,
               fontWeight: FontWeight.w600,

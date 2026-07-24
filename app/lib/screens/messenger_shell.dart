@@ -68,7 +68,7 @@ class _MessengerShellState extends State<MessengerShell> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
+              Text(
                 'Save these credentials to sign in again:',
                 style: TextStyle(color: PrivetTheme.mist),
               ),
@@ -84,7 +84,7 @@ class _MessengerShellState extends State<MessengerShell> {
               ),
               if (link != null) ...[
                 const SizedBox(height: 18),
-                const Text(
+                Text(
                   'Invite a friend — they join in one tap and land in a chat with you:',
                   style: TextStyle(color: PrivetTheme.mist),
                 ),
@@ -256,7 +256,7 @@ class InboxPane extends StatelessWidget {
                                           color: PrivetTheme.line,
                                         ),
                                       ),
-                                      child: const Icon(
+                                      child: Icon(
                                         Icons.settings_rounded,
                                         size: 11,
                                         color: PrivetTheme.mist,
@@ -303,7 +303,7 @@ class InboxPane extends StatelessWidget {
                     : 'Signed in as ${state.user!.displayName} · @${state.user!.handle}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: PrivetTheme.mist, fontSize: 13),
+                style: TextStyle(color: PrivetTheme.mist, fontSize: 13),
               ),
             ),
             const SizedBox(height: 12),
@@ -375,7 +375,7 @@ class InboxPane extends StatelessWidget {
                                         ),
                                       ),
                                       if (c.muted)
-                                        const Padding(
+                                        Padding(
                                           padding: EdgeInsets.only(right: 4),
                                           child: Icon(
                                             Icons.notifications_off_outlined,
@@ -384,7 +384,7 @@ class InboxPane extends StatelessWidget {
                                           ),
                                         ),
                                       if (c.isGroup)
-                                        const Icon(
+                                        Icon(
                                           Icons.groups_rounded,
                                           size: 16,
                                           color: PrivetTheme.mist,
@@ -396,7 +396,7 @@ class InboxPane extends StatelessWidget {
                                       c.peer!.handle.isNotEmpty)
                                     Text(
                                       '@${c.peer!.handle}',
-                                      style: const TextStyle(
+                                      style: TextStyle(
                                         color: PrivetTheme.signal,
                                         fontSize: 12,
                                         fontWeight: FontWeight.w600,
@@ -454,7 +454,7 @@ class InboxPane extends StatelessWidget {
                                   Text(
                                     DateFormat.Hm()
                                         .format(c.lastMessage!.createdAt),
-                                    style: const TextStyle(
+                                    style: TextStyle(
                                       color: PrivetTheme.mist,
                                       fontSize: 11,
                                     ),
@@ -489,8 +489,8 @@ class InboxPane extends StatelessWidget {
                                       c.unreadCount > 99
                                           ? '99+'
                                           : '${c.unreadCount}',
-                                      style: const TextStyle(
-                                        color: PrivetTheme.ink,
+                                      style: TextStyle(
+                                        color: PrivetTheme.onAccent,
                                         fontSize: 11,
                                         fontWeight: FontWeight.w700,
                                       ),
@@ -624,7 +624,7 @@ class InboxPane extends StatelessWidget {
             height: 44,
             child: Row(
               children: [
-                const Icon(
+                Icon(
                   Icons.delete_outline_rounded,
                   size: 20,
                   color: PrivetTheme.danger,
@@ -632,7 +632,7 @@ class InboxPane extends StatelessWidget {
                 const SizedBox(width: 12),
                 Text(
                   deleteLabel,
-                  style: const TextStyle(color: PrivetTheme.danger),
+                  style: TextStyle(color: PrivetTheme.danger),
                 ),
               ],
             ),
@@ -763,7 +763,7 @@ class InboxPane extends StatelessWidget {
           ),
           content: Text(
             confirmBody,
-            style: const TextStyle(color: PrivetTheme.mist),
+            style: TextStyle(color: PrivetTheme.mist),
           ),
           actions: [
             TextButton(
@@ -892,7 +892,7 @@ class InboxPane extends StatelessWidget {
                 label: const Text('Copy message with link'),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: PrivetTheme.paper,
-                  side: const BorderSide(color: PrivetTheme.line),
+                  side: BorderSide(color: PrivetTheme.line),
                 ),
               ),
             ],
@@ -1077,7 +1077,7 @@ class InboxPane extends StatelessWidget {
                       leading: CircleAvatar(
                         backgroundColor:
                             PrivetTheme.signal.withValues(alpha: 0.15),
-                        child: const Icon(
+                        child: Icon(
                           Icons.ios_share_rounded,
                           color: PrivetTheme.signal,
                         ),
@@ -1089,7 +1089,7 @@ class InboxPane extends StatelessWidget {
                         _showInvite(context);
                       },
                     ),
-                  if (!filtering) const Divider(color: PrivetTheme.line),
+                  if (!filtering) Divider(color: PrivetTheme.line),
                   if (filtering && lookingUp)
                     const Padding(
                       padding: EdgeInsets.all(24),
@@ -1136,7 +1136,7 @@ class InboxPane extends StatelessWidget {
                       ),
                     ),
                   if (!filtering && state.blocked.isNotEmpty) ...[
-                    const Divider(color: PrivetTheme.line),
+                    Divider(color: PrivetTheme.line),
                     Padding(
                       padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
                       child: Text(
@@ -1251,7 +1251,7 @@ class InboxPane extends StatelessWidget {
                         Text(
                           '@${me.handle}',
                           textAlign: TextAlign.center,
-                          style: const TextStyle(color: PrivetTheme.mist),
+                          style: TextStyle(color: PrivetTheme.mist),
                         ),
                         const SizedBox(height: 16),
                         TextField(
@@ -1356,7 +1356,7 @@ class InboxPane extends StatelessWidget {
                                 ],
                               ),
                               const SizedBox(height: 10),
-                              const Text(
+                              Text(
                                 'Add one or more AIs, then toggle which one is active.\n\n'
                                 '• Gemini: API key (AIza…) + model\n'
                                 '• OpenAI-compatible: API key + base URL + model '
@@ -1375,7 +1375,7 @@ class InboxPane extends StatelessWidget {
                         ),
                         const SizedBox(height: 8),
                         if (state.aiProfiles.isEmpty)
-                          const Padding(
+                          Padding(
                             padding: EdgeInsets.symmetric(vertical: 8),
                             child: Text(
                               'No AIs yet — tap Add AI.',
@@ -1409,7 +1409,7 @@ class InboxPane extends StatelessWidget {
                                       if (p.baseUrl.trim().isNotEmpty)
                                         p.baseUrl.trim(),
                                     ].join(' · '),
-                                    style: const TextStyle(
+                                    style: TextStyle(
                                       color: PrivetTheme.mist,
                                       fontSize: 12,
                                     ),
@@ -1468,13 +1468,13 @@ class InboxPane extends StatelessWidget {
                             state.aiProfiles.isEmpty
                                 ? 'Add an AI first'
                                 : 'Active: ${state.aiModelLabel.isEmpty ? '—' : state.aiModelLabel}',
-                            style: const TextStyle(
+                            style: TextStyle(
                               color: PrivetTheme.mist,
                               fontSize: 12,
                             ),
                           ),
                           value: enabled,
-                          activeThumbColor: PrivetTheme.ink,
+                          activeThumbColor: PrivetTheme.onAccent,
                           activeTrackColor: PrivetTheme.signal,
                           onChanged: (v) {
                             if (v && !(state.activeAiProfile?.isReady ?? false)) {
@@ -1491,7 +1491,7 @@ class InboxPane extends StatelessWidget {
                           },
                         ),
                         const SizedBox(height: 16),
-                        const Divider(color: PrivetTheme.line, height: 1),
+                        Divider(color: PrivetTheme.line, height: 1),
                         const SizedBox(height: 12),
                         Text(
                           'Notifications',
@@ -1503,7 +1503,7 @@ class InboxPane extends StatelessWidget {
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
                           title: const Text('Message sound'),
-                          subtitle: const Text(
+                          subtitle: Text(
                             'Play a sound on new messages',
                             style: TextStyle(
                               color: PrivetTheme.mist,
@@ -1511,14 +1511,14 @@ class InboxPane extends StatelessWidget {
                             ),
                           ),
                           value: state.soundEnabled,
-                          activeThumbColor: PrivetTheme.ink,
+                          activeThumbColor: PrivetTheme.onAccent,
                           activeTrackColor: PrivetTheme.signal,
                           onChanged: (v) => state.setSoundEnabled(v),
                         ),
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
                           title: const Text('Notification pop-ups'),
-                          subtitle: const Text(
+                          subtitle: Text(
                             'Show a toast when a message arrives',
                             style: TextStyle(
                               color: PrivetTheme.mist,
@@ -1526,9 +1526,44 @@ class InboxPane extends StatelessWidget {
                             ),
                           ),
                           value: state.notificationsEnabled,
-                          activeThumbColor: PrivetTheme.ink,
+                          activeThumbColor: PrivetTheme.onAccent,
                           activeTrackColor: PrivetTheme.signal,
                           onChanged: (v) => state.setNotificationsEnabled(v),
+                        ),
+                        const SizedBox(height: 16),
+                        Divider(color: PrivetTheme.line, height: 1),
+                        const SizedBox(height: 12),
+                        Text(
+                          'Appearance',
+                          style: GoogleFonts.syne(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        _ThemeModeSelector(
+                          mode: state.themeMode,
+                          onChanged: (m) {
+                            state.setThemeMode(m);
+                            setSheet(() {});
+                          },
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Accent color',
+                          style: TextStyle(
+                            color: PrivetTheme.mist,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        _AccentPicker(
+                          selected: state.accent,
+                          onPick: (c) {
+                            state.setAccent(c);
+                            setSheet(() {});
+                          },
                         ),
                         const SizedBox(height: 12),
                         SizedBox(
@@ -1930,7 +1965,7 @@ class _SearchSheetState extends State<_SearchSheet> {
                   fillColor: PrivetTheme.panelElevated,
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: PrivetTheme.line),
+                    borderSide: BorderSide(color: PrivetTheme.line),
                   ),
                 ),
                 onChanged: _onQueryChanged,
@@ -1941,7 +1976,7 @@ class _SearchSheetState extends State<_SearchSheet> {
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Text(
                   _error!,
-                  style: const TextStyle(color: PrivetTheme.danger),
+                  style: TextStyle(color: PrivetTheme.danger),
                 ),
               ),
             Expanded(
@@ -1979,7 +2014,7 @@ class _SearchSheetState extends State<_SearchSheet> {
                   if (!_busy &&
                       _controller.text.trim().isNotEmpty &&
                       _results.chats.isEmpty)
-                    const Padding(
+                    Padding(
                       padding: EdgeInsets.all(24),
                       child: Text(
                         'No chats found',
@@ -2342,7 +2377,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                 : '${chat!.memberCount} members',
             overflow: TextOverflow.ellipsis,
             maxLines: 1,
-            style: const TextStyle(color: PrivetTheme.mist, fontSize: 12),
+            style: TextStyle(color: PrivetTheme.mist, fontSize: 12),
           ),
         ],
       );
@@ -2448,7 +2483,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                     _mediaPerms.canStartScreen
                         ? 'Capture display — no camera needed'
                         : 'Not supported in this browser',
-                    style: const TextStyle(color: PrivetTheme.mist, fontSize: 12),
+                    style: TextStyle(color: PrivetTheme.mist, fontSize: 12),
                   ),
                   enabled: _mediaPerms.canStartScreen,
                   onTap: () {
@@ -2457,7 +2492,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                   },
                 ),
                 ListTile(
-                  leading: const Icon(
+                  leading: Icon(
                     Icons.folder_outlined,
                     color: PrivetTheme.signal,
                   ),
@@ -2483,7 +2518,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                           ? 'All done'
                           : '${board.doneCount}/${board.total} done';
                     }(),
-                    style: const TextStyle(color: PrivetTheme.mist, fontSize: 12),
+                    style: TextStyle(color: PrivetTheme.mist, fontSize: 12),
                   ),
                   onTap: () {
                     Navigator.pop(ctx);
@@ -2501,11 +2536,11 @@ class _ConversationPaneState extends State<ConversationPane> {
                   ),
                 if (chat != null && chat.isOwnedBy(state.user?.id))
                   ListTile(
-                    leading: const Icon(
+                    leading: Icon(
                       Icons.delete_outline_rounded,
                       color: PrivetTheme.danger,
                     ),
-                    title: const Text(
+                    title: Text(
                       'Delete group',
                       style: TextStyle(color: PrivetTheme.danger),
                     ),
@@ -2603,7 +2638,7 @@ class _ConversationPaneState extends State<ConversationPane> {
         IconButton(
           tooltip: 'Delete group',
           onPressed: _deleteGroup,
-          icon: const Icon(
+          icon: Icon(
             Icons.delete_outline_rounded,
             color: PrivetTheme.danger,
           ),
@@ -2931,7 +2966,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                 compact ? 2 : 8,
                 compact ? 4 : 8,
               ),
-              decoration: const BoxDecoration(
+              decoration: BoxDecoration(
                 border: Border(bottom: BorderSide(color: PrivetTheme.line)),
               ),
               child: compact
@@ -2971,7 +3006,7 @@ class _ConversationPaneState extends State<ConversationPane> {
           if (_searchOpen)
             Container(
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-              decoration: const BoxDecoration(
+              decoration: BoxDecoration(
                 border: Border(bottom: BorderSide(color: PrivetTheme.line)),
               ),
               child: compact
@@ -3013,7 +3048,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                             border: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(10),
                               borderSide:
-                                  const BorderSide(color: PrivetTheme.line),
+                                  BorderSide(color: PrivetTheme.line),
                             ),
                             contentPadding: const EdgeInsets.symmetric(
                               horizontal: 8,
@@ -3103,7 +3138,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(10),
                                 borderSide:
-                                    const BorderSide(color: PrivetTheme.line),
+                                    BorderSide(color: PrivetTheme.line),
                               ),
                               contentPadding: const EdgeInsets.symmetric(
                                 horizontal: 8,
@@ -3310,14 +3345,14 @@ class _ConversationPaneState extends State<ConversationPane> {
                           ignoring: !_showJumpToBottom,
                           child: Material(
                             color: PrivetTheme.panelElevated,
-                            shape: const CircleBorder(
+                            shape: CircleBorder(
                               side: BorderSide(color: PrivetTheme.line),
                             ),
                             elevation: 3,
                             child: InkWell(
                               customBorder: const CircleBorder(),
                               onTap: _scrollToEnd,
-                              child: const SizedBox(
+                              child: SizedBox(
                                 width: 44,
                                 height: 44,
                                 child: Icon(
@@ -3335,7 +3370,7 @@ class _ConversationPaneState extends State<ConversationPane> {
               ),
             ),
             if (state.uploading)
-              const LinearProgressIndicator(
+              LinearProgressIndicator(
                 minHeight: 2,
                 color: PrivetTheme.signal,
                 backgroundColor: PrivetTheme.line,
@@ -3345,7 +3380,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                 width: double.infinity,
                 color: PrivetTheme.danger.withValues(alpha: 0.15),
                 padding: const EdgeInsets.symmetric(vertical: 8),
-                child: const Text(
+                child: Text(
                   'Recording… tap mic again to send',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: PrivetTheme.danger),
@@ -3478,7 +3513,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                                         : Icons.arrow_upward_rounded,
                                     color: _recording
                                         ? PrivetTheme.danger
-                                        : PrivetTheme.ink,
+                                        : PrivetTheme.onAccent,
                                   ),
                                 ),
                               ),
@@ -3596,12 +3631,12 @@ class _ConversationPaneState extends State<ConversationPane> {
                             child: InkWell(
                               onTap: _send,
                               borderRadius: BorderRadius.circular(14),
-                              child: const SizedBox(
+                              child: SizedBox(
                                 width: 48,
                                 height: 48,
                                 child: Icon(
                                   Icons.arrow_upward_rounded,
-                                  color: PrivetTheme.ink,
+                                  color: PrivetTheme.onAccent,
                                 ),
                               ),
                             ),
@@ -3680,7 +3715,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                   preview,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
+                  style: TextStyle(
                     color: PrivetTheme.mist,
                     fontSize: 12,
                   ),
@@ -3866,7 +3901,7 @@ class _ConversationPaneState extends State<ConversationPane> {
         ScaffoldMessenger.of(context)
           ..hideCurrentSnackBar()
           ..showSnackBar(
-            const SnackBar(
+            SnackBar(
               content: Text(
                 'Camera is busy (maybe open in another app or browser tab) — starting with audio. Tap the camera button in the call to retry.',
               ),
@@ -3977,7 +4012,7 @@ class _ConversationPaneState extends State<ConversationPane> {
         ),
         content: Text(
           '“${chat.title}” will be deleted for everyone. This cannot be undone.',
-          style: const TextStyle(color: PrivetTheme.mist),
+          style: TextStyle(color: PrivetTheme.mist),
         ),
         actions: [
           TextButton(
@@ -4108,7 +4143,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                       ],
                     ),
                   ),
-                  const Divider(height: 1, color: PrivetTheme.line),
+                  Divider(height: 1, color: PrivetTheme.line),
                   Expanded(
                     child: ListView.builder(
                       itemCount: members.length,
@@ -4129,7 +4164,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                             titleSize: 15,
                           ),
                           subtitle: memberIsOwner
-                              ? const Text(
+                              ? Text(
                                   'Owner',
                                   style: TextStyle(
                                     color: PrivetTheme.mist,
@@ -4201,7 +4236,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                     ),
                   ),
                   if (isOwner) ...[
-                    const Divider(height: 1, color: PrivetTheme.line),
+                    Divider(height: 1, color: PrivetTheme.line),
                     Padding(
                       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
                       child: SizedBox(
@@ -4224,7 +4259,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                                 ),
                                 content: Text(
                                   '“${chat.title}” will be deleted for everyone. This cannot be undone.',
-                                  style: const TextStyle(color: PrivetTheme.mist),
+                                  style: TextStyle(color: PrivetTheme.mist),
                                 ),
                                 actions: [
                                   TextButton(
@@ -4366,7 +4401,7 @@ class _ConversationPaneState extends State<ConversationPane> {
             children: [
               Text(
                 'About message from $who',
-                style: const TextStyle(
+                style: TextStyle(
                   color: PrivetTheme.mist,
                   fontSize: 13,
                 ),
@@ -4784,7 +4819,7 @@ class _ConversationPaneState extends State<ConversationPane> {
           'Delete message?',
           style: GoogleFonts.syne(fontWeight: FontWeight.w700),
         ),
-        content: const Text(
+        content: Text(
           'This removes the message for everyone in the chat.',
           style: TextStyle(color: PrivetTheme.mist),
         ),
@@ -4896,7 +4931,7 @@ class _CallActionButton extends StatelessWidget {
       message: tooltip,
       waitDuration: const Duration(milliseconds: 280),
       textStyle: caution
-          ? const TextStyle(
+          ? TextStyle(
               color: PrivetTheme.danger,
               fontSize: 12,
               fontWeight: FontWeight.w600,
@@ -4976,6 +5011,128 @@ class _ComposerMenuItem extends StatelessWidget {
             fontWeight: FontWeight.w400,
             color: Color(0xFFF2F2F2),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Segmented System / Light / Dark selector for the Appearance settings.
+class _ThemeModeSelector extends StatelessWidget {
+  const _ThemeModeSelector({required this.mode, required this.onChanged});
+
+  final ThemeMode mode;
+  final ValueChanged<ThemeMode> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    const items = <(ThemeMode, IconData, String)>[
+      (ThemeMode.system, Icons.brightness_auto_rounded, 'System'),
+      (ThemeMode.light, Icons.light_mode_rounded, 'Light'),
+      (ThemeMode.dark, Icons.dark_mode_rounded, 'Dark'),
+    ];
+    return Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: PrivetTheme.panelElevated,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: PrivetTheme.line),
+      ),
+      child: Row(
+        children: [
+          for (final item in items)
+            Expanded(
+              child: _segment(
+                selected: mode == item.$1,
+                icon: item.$2,
+                label: item.$3,
+                onTap: () => onChanged(item.$1),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _segment({
+    required bool selected,
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        decoration: BoxDecoration(
+          color: selected ? PrivetTheme.signal : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              icon,
+              size: 16,
+              color: selected ? PrivetTheme.onAccent : PrivetTheme.mist,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: selected ? PrivetTheme.onAccent : PrivetTheme.mist,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Row of accent swatches acting as a color picker for the app accent.
+class _AccentPicker extends StatelessWidget {
+  const _AccentPicker({required this.selected, required this.onPick});
+
+  final Color selected;
+  final ValueChanged<Color> onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 12,
+      runSpacing: 12,
+      children: [
+        for (final option in PrivetTheme.accentOptions)
+          _swatch(option.seed, option.label),
+      ],
+    );
+  }
+
+  Widget _swatch(Color seed, String label) {
+    final isSelected = seed.toARGB32() == selected.toARGB32();
+    return Tooltip(
+      message: label,
+      child: GestureDetector(
+        onTap: () => onPick(seed),
+        child: Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: seed,
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: isSelected ? PrivetTheme.paper : PrivetTheme.line,
+              width: isSelected ? 2.5 : 1,
+            ),
+          ),
+          child: isSelected
+              ? Icon(Icons.check_rounded, size: 18, color: PrivetTheme.onAccent)
+              : null,
         ),
       ),
     );

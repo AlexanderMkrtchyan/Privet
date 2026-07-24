@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:ui' show Offset, Size;
+import 'dart:ui' show Color, Offset, Size;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart' show ThemeMode;
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -1148,6 +1149,12 @@ class PrivetState extends ChangeNotifier {
   /// Show OS/browser notification toasts on incoming messages (device-local).
   bool notificationsEnabled = true;
 
+  /// App appearance mode (device-local). Applied by the root [MaterialApp].
+  ThemeMode themeMode = ThemeMode.dark;
+
+  /// Chosen accent seed (device-local). Derived per light/dark in PrivetTheme.
+  Color accent = const Color(0xFFB6F24A);
+
   /// Where # AI commands are allowed once enabled (legacy prefs; sharing is # vs #me).
   AiUsageScope aiScope = AiUsageScope.onlyMe;
 
@@ -1315,6 +1322,9 @@ class PrivetState extends ChangeNotifier {
     soundEnabled = prefs.getBool('privet_sound_enabled') ?? true;
     notificationsEnabled =
         prefs.getBool('privet_notifications_enabled') ?? true;
+    themeMode = _themeModeFromStorage(prefs.getString('privet_theme_mode'));
+    final accentValue = prefs.getInt('privet_accent');
+    if (accentValue != null) accent = Color(accentValue);
     aiScope = AiUsageScopeX.fromStorage(prefs.getString('privet_ai_scope'));
     if (aiEnabled && !aiActive) {
       aiEnabled = false;
@@ -1358,6 +1368,33 @@ class PrivetState extends ChangeNotifier {
     if (value) unawaited(ensureNotificationPermission());
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('privet_notifications_enabled', value);
+  }
+
+  Future<void> setThemeMode(ThemeMode value) async {
+    themeMode = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('privet_theme_mode', value.name);
+  }
+
+  Future<void> setAccent(Color value) async {
+    accent = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('privet_accent', value.toARGB32());
+  }
+
+  static ThemeMode _themeModeFromStorage(String? raw) {
+    switch (raw) {
+      case 'light':
+        return ThemeMode.light;
+      case 'system':
+        return ThemeMode.system;
+      case 'dark':
+        return ThemeMode.dark;
+      default:
+        return ThemeMode.dark;
+    }
   }
 
   void _readInviteFromUrl() {

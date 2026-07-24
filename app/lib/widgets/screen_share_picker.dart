@@ -42,7 +42,7 @@ Future<MediaStream?> showScreenSharePicker(BuildContext context) {
                         color: PrivetTheme.signal.withValues(alpha: 0.18),
                         borderRadius: BorderRadius.circular(12),
                       ),
-                      child: const Icon(
+                      child: Icon(
                         Icons.screen_share_rounded,
                         size: 22,
                         color: PrivetTheme.signal,
@@ -209,7 +209,7 @@ class _FirefoxTabOptionState extends State<_FirefoxTabOption> {
                         color: PrivetTheme.panelElevated,
                         borderRadius: BorderRadius.circular(12),
                       ),
-                      child: const Icon(
+                      child: Icon(
                         Icons.tab_rounded,
                         size: 24,
                         color: PrivetTheme.paper,
@@ -288,19 +288,19 @@ class _FirefoxTabOptionState extends State<_FirefoxTabOption> {
                   onPressed: _busy ? null : _shareWindow,
                   style: FilledButton.styleFrom(
                     backgroundColor: PrivetTheme.signal,
-                    foregroundColor: PrivetTheme.ink,
+                    foregroundColor: PrivetTheme.onAccent,
                     padding: const EdgeInsets.symmetric(
                       horizontal: 14,
                       vertical: 12,
                     ),
                   ),
                   icon: _busy
-                      ? const SizedBox(
+                      ? SizedBox(
                           width: 18,
                           height: 18,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            color: PrivetTheme.ink,
+                            color: PrivetTheme.onAccent,
                           ),
                         )
                       : const Icon(Icons.web_asset_rounded, size: 20),
@@ -419,7 +419,7 @@ class _ShareOptionState extends State<_ShareOption> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: _busy
-                          ? const Padding(
+                          ? Padding(
                               padding: EdgeInsets.all(12),
                               child: CircularProgressIndicator(
                                 strokeWidth: 2,

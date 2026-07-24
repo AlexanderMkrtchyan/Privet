@@ -26,7 +26,7 @@ class CompactEmojiPicker extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (showDivider) const Divider(height: 1, color: PrivetTheme.line),
+          if (showDivider) Divider(height: 1, color: PrivetTheme.line),
           SizedBox(
             height: height,
             child: EmojiPicker(
@@ -44,7 +44,7 @@ class CompactEmojiPicker extends StatelessWidget {
                   middle: EmojiPickerItem.emojiView,
                   bottom: EmojiPickerItem.searchBar,
                 ),
-                emojiViewConfig: const EmojiViewConfig(
+                emojiViewConfig: EmojiViewConfig(
                   columns: 10,
                   emojiSizeMax: 32,
                   verticalSpacing: 0,
@@ -58,7 +58,7 @@ class CompactEmojiPicker extends StatelessWidget {
                   ),
                   buttonMode: ButtonMode.MATERIAL,
                 ),
-                categoryViewConfig: const CategoryViewConfig(
+                categoryViewConfig: CategoryViewConfig(
                   backgroundColor: PrivetTheme.panel,
                   indicatorColor: PrivetTheme.signal,
                   iconColorSelected: PrivetTheme.signal,
@@ -66,19 +66,19 @@ class CompactEmojiPicker extends StatelessWidget {
                   dividerColor: PrivetTheme.line,
                   recentTabBehavior: RecentTabBehavior.RECENT,
                 ),
-                bottomActionBarConfig: const BottomActionBarConfig(
+                bottomActionBarConfig: BottomActionBarConfig(
                   backgroundColor: PrivetTheme.panelElevated,
                   buttonColor: PrivetTheme.panelElevated,
                   buttonIconColor: PrivetTheme.mist,
                   showBackspaceButton: true,
                 ),
-                searchViewConfig: const SearchViewConfig(
+                searchViewConfig: SearchViewConfig(
                   backgroundColor: PrivetTheme.panelElevated,
                   buttonIconColor: PrivetTheme.mist,
                   hintText: 'Search emoji',
                   hintTextStyle: TextStyle(color: PrivetTheme.mist),
                 ),
-                skinToneConfig: const SkinToneConfig(
+                skinToneConfig: SkinToneConfig(
                   enabled: true,
                   indicatorColor: PrivetTheme.signal,
                 ),

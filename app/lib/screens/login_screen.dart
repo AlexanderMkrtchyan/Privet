@@ -157,7 +157,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           ),
                           child: Row(
                             children: [
-                              const Icon(
+                              Icon(
                                 Icons.mail_outline_rounded,
                                 color: PrivetTheme.signal,
                               ),
@@ -184,12 +184,12 @@ class _LoginScreenState extends State<LoginScreen> {
                       ElevatedButton.icon(
                         onPressed: state.busy ? null : _quickJoin,
                         icon: state.busy
-                            ? const SizedBox(
+                            ? SizedBox(
                                 width: 18,
                                 height: 18,
                                 child: CircularProgressIndicator(
                                   strokeWidth: 2,
-                                  color: PrivetTheme.ink,
+                                  color: PrivetTheme.onAccent,
                                 ),
                               )
                             : Icon(
@@ -228,7 +228,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         padding: const EdgeInsets.symmetric(vertical: 22),
                         child: Row(
                           children: [
-                            const Expanded(child: Divider(color: PrivetTheme.line)),
+                            Expanded(child: Divider(color: PrivetTheme.line)),
                             Padding(
                               padding: const EdgeInsets.symmetric(horizontal: 12),
                               child: Text(
@@ -239,7 +239,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                 ),
                               ),
                             ),
-                            const Expanded(child: Divider(color: PrivetTheme.line)),
+                            Expanded(child: Divider(color: PrivetTheme.line)),
                           ],
                         ),
                       ),
@@ -259,7 +259,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         style: ButtonStyle(
                           foregroundColor: WidgetStateProperty.resolveWith((states) {
                             if (states.contains(WidgetState.selected)) {
-                              return PrivetTheme.ink;
+                              return PrivetTheme.onAccent;
                             }
                             return PrivetTheme.paper;
                           }),
@@ -363,7 +363,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         const SizedBox(height: 12),
                         Text(
                           state.error!,
-                          style: const TextStyle(color: PrivetTheme.danger),
+                          style: TextStyle(color: PrivetTheme.danger),
                         ),
                       ],
                       const SizedBox(height: 20),

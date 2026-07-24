@@ -245,7 +245,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> {
       children: [
         Container(
           padding: const EdgeInsets.fromLTRB(4, 4, 12, 8),
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             border: Border(bottom: BorderSide(color: PrivetTheme.line)),
           ),
           child: Row(
@@ -351,7 +351,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> {
         ),
         Container(
           padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             border: Border(top: BorderSide(color: PrivetTheme.line)),
             color: PrivetTheme.panelElevated,
           ),

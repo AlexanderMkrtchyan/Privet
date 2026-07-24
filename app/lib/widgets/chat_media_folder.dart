@@ -139,7 +139,7 @@ class _FolderTabBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.fromLTRB(8, 4, 4, 4),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: PrivetTheme.line)),
       ),
       child: Row(
@@ -248,7 +248,7 @@ class _PhotosGrid extends StatelessWidget {
                 Image.network(
                   url,
                   fit: BoxFit.cover,
-                  errorBuilder: (context, error, stackTrace) => const Center(
+                  errorBuilder: (context, error, stackTrace) => Center(
                     child: Icon(
                       Icons.broken_image_outlined,
                       color: PrivetTheme.mist,
@@ -276,7 +276,7 @@ class _PhotosGrid extends StatelessWidget {
                         DateFormat.MMMd().add_jm().format(entry.createdAt.toLocal()),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 10,
                           color: PrivetTheme.paper,
                         ),
@@ -332,7 +332,7 @@ class _PhotosGrid extends StatelessWidget {
                       Expanded(
                         child: Text(
                           '${entry.senderName} · ${DateFormat.yMMMd().add_jm().format(entry.createdAt.toLocal())}',
-                          style: const TextStyle(
+                          style: TextStyle(
                             color: PrivetTheme.mist,
                             fontSize: 12,
                           ),
@@ -370,7 +370,7 @@ class _FilesList extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 8),
       itemCount: items.length,
       separatorBuilder: (context, index) =>
-          const Divider(height: 1, color: PrivetTheme.line),
+          Divider(height: 1, color: PrivetTheme.line),
       itemBuilder: (context, i) {
         final entry = items[i];
         final item = entry.attachment;
@@ -417,13 +417,13 @@ class _FilesList extends StatelessWidget {
             meta,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: PrivetTheme.mist, fontSize: 12),
+            style: TextStyle(color: PrivetTheme.mist, fontSize: 12),
           ),
           trailing: IconButton(
             tooltip: 'Download',
             onPressed: () =>
                 downloadMedia(url, filename: _downloadName(item)),
-            icon: const Icon(Icons.download_rounded, color: PrivetTheme.signal),
+            icon: Icon(Icons.download_rounded, color: PrivetTheme.signal),
           ),
           onTap: item.kind == 'video'
               ? () => _openVideo(context, url, name)
