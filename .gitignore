@@ -1,0 +1,40 @@
+# Cursor / local IDE
+.cursor/
+.claude/
+
+# Secrets and local data
+server/data/
+server/node_modules/
+server/.env
+*.sqlite
+*.sqlite-*
+.DS_Store
+
+# Flutter / Dart
+app/.dart_tool/
+app/build/
+app/.flutter-plugins-dependencies
+app/.packages
+app/.pub-cache/
+app/.pub/
+**/ephemeral/
+
+# Desktop release outputs (built artifacts)
+server/public/downloads/*.tar.gz
+server/public/downloads/*.deb
+server/public/downloads/*.exe
+server/public/downloads/*.msi
+server/public/BUILD_STAMP.txt
+dist/
+packaging/out/
+
+# OS / editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+
+# Go local toolchain (if installed under repo)
+.local/

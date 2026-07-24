@@ -1,0 +1,195 @@
+# Build and publish desktop release artifacts on tag push (v*).
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to publish (e.g. v0.1.0). Leave empty to use pubspec only for artifact names."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  FLUTTER_VERSION: "3.44.7"
+
+jobs:
+  linux:
+    name: Build Linux
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev \
+            libstdc++-12-dev \
+            python3-pil fakeroot dpkg-dev rsync
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get + analyze
+        working-directory: app
+        run: |
+          flutter config --enable-linux-desktop
+          flutter pub get
+          flutter analyze --no-fatal-infos || true
+          flutter test || true
+
+      - name: Build Linux packages
+        env:
+          PRIVET_BUILD: ${{ github.ref_name }}-${{ github.run_number }}
+          PRIVET_INSTALL_DIR: ${{ runner.temp }}/privet-install
+        run: |
+          chmod +x scripts/build-linux.sh
+          # Skip local menu install noise on CI — still builds tarball + deb
+          ./scripts/build-linux.sh
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            server/public/downloads/privet-linux-x64.tar.gz
+            server/public/downloads/privet-linux-amd64.deb
+            server/public/downloads/privet_*_amd64.deb
+          if-no-files-found: error
+
+  windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        working-directory: app
+        run: |
+          flutter config --enable-windows-desktop
+          flutter pub get
+
+      - name: Build Windows release
+        working-directory: app
+        shell: bash
+        env:
+          PRIVET_BUILD: ${{ github.ref_name }}-${{ github.run_number }}
+        run: |
+          flutter build windows --release --dart-define=PRIVET_BUILD="$PRIVET_BUILD"
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /? | Select-Object -First 3
+
+      - name: Read version from pubspec
+        id: ver
+        shell: bash
+        run: |
+          VER=$(python - <<'PY'
+          from pathlib import Path
+          for line in Path("app/pubspec.yaml").read_text().splitlines():
+              if line.startswith("version:"):
+                  print(line.split(":",1)[1].strip().split("+",1)[0])
+                  break
+          PY
+          )
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path server/public/downloads | Out-Null
+          $release = "app/build/windows/x64/runner/Release"
+          if ((Test-Path "$release/Privet.exe") -and -not (Test-Path "$release/privet.exe")) {
+            Copy-Item "$release/Privet.exe" "$release/privet.exe" -Force
+          }
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC not found at $iscc" }
+          $root = (Get-Location).Path
+          & $iscc `
+            "/DMyAppVersion=${{ steps.ver.outputs.version }}" `
+            "/DSourceDir=$root\$($release -replace '/','\')" `
+            "/DOutputDir=$root\server\public\downloads" `
+            "/DMyAppIcon=$root\app\windows\runner\resources\app_icon.ico" `
+            "$root\packaging\windows\privet.iss"
+          Copy-Item "server/public/downloads/Privet-Setup-${{ steps.ver.outputs.version }}.exe" `
+            "server/public/downloads/Privet-Setup.exe" -Force
+          Get-ChildItem server/public/downloads | Format-Table Name, Length
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            server/public/downloads/Privet-Setup.exe
+            server/public/downloads/Privet-Setup-*.exe
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-packages
+          path: dist
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          ls -lah
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## Privet desktop release
+
+            - **Linux:** `.deb` (Ubuntu/Debian) and `.tar.gz`
+            - **Windows:** native Flutter installer (`Privet-Setup.exe`) — unsigned; SmartScreen may warn (More info → Run anyway)
+
+            Default API: `https://messanger.banderdog.com`
+
+            ### Install
+            - Ubuntu: `sudo apt install ./privet-linux-amd64.deb`
+            - Windows: run `Privet-Setup.exe`
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

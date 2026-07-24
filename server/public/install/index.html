@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Privet — Install</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #0e1114;
+      --panel: #161b20;
+      --line: #2a333c;
+      --mist: #9aa7b2;
+      --paper: #e8eef2;
+      --signal: #b6f24a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "IBM Plex Sans", system-ui, sans-serif;
+      color: var(--paper);
+      background:
+        radial-gradient(900px 500px at 90% -10%, rgba(182, 242, 74, 0.12), transparent 55%),
+        linear-gradient(160deg, #0e1114, #12181c 45%, #182018);
+    }
+    main { max-width: 820px; margin: 0 auto; padding: 48px 24px 80px; }
+    .brand {
+      font-family: Syne, sans-serif;
+      font-weight: 800;
+      font-size: clamp(42px, 8vw, 64px);
+      letter-spacing: 0.04em;
+      margin: 0;
+    }
+    .lede { color: var(--mist); font-size: 1.1rem; margin: 10px 0 32px; max-width: 36rem; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 36px; }
+    a.btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 18px; border-radius: 14px; text-decoration: none;
+      font-family: Syne, sans-serif; font-weight: 700;
+      border: 1px solid var(--line); color: var(--paper); background: var(--panel);
+      transition: border-color .15s, transform .15s;
+    }
+    a.btn:hover { border-color: var(--signal); transform: translateY(-1px); }
+    a.btn.primary { background: var(--signal); color: var(--ink); border-color: transparent; }
+    section { border-top: 1px solid var(--line); padding: 28px 0; }
+    h2 { font-family: Syne, sans-serif; font-size: 1.45rem; margin: 0 0 12px; }
+    ol { color: var(--mist); line-height: 1.55; padding-left: 1.2rem; }
+    li { margin: 8px 0; }
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #1c2329; border: 1px solid var(--line); border-radius: 10px;
+    }
+    code { padding: 2px 7px; color: var(--signal); }
+    pre { padding: 14px 16px; overflow: auto; color: var(--paper); line-height: 1.45; }
+    .note { color: var(--mist); font-size: 0.92rem; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="brand">PRIVET</p>
+    <p class="lede">Messenger for web, Linux, and Windows. Open the web app now, or install a native desktop client.</p>
+
+    <div class="row">
+      <a class="btn primary" href="/">Open web app</a>
+      <a class="btn" href="/downloads/Privet-Setup.exe">Download Windows installer</a>
+      <a class="btn" href="/downloads/privet-linux-amd64.deb">Download Linux (.deb)</a>
+      <a class="btn" href="/downloads/privet-linux-x64.tar.gz">Download Linux (.tar.gz)</a>
+    </div>
+
+    <section id="linux">
+      <h2>Linux install (Debian / Ubuntu)</h2>
+      <ol>
+        <li>Download <code>privet-linux-amd64.deb</code> (recommended) or the <code>.tar.gz</code>.</li>
+        <li>Install the package:
+          <pre>sudo apt install ./privet-linux-amd64.deb
+# or:
+sudo dpkg -i privet-linux-amd64.deb</pre>
+        </li>
+        <li>Launch from the app menu, or run <code>privet</code>.</li>
+        <li>Portable tarball alternative:
+          <pre>mkdir -p ~/Apps
+tar -xzf ~/Downloads/privet-linux-x64.tar.gz -C ~/Apps
+~/Apps/privet/privet</pre>
+        </li>
+      </ol>
+      <p class="note">Native GTK desktop app (not a browser). Connects to <code>https://messanger.banderdog.com</code>.</p>
+    </section>
+
+    <section id="windows">
+      <h2>Windows install</h2>
+      <ol>
+        <li>Download <code>Privet-Setup.exe</code>.</li>
+        <li>Double-click to install. If SmartScreen appears: <em>More info</em> → <em>Run anyway</em> (unsigned build).</li>
+        <li>Finish the installer and launch Privet from the Start menu.</li>
+      </ol>
+      <p class="note">Native Flutter Windows app (not a browser wrapper). Connects to <code>https://messanger.banderdog.com</code>.</p>
+    </section>
+
+    <section id="web">
+      <h2>Web (no install)</h2>
+      <p class="note">Open <a href="/" style="color:var(--signal)">the web app</a>. Demo logins: <code>alex / privet</code>, <code>mira / privet</code>, <code>jon / privet</code>.</p>
+    </section>
+  </main>
+</body>
+</html>

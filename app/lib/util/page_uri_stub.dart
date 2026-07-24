@@ -1,0 +1,1 @@
+Uri currentPageUri() => Uri.base;

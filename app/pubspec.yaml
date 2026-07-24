@@ -1,0 +1,40 @@
+name: privet
+description: Privet messenger — Android, Web, Windows, Linux
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  http: ^1.4.0
+  http_parser: ^4.1.2
+  web_socket_channel: ^3.0.3
+  google_fonts: ^6.2.1
+  shared_preferences: ^2.5.3
+  intl: ^0.20.2
+  uuid: ^4.5.1
+  file_picker: ^8.3.7
+  emoji_picker_flutter: ^4.3.0
+  flutter_webrtc: ^0.12.12
+  record: ^6.0.0
+  audioplayers: ^6.4.0
+  path: ^1.9.1
+  path_provider: ^2.1.5
+  url_launcher: ^6.3.1
+  video_player: ^2.9.5
+  animated_emoji: ^3.2.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  # Source for message tone (embedded as data URI in util/sounds_web.dart).
+  assets:
+    - assets/sounds/message-notification.mp3

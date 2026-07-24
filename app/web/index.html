@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html oncontextmenu="return false;">
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+  <meta name="description" content="Privet messenger">
+  <meta http-equiv="Permissions-Policy" content="camera=*, microphone=*, display-capture=*, autoplay=*, clipboard-read=*, clipboard-write=*">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Privet">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Privet</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    html, body {
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+      overscroll-behavior: none;
+      touch-action: manipulation;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right)
+        env(safe-area-inset-bottom) env(safe-area-inset-left);
+    }
+    /* Keep composer / inputs selectable. */
+    input, textarea, [contenteditable="true"],
+    flt-text-editing-host, .flt-text-editing {
+      -webkit-user-select: text !important;
+      user-select: text !important;
+    }
+    /* Flutter semantics / selectable overlays must not get browser menus. */
+    flt-semantics, flt-semantics-container, flt-glass-pane, flutter-view,
+    canvas, .web-selectable-region-context-menu {
+      -webkit-user-select: none !important;
+      user-select: none !important;
+    }
+    button:not(:disabled):not([disabled]):not([aria-disabled="true"]),
+    [role="button"]:not([aria-disabled="true"]),
+    flt-semantics[role="button"]:not([aria-disabled="true"]),
+    a:not([aria-disabled="true"]),
+    [role="link"]:not([aria-disabled="true"]) {
+      cursor: pointer;
+    }
+    button:disabled,
+    button[disabled],
+    [aria-disabled="true"],
+    [role="button"][aria-disabled="true"],
+    flt-semantics[role="button"][aria-disabled="true"] {
+      cursor: default;
+    }
+  </style>
+</head>
+<body oncontextmenu="return false;">
+  <script>
+    (function () {
+      function block(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        return false;
+      }
+      var opts = { capture: true, passive: false };
+      function arm(el) {
+        if (!el || el.__privetNoCtx) return;
+        el.__privetNoCtx = true;
+        el.addEventListener('contextmenu', block, opts);
+        try { el.setAttribute('oncontextmenu', 'return false'); } catch (_) {}
+      }
+      arm(window);
+      arm(document);
+      arm(document.documentElement);
+      arm(document.body);
+      // Flutter injects semantics / view nodes after boot — keep blocking them.
+      var obs = new MutationObserver(function (mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+          var nodes = mutations[i].addedNodes;
+          for (var j = 0; j < nodes.length; j++) {
+            var n = nodes[j];
+            if (n.nodeType !== 1) continue;
+            arm(n);
+            if (n.querySelectorAll) {
+              var kids = n.querySelectorAll(
+                'flt-semantics,flt-semantics-container,flt-glass-pane,flutter-view,canvas,.web-selectable-region-context-menu'
+              );
+              for (var k = 0; k < kids.length; k++) arm(kids[k]);
+            }
+          }
+        }
+      });
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+    })();
+    // Kill Flutter PWA service worker BEFORE load — it was serving stale JS.
+    (async function boot() {
+      try {
+        if ('serviceWorker' in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(regs.map((r) => r.unregister()));
+        }
+        if (window.caches && caches.keys) {
+          const keys = await caches.keys();
+          await Promise.all(keys.map((k) => caches.delete(k)));
+        }
+      } catch (e) {
+        console.warn('cache clear failed', e);
+      }
+      const s = document.createElement('script');
+      s.src = 'flutter_bootstrap.js?v=BUILD_STAMP';
+      s.async = true;
+      document.body.appendChild(s);
+    })();
+  </script>
+</body>
+</html>
