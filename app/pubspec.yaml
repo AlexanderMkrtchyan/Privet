@@ -1,7 +1,7 @@
 name: privet
 description: Privet messenger — Android, Web, Windows, Linux
 publish_to: 'none'
-version: 0.1.2+3
+version: 0.1.3+4
 
 environment:
   sdk: ^3.12.2
@@ -35,6 +35,11 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  # Source for message tone (embedded as data URI in util/sounds_web.dart).
+  # Message tone: embedded as data URI on web; WAV twin on native.
+  # Incoming ringtone: MP3 on web, WAV on native. Outgoing: random classical MP3s.
   assets:
     - assets/sounds/message-notification.mp3
+    - assets/sounds/message-notification.wav
+    - assets/sounds/incoming_call.mp3
+    - assets/sounds/incoming_call.wav
+    - assets/sounds/outgoing/

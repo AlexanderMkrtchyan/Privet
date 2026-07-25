@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Opens Privet desktop window (Chrome/Edge/Chromium app mode).
 set -euo pipefail
-URL="${PRIVET_URL:-https://messanger.banderdog.com}"
+URL="${PRIVET_URL:-https://messenger.banderdog.com}"
 for bin in google-chrome google-chrome-stable chromium chromium-browser microsoft-edge; do
   if command -v "$bin" >/dev/null 2>&1; then
     exec "$bin" --app="$URL" --new-window

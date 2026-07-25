@@ -6,18 +6,31 @@ import 'dart:html' as html;
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'sounds_catalog.dart';
+
 html.AudioElement? _ringEl;
 html.AudioElement? _outEl;
 html.AudioElement? _msgEl;
 html.AudioElement? _unlockEl;
+StreamSubscription<html.Event>? _outEndedSub;
 bool _ringing = false;
 bool _outgoing = false;
 bool _unlocked = false;
 /// Once peers are connected, never restart ring/ringback until the call ends.
 bool _tonesSuppressed = false;
 bool _msgPrimed = false;
+bool _callAudioPrimed = false;
+int _outgoingGen = 0;
 DateTime? _lastMsgPlayAt;
 final Set<String> _recentMsgSoundKeys = <String>{};
+final math.Random _rng = math.Random();
+
+/// Absolute URL — Chrome resolves relative asset paths inconsistently after
+/// async media prompts; origin-absolute paths stay stable.
+String _assetUrl(String assetPath) {
+  final origin = html.window.location.origin;
+  return '$origin/assets/assets/$assetPath';
+}
 
 html.AudioElement _messageAudio() {
   final existing = _msgEl;
@@ -36,6 +49,20 @@ html.AudioElement _unlockAudio() {
     ..preload = 'auto'
     ..src = _silentDataUri;
   _unlockEl = a;
+  return a;
+}
+
+html.AudioElement _ensureToneEl({
+  required html.AudioElement? existing,
+  required String role,
+  required void Function(html.AudioElement) store,
+}) {
+  if (existing != null) return existing;
+  final a = html.AudioElement()
+    ..preload = 'auto'
+    ..src = _silentDataUri;
+  a.setAttribute('data-privet-tone', role);
+  store(a);
   return a;
 }
 
@@ -66,6 +93,39 @@ void _primeMessageAudioIfIdle() {
   }));
 }
 
+/// Chrome drops transient user activation across `getUserMedia` awaits.
+/// Silent-play dedicated incoming/outgoing elements under a gesture so later
+/// `play()` on those same elements is allowed.
+void _primeCallAudioIfNeeded() {
+  if (_callAudioPrimed) return;
+  _callAudioPrimed = true;
+  try {
+    final ring = _ensureToneEl(
+      existing: _ringEl,
+      role: 'incoming',
+      store: (a) => _ringEl = a,
+    );
+    final out = _ensureToneEl(
+      existing: _outEl,
+      role: 'outgoing',
+      store: (a) => _outEl = a,
+    );
+    for (final a in [ring, out]) {
+      a.volume = 0.001;
+      unawaited(a.play().then((_) {
+        if (a.volume <= 0.01) {
+          a.pause();
+          a.currentTime = 0;
+        }
+      }).catchError((_) {
+        _callAudioPrimed = false;
+      }));
+    }
+  } catch (_) {
+    _callAudioPrimed = false;
+  }
+}
+
 /// True when another tab already claimed this message ding (same origin).
 bool _claimCrossTabSound(String key) {
   try {
@@ -94,6 +154,7 @@ void unlockNotificationAudio() {
     // Warm the message element on gesture. Unlocking only the silent WAV left
     // the first ding as a cold MP3 play (errors swallowed → no sound).
     _primeMessageAudioIfIdle();
+    _primeCallAudioIfNeeded();
 
     if (_unlocked) return;
     final a = _unlockAudio();
@@ -143,20 +204,27 @@ void startIncomingCallSound() {
   if (_ringing) return;
   _ringing = true;
   stopOutgoingCallSound();
+  _killOrphanTones(keep: 'incoming');
   try {
-    _disposeAudio(_ringEl);
-    _ringEl = html.AudioElement()
-      ..src = _ringtoneDataUri
+    final el = _ensureToneEl(
+      existing: _ringEl,
+      role: 'incoming',
+      store: (a) => _ringEl = a,
+    );
+    el
       ..loop = true
-      ..volume = 0.55;
-    unawaited(_ringEl!.play().catchError((_) {}));
-  } catch (_) {}
+      ..volume = 0.55
+      ..src = _assetUrl(incomingCallAssetMp3);
+    el.load();
+    unawaited(el.play().catchError((_) {}));
+  } catch (_) {
+    _ringing = false;
+  }
 }
 
 void stopIncomingCallSound() {
   _ringing = false;
-  _disposeAudio(_ringEl);
-  _ringEl = null;
+  _stopToneEl(_ringEl);
 }
 
 void playOutgoingCallSound() {
@@ -164,26 +232,63 @@ void playOutgoingCallSound() {
   if (_outgoing) return;
   _outgoing = true;
   stopIncomingCallSound();
+  _killOrphanTones(keep: 'outgoing');
+  _playRandomOutgoingTrack();
+}
+
+void _playRandomOutgoingTrack() {
+  if (!_outgoing || _tonesSuppressed) return;
+  final gen = ++_outgoingGen;
   try {
-    _disposeAudio(_outEl);
-    _outEl = html.AudioElement()
-      ..src = _ringbackDataUri
-      ..loop = true
-      ..volume = 0.4;
-    unawaited(_outEl!.play().catchError((_) {}));
-  } catch (_) {}
+    unawaited(_outEndedSub?.cancel());
+    _outEndedSub = null;
+
+    final asset =
+        outgoingCallAssets[_rng.nextInt(outgoingCallAssets.length)];
+    final el = _ensureToneEl(
+      existing: _outEl,
+      role: 'outgoing',
+      store: (a) => _outEl = a,
+    );
+    el
+      ..loop = false
+      ..preload = 'auto'
+      ..volume = 0.45
+      ..src = _assetUrl(asset);
+    el.load();
+    _outEndedSub = el.onEnded.listen((_) {
+      _onOutgoingTrackFinished(gen);
+    });
+    unawaited(el.play().catchError((_) {
+      // Autoplay blocked — retry after a beat (gesture may land later).
+      _onOutgoingTrackFinished(gen);
+    }));
+  } catch (_) {
+    _onOutgoingTrackFinished(gen);
+  }
+}
+
+void _onOutgoingTrackFinished(int gen) {
+  if (!_outgoing || gen != _outgoingGen || _tonesSuppressed) return;
+  unawaited(Future<void>.delayed(const Duration(seconds: 1)).then((_) {
+    if (!_outgoing || gen != _outgoingGen || _tonesSuppressed) return;
+    _playRandomOutgoingTrack();
+  }));
 }
 
 void stopOutgoingCallSound() {
   _outgoing = false;
-  _disposeAudio(_outEl);
-  _outEl = null;
+  _outgoingGen++;
+  unawaited(_outEndedSub?.cancel());
+  _outEndedSub = null;
+  _stopToneEl(_outEl);
 }
 
-/// Hard-stop every looping call tone (incoming + outgoing).
+/// Hard-stop every call tone (incoming + outgoing).
 void stopAllCallSounds() {
   stopIncomingCallSound();
   stopOutgoingCallSound();
+  _killOrphanTones();
 }
 
 /// Peers are connected — kill tones and block any restart until [allowCallTones].
@@ -191,30 +296,12 @@ void suppressCallTones() {
   _tonesSuppressed = true;
   _ringing = false;
   _outgoing = false;
-  _disposeAudio(_ringEl);
-  _disposeAudio(_outEl);
-  _ringEl = null;
-  _outEl = null;
-  // Destroy any orphaned looping call tones left in the DOM.
-  try {
-    for (final node in html.document.querySelectorAll('audio')) {
-      if (node is! html.AudioElement) continue;
-      final el = node;
-      if (identical(el, _msgEl) || identical(el, _unlockEl)) continue;
-      if (el.loop ||
-          (el.src.isNotEmpty &&
-              (el.src.contains('data:audio') || el.src.startsWith('blob:')))) {
-        try {
-          el.loop = false;
-          el.volume = 0;
-          el.pause();
-          el.currentTime = 0;
-          el.src = '';
-          el.load();
-        } catch (_) {}
-      }
-    }
-  } catch (_) {}
+  _outgoingGen++;
+  unawaited(_outEndedSub?.cancel());
+  _outEndedSub = null;
+  _stopToneEl(_ringEl);
+  _stopToneEl(_outEl);
+  _killOrphanTones();
 }
 
 void allowCallTones() {
@@ -226,14 +313,43 @@ void playCallConnectedSound() {
   _playOnce(_connectedDataUri, volume: 0.45);
 }
 
-void _disposeAudio(html.AudioElement? el) {
+void _stopToneEl(html.AudioElement? el) {
   if (el == null) return;
   try {
     el.loop = false;
     el.pause();
     el.currentTime = 0;
-    el.src = '';
+    // Keep the element (Chrome autoplay unlock) but silence + unload media.
+    el.removeAttribute('src');
+    el.src = _silentDataUri;
     el.load();
+  } catch (_) {}
+}
+
+/// Destroy any leftover call `<audio>` nodes so an old incoming loop cannot
+/// keep playing while outgoing classical should be the only tone.
+void _killOrphanTones({String? keep}) {
+  try {
+    for (final node in html.document.querySelectorAll('audio[data-privet-tone]')) {
+      if (node is! html.AudioElement) continue;
+      final el = node;
+      final role = el.getAttribute('data-privet-tone');
+      if (keep != null && role == keep) {
+        if (identical(el, _ringEl) || identical(el, _outEl)) continue;
+      }
+      if (identical(el, _ringEl) || identical(el, _outEl)) {
+        if (keep != null && role == keep) continue;
+      }
+      try {
+        el.loop = false;
+        el.volume = 0;
+        el.pause();
+        el.removeAttribute('src');
+        el.src = '';
+        el.load();
+        el.remove();
+      } catch (_) {}
+    }
   } catch (_) {}
 }
 
@@ -243,18 +359,19 @@ void _playOnce(String dataUri, {required double volume}) {
       ..src = dataUri
       ..loop = false
       ..volume = volume;
+    a.setAttribute('data-privet-tone', 'once');
     unawaited(a.play().then((_) {
-      // Drop the element once finished so it cannot linger/restart.
       try {
         a.pause();
         a.src = '';
         a.load();
+        a.remove();
       } catch (_) {}
     }).catchError((_) {}));
   } catch (_) {}
 }
 
-// --- Message tone: embedded MP3. Call tones: generated WAV. ---
+// --- Message tone: embedded MP3. Connected chirp: generated WAV. ---
 
 String get _silentDataUri => _wavDataUri(_silenceWav(ms: 30));
 
@@ -264,20 +381,6 @@ String get _connectedDataUri => _wavDataUri(_buildToneWav(
       gapMs: 50,
       periodMs: 220,
       seconds: 1));
-
-String get _ringtoneDataUri => _wavDataUri(_buildToneWav(
-      freqs: const [480.0, 620.0],
-      pulseMs: 380,
-      gapMs: 180,
-      periodMs: 2000,
-      seconds: 2));
-
-String get _ringbackDataUri => _wavDataUri(_buildToneWav(
-      freqs: const [400.0, 450.0],
-      pulseMs: 900,
-      gapMs: 1100,
-      periodMs: 2000,
-      seconds: 2));
 
 String _wavDataUri(Uint8List bytes) =>
     'data:audio/wav;base64,${base64Encode(bytes)}';

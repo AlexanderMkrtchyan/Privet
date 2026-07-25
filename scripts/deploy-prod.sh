@@ -38,7 +38,7 @@ preserve_static_extras "$STAGE"
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 
 cd "$ROOT/app"
-# Same-origin: browser uses https://messanger.banderdog.com (no localhost API).
+# Same-origin: browser uses https://messenger.banderdog.com (no localhost API).
 flutter build web --release \
   --pwa-strategy=none \
   --dart-define=PRIVET_BUILD="$STAMP" \
@@ -51,18 +51,28 @@ restore_static_extras "$STAGE"
 printf '%s\n' "$STAMP" > "$ROOT/server/public/BUILD_STAMP.txt"
 python3 - <<PY
 from pathlib import Path
-import re
+import re, shutil
 stamp = "$STAMP"
-index = Path("$ROOT/server/public/index.html")
-index.write_text(
-    re.sub(
-        r"flutter_bootstrap\.js(\?v=[^'\"]+)?",
-        f"flutter_bootstrap.js?v={stamp}",
-        index.read_text(),
-        count=1,
-    )
+root = Path("$ROOT/server/public")
+
+# The freshly built Flutter shell lands at public/index.html — relocate it to
+# /app/ so the marketing landing page can own the site root.
+shell = (root / "index.html").read_text()
+shell = re.sub(
+    r"flutter_bootstrap\.js(\?v=[^'\"]+)?",
+    f"flutter_bootstrap.js?v={stamp}",
+    shell,
+    count=1,
 )
-boot = Path("$ROOT/server/public/flutter_bootstrap.js")
+app_dir = root / "app"
+app_dir.mkdir(exist_ok=True)
+(app_dir / "index.html").write_text(shell)
+
+# Landing page (source-controlled) becomes the public site root.
+shutil.copyfile("$ROOT/server/landing/index.html", str(root / "index.html"))
+
+# Cache-bust the Flutter engine bundle reference.
+boot = root / "flutter_bootstrap.js"
 bt = boot.read_text()
 bt = bt.replace(
     '"mainJsPath":"main.dart.js"',
@@ -74,7 +84,7 @@ bt = re.sub(
     bt,
 )
 boot.write_text(bt)
-print(f"cache-busted main.dart.js?v={stamp}")
+print(f"landing at /, chat at /app/ (v={stamp})")
 PY
 
 echo "Uploading to ${REMOTE_HOST}:${REMOTE_DIR} ..."
@@ -115,5 +125,5 @@ pm2 restart privet
 pm2 describe privet | head -20
 REMOTE
 
-echo "Deployed to https://messanger.banderdog.com/  stamp=${STAMP}"
+echo "Deployed to https://messenger.banderdog.com/  stamp=${STAMP}"
 echo "Confirm green badge v41 next to Privet."

@@ -1,32 +1,38 @@
 {
+    "id": "/app/",
     "name": "Privet",
     "short_name": "Privet",
-    "start_url": ".",
+    "start_url": "/app/",
+    "scope": "/",
     "display": "standalone",
     "background_color": "#0E1114",
     "theme_color": "#0E1114",
     "description": "Privet messenger",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
+    "lang": "en",
+    "categories": ["social", "communication"],
     "icons": [
         {
-            "src": "icons/Icon-192.png",
+            "src": "/icons/Icon-192.png",
             "sizes": "192x192",
-            "type": "image/png"
+            "type": "image/png",
+            "purpose": "any"
         },
         {
-            "src": "icons/Icon-512.png",
+            "src": "/icons/Icon-512.png",
             "sizes": "512x512",
-            "type": "image/png"
+            "type": "image/png",
+            "purpose": "any"
         },
         {
-            "src": "icons/Icon-maskable-192.png",
+            "src": "/icons/Icon-maskable-192.png",
             "sizes": "192x192",
             "type": "image/png",
             "purpose": "maskable"
         },
         {
-            "src": "icons/Icon-maskable-512.png",
+            "src": "/icons/Icon-maskable-512.png",
             "sizes": "512x512",
             "type": "image/png",
             "purpose": "maskable"

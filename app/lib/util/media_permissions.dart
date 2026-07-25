@@ -1,4 +1,4 @@
-import 'media_permissions_stub.dart'
+import 'media_permissions_native.dart'
     if (dart.library.html) 'media_permissions_web.dart' as impl;
 
 class MediaPermissionStatus {

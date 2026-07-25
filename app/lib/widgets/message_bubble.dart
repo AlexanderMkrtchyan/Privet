@@ -16,10 +16,14 @@ import '../util/app_clipboard.dart';
 import '../util/media_download.dart';
 import '../util/web_select_cursor.dart';
 import 'compact_emoji_picker.dart';
+import 'image_lightbox.dart';
 import 'inline_video_player.dart';
 import 'privet_emoji.dart';
 
 const kQuickReactions = ['❤️', '👍', '😂', '😮'];
+
+/// Shared — constructing [DateFormat] per bubble every frame is wasteful.
+final _messageTimeFormat = DateFormat.Hm();
 
 /// Prevents double-open from Listener + GestureDetector both firing on web.
 bool _reactionMenuOpen = false;
@@ -42,6 +46,10 @@ bool privetMessageSelectionDragging = false;
 /// chrome / empty-space probes use this so text taps are not treated as
 /// outside clicks.
 bool privetMessageBodyClaimedPointer = false;
+
+/// Set while a bubble is being horizontally dragged for swipe-to-reply so
+/// nested text MouseRegions can [MouseCursor.defer] and show grab/grabbing.
+bool privetBubbleDragging = false;
 
 /// Clear message text selection + floating Copy/Reply/Forward bar.
 void privetClearMessageSelection() {
@@ -280,131 +288,168 @@ class MessageBubble extends StatelessWidget {
               width: accent ? 1.4 : 1,
             ),
           ),
-          // Hug content width (maxWidth caps long messages). Avoid Align/stretch
-          // children — they expand to maxWidth and make every bubble near-full.
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.end,
+          // Hug content width. Swipe handles are Positioned strips that span the
+          // hugged bubble width (no IntrinsicWidth) — including own messages,
+          // which have no username row.
+          child: Stack(
             children: [
-              if (showSender && !mine)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: Align(
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  if (showSender && !mine)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        widthFactor: 1,
+                        child: Text(
+                          message.sender.displayName.isNotEmpty
+                              ? message.sender.displayName
+                              : (message.sender.handle.isNotEmpty
+                                  ? '@${message.sender.handle}'
+                                  : ''),
+                          textAlign: TextAlign.left,
+                          style: GoogleFonts.syne(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: PrivetTheme.signal,
+                          ),
+                        ),
+                      ),
+                    ),
+                  if (message.forwardedFrom != null) ...[
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.shortcut_rounded,
+                            size: 14,
+                            color: PrivetTheme.mist.withValues(alpha: 0.9),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Forwarded from ${message.forwardedFrom!.label}',
+                            style: GoogleFonts.ibmPlexSans(
+                              fontSize: 11,
+                              fontStyle: FontStyle.italic,
+                              color: PrivetTheme.mist,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  if (message.replyTo != null) ...[
+                    _ReplyQuote(reply: message.replyTo!),
+                    const SizedBox(height: 6),
+                  ],
+                  // Body text: selection only — not covered by drag strips.
+                  Align(
                     alignment: Alignment.centerLeft,
                     widthFactor: 1,
-                    child: Text(
-                      message.sender.displayName.isNotEmpty
-                          ? message.sender.displayName
-                          : (message.sender.handle.isNotEmpty
-                              ? '@${message.sender.handle}'
-                              : ''),
-                      style: GoogleFonts.syne(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        color: PrivetTheme.signal,
-                      ),
-                    ),
+                    child: _body(mediaBase),
                   ),
-                ),
-              if (message.forwardedFrom != null) ...[
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.shortcut_rounded,
-                        size: 14,
-                        color: PrivetTheme.mist.withValues(alpha: 0.9),
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        'Forwarded from ${message.forwardedFrom!.label}',
-                        style: GoogleFonts.ibmPlexSans(
-                          fontSize: 11,
-                          fontStyle: FontStyle.italic,
-                          color: PrivetTheme.mist,
+                  if (message.linkPreview != null) ...[
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      widthFactor: 1,
+                      child: _LinkPreviewCard(preview: message.linkPreview!),
+                    ),
+                  ],
+                  // Extra gap so the footer drag strip doesn't cover body text.
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    widthFactor: 1,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (message.editedAt != null)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 6),
+                            child: Text(
+                              'edited',
+                              style: TextStyle(
+                                color: PrivetTheme.mist
+                                    .withValues(alpha: 0.75),
+                                fontSize: 10,
+                                fontStyle: FontStyle.italic,
+                              ),
+                            ),
+                          ),
+                        Text(
+                          _messageTimeFormat.format(message.createdAt),
+                          style: TextStyle(
+                            color: PrivetTheme.mist.withValues(alpha: 0.8),
+                            fontSize: 10,
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-              if (message.replyTo != null) ...[
-                _ReplyQuote(reply: message.replyTo!),
-                const SizedBox(height: 6),
-              ],
-              // Keep body text start-aligned inside the bubble.
-              Align(
-                alignment: Alignment.centerLeft,
-                widthFactor: 1,
-                child: _body(mediaBase),
-              ),
-              if (message.linkPreview != null) ...[
-                const SizedBox(height: 8),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  widthFactor: 1,
-                  child: _LinkPreviewCard(preview: message.linkPreview!),
-                ),
-              ],
-              const SizedBox(height: 4),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (message.editedAt != null)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 6),
-                      child: Text(
-                        'edited',
-                        style: TextStyle(
-                          color: PrivetTheme.mist.withValues(alpha: 0.75),
-                          fontSize: 10,
-                          fontStyle: FontStyle.italic,
-                        ),
-                      ),
-                    ),
-                  Text(
-                    DateFormat.Hm().format(message.createdAt),
-                    style: TextStyle(
-                      color: PrivetTheme.mist.withValues(alpha: 0.8),
-                      fontSize: 10,
+                        if (mine) ...[
+                          const SizedBox(width: 4),
+                          GestureDetector(
+                            onTap: readByPeer && onSeenBy != null
+                                ? () => onSeenBy!(message)
+                                : null,
+                            child: Icon(
+                              readByPeer
+                                  ? Icons.done_all_rounded
+                                  : Icons.done_rounded,
+                              size: 14,
+                              color: readByPeer
+                                  ? PrivetTheme.signal
+                                  : PrivetTheme.mist
+                                      .withValues(alpha: 0.75),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
-                  if (mine) ...[
-                    const SizedBox(width: 4),
+                  if (mine &&
+                      seenByLabel != null &&
+                      seenByLabel!.isNotEmpty) ...[
+                    const SizedBox(height: 2),
                     GestureDetector(
-                      onTap: readByPeer && onSeenBy != null
-                          ? () => onSeenBy!(message)
-                          : null,
-                      child: Icon(
-                        readByPeer
-                            ? Icons.done_all_rounded
-                            : Icons.done_rounded,
-                        size: 14,
-                        color: readByPeer
-                            ? PrivetTheme.signal
-                            : PrivetTheme.mist.withValues(alpha: 0.75),
+                      onTap:
+                          onSeenBy == null ? null : () => onSeenBy!(message),
+                      child: Text(
+                        seenByLabel!,
+                        style: TextStyle(
+                          color: PrivetTheme.mist.withValues(alpha: 0.85),
+                          fontSize: 10,
+                        ),
                       ),
                     ),
                   ],
                 ],
               ),
-              if (mine &&
-                  seenByLabel != null &&
-                  seenByLabel!.isNotEmpty) ...[
-                const SizedBox(height: 2),
-                GestureDetector(
-                  onTap: onSeenBy == null ? null : () => onSeenBy!(message),
-                  child: Text(
-                    seenByLabel!,
-                    style: TextStyle(
-                      color: PrivetTheme.mist.withValues(alpha: 0.85),
-                      fontSize: 10,
-                    ),
+              // Full-width header chrome for peers (username + empty space on
+              // that row). Own messages have no username — they use the footer.
+              if (showSender && !mine)
+                const Positioned(
+                  left: 0,
+                  right: 0,
+                  top: 0,
+                  height: 22,
+                  child: _SwipeReplyHandle(
+                    child: SizedBox.expand(),
                   ),
                 ),
-              ],
+              // Full-width footer (time / ticks) — every message, including
+              // your own (no username shown on own bubbles).
+              const Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: 18,
+                child: _SwipeReplyHandle(
+                  child: SizedBox.expand(),
+                ),
+              ),
             ],
           ),
         ),
@@ -978,12 +1023,33 @@ class _AlbumBody extends StatelessWidget {
     return '$mediaBase$path';
   }
 
+  String _downloadName(MediaAttachment item) {
+    if (item.fileName != null && item.fileName!.isNotEmpty) {
+      return item.fileName!;
+    }
+    return switch (item.kind) {
+      'image' => 'image.jpg',
+      'video' => 'video.mp4',
+      'audio' || 'voice' => 'audio.webm',
+      _ => 'attachment',
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
     final tileW = items.length == 1 ? 260.0 : 124.0;
     final tileH = items.every((e) => e.kind == 'image' || e.kind == 'video')
         ? (items.length == 1 ? 160.0 : 110.0)
         : 72.0;
+
+    final imageItems = [
+      for (final item in items)
+        if (item.kind == 'image') item,
+    ];
+    final galleryUrls = [for (final item in imageItems) _url(item)];
+    final galleryFilenames = [
+      for (final item in imageItems) _downloadName(item),
+    ];
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -993,16 +1059,29 @@ class _AlbumBody extends StatelessWidget {
           spacing: 6,
           runSpacing: 6,
           children: [
-            for (final item in items)
-              SizedBox(
-                width: items.length == 1 ? 260 : tileW,
-                child: _AttachmentTile(
-                  item: item,
-                  url: _url(item),
-                  width: items.length == 1 ? 260 : tileW,
-                  height: item.kind == 'video' && items.length > 1 ? 140 : tileH,
-                  compact: items.length > 1 && item.kind != 'video',
-                ),
+            for (var i = 0; i < items.length; i++)
+              Builder(
+                builder: (context) {
+                  final item = items[i];
+                  final galleryIndex = item.kind == 'image'
+                      ? imageItems.indexOf(item)
+                      : 0;
+                  return SizedBox(
+                    width: items.length == 1 ? 260 : tileW,
+                    child: _AttachmentTile(
+                      item: item,
+                      url: _url(item),
+                      width: items.length == 1 ? 260 : tileW,
+                      height: item.kind == 'video' && items.length > 1
+                          ? 140
+                          : tileH,
+                      compact: items.length > 1 && item.kind != 'video',
+                      galleryUrls: galleryUrls,
+                      galleryFilenames: galleryFilenames,
+                      galleryIndex: galleryIndex < 0 ? 0 : galleryIndex,
+                    ),
+                  );
+                },
               ),
           ],
         ),
@@ -1070,15 +1149,31 @@ class _SingleMediaBody extends StatelessWidget {
           children: [
             // ExcludeSemantics: on Flutter web, Image+Download otherwise merge
             // into one oversized a11y hit target covering the whole green bubble.
-            ExcludeSemantics(
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: Image.network(
-                  _url,
-                  fit: BoxFit.cover,
-                  width: 260,
-                  errorBuilder: (_, error, stack) =>
-                      const Text('Image unavailable'),
+            Semantics(
+              button: true,
+              label: 'View image',
+              child: ExcludeSemantics(
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  hitTestBehavior: HitTestBehavior.opaque,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => showImageLightbox(
+                      context,
+                      urls: [_url],
+                      filenames: [_downloadName],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
+                      child: Image.network(
+                        _url,
+                        fit: BoxFit.cover,
+                        width: 260,
+                        errorBuilder: (_, error, stack) =>
+                            const Text('Image unavailable'),
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -1185,6 +1280,9 @@ class _AttachmentTile extends StatelessWidget {
     required this.width,
     required this.height,
     required this.compact,
+    this.galleryUrls = const [],
+    this.galleryFilenames = const [],
+    this.galleryIndex = 0,
   });
 
   final MediaAttachment item;
@@ -1192,6 +1290,9 @@ class _AttachmentTile extends StatelessWidget {
   final double width;
   final double height;
   final bool compact;
+  final List<String> galleryUrls;
+  final List<String?> galleryFilenames;
+  final int galleryIndex;
 
   String get _downloadName {
     if (item.fileName != null && item.fileName!.isNotEmpty) {
@@ -1210,14 +1311,33 @@ class _AttachmentTile extends StatelessWidget {
     Widget content;
     switch (item.kind) {
       case 'image':
-        content = Image.network(
-          url,
-          fit: BoxFit.cover,
-          width: width,
-          height: height,
-          errorBuilder: (_, error, stack) => ColoredBox(
-            color: PrivetTheme.ink,
-            child: Center(child: Icon(Icons.broken_image_outlined)),
+        content = MouseRegion(
+          cursor: SystemMouseCursors.click,
+          hitTestBehavior: HitTestBehavior.opaque,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              final urls = galleryUrls.isNotEmpty ? galleryUrls : [url];
+              final names = galleryFilenames.isNotEmpty
+                  ? galleryFilenames
+                  : <String?>[_downloadName];
+              showImageLightbox(
+                context,
+                urls: urls,
+                initialIndex: galleryIndex.clamp(0, urls.length - 1),
+                filenames: names,
+              );
+            },
+            child: Image.network(
+              url,
+              fit: BoxFit.cover,
+              width: width,
+              height: height,
+              errorBuilder: (_, error, stack) => ColoredBox(
+                color: PrivetTheme.ink,
+                child: Center(child: Icon(Icons.broken_image_outlined)),
+              ),
+            ),
           ),
         );
       case 'video':
@@ -1410,11 +1530,9 @@ class _ReactionChip extends StatelessWidget {
   }
 }
 
-/// Telegram-style swipe-to-reply. Others (left bubbles) swipe right; own
-/// (right bubbles) swipe left. A reply arrow fades in as you drag; releasing
-/// past the threshold fires [onReply]. Text selection stays intact because the
-/// horizontal-drag recognizer only wins the arena when the gesture is clearly
-/// horizontal.
+/// Telegram-style swipe-to-reply. Drag starts only from [_SwipeReplyHandle]
+/// regions (username / empty header chrome) — never from message body text.
+/// Others swipe right; own swipe left.
 class _SwipeToReply extends StatefulWidget {
   const _SwipeToReply({
     required this.child,
@@ -1430,6 +1548,10 @@ class _SwipeToReply extends StatefulWidget {
 
   @override
   State<_SwipeToReply> createState() => _SwipeToReplyState();
+
+  static _SwipeToReplyState? maybeOf(BuildContext context) {
+    return context.findAncestorStateOfType<_SwipeToReplyState>();
+  }
 }
 
 class _SwipeToReplyState extends State<_SwipeToReply> {
@@ -1439,10 +1561,59 @@ class _SwipeToReplyState extends State<_SwipeToReply> {
   bool _dragging = false;
   bool _fired = false;
 
+  bool get dragging => _dragging;
+
+  void onDragStart() {
+    if (!widget.enabled || _dragging) return;
+    privetBubbleDragging = true;
+    setState(() {
+      _dragging = true;
+      _fired = false;
+    });
+  }
+
+  void onDragUpdate(double deltaDx) {
+    if (!_dragging) return;
+    var next = _dx + deltaDx;
+    next = widget.mine
+        ? next.clamp(-_maxDrag, 0.0)
+        : next.clamp(0.0, _maxDrag);
+    if (!_fired && next.abs() >= _trigger) {
+      _fired = true;
+      HapticFeedback.selectionClick();
+    }
+    setState(() => _dx = next);
+  }
+
+  void onDragEnd() {
+    if (!_dragging) return;
+    final fire = _dx.abs() >= _trigger;
+    privetBubbleDragging = false;
+    setState(() {
+      _dragging = false;
+      _dx = 0;
+    });
+    if (fire) widget.onReply();
+  }
+
+  void onDragCancel() {
+    if (!_dragging) return;
+    privetBubbleDragging = false;
+    setState(() {
+      _dragging = false;
+      _dx = 0;
+    });
+  }
+
+  @override
+  void dispose() {
+    if (_dragging) privetBubbleDragging = false;
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!widget.enabled) return widget.child;
-    // Others reveal on the left (drag right); own reveal on the right (drag left).
     final progress = (_dx.abs() / _trigger).clamp(0.0, 1.0);
     final arrow = Positioned.fill(
       child: Align(
@@ -1467,48 +1638,198 @@ class _SwipeToReplyState extends State<_SwipeToReply> {
       ),
     );
 
-    return GestureDetector(
-      behavior: HitTestBehavior.deferToChild,
-      onHorizontalDragStart: (_) {
-        _dragging = true;
-        _fired = false;
+    return Stack(
+      children: [
+        arrow,
+        // Transform only — AnimatedContainer rebuilt/tweened every frame and
+        // made Linux scrolling feel starved for CPU.
+        Transform.translate(
+          offset: Offset(_dx, 0),
+          child: widget.child,
+        ),
+      ],
+    );
+  }
+}
+
+/// Drag-to-reply hit target (username / empty header chrome / time row).
+/// Message body text must NOT be wrapped in this — selection stays free there.
+///
+/// Paints a classic OS-style open hand on hover (neutral) and a squeezed fist
+/// on press/drag (accent). The hand is drawn in an [Overlay] at the **global**
+/// pointer so it stays under the cursor when the bubble translates during a
+/// swipe (local painting drifted once the bubble slid out from under the
+/// pointer).
+class _SwipeReplyHandle extends StatefulWidget {
+  const _SwipeReplyHandle({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_SwipeReplyHandle> createState() => _SwipeReplyHandleState();
+}
+
+class _SwipeReplyHandleState extends State<_SwipeReplyHandle> {
+  /// CSS/X11 grab hotspot — base of the fingers, not geometric center.
+  static const _hotspot = Offset(12, 8);
+  static const _handSize = Size(32, 32);
+
+  OverlayEntry? _handOverlay;
+  Offset? _global;
+  bool _hovering = false;
+  bool _pressed = false;
+  int? _pointer;
+  bool _globalRouteAttached = false;
+
+  bool get _dragging =>
+      _SwipeToReply.maybeOf(context)?.dragging ?? false;
+
+  bool get _squeezing => _pressed || _dragging;
+
+  bool get _showHand =>
+      _global != null && (_hovering || _pressed || _dragging);
+
+  @override
+  void dispose() {
+    _detachGlobalRoute();
+    _removeHandOverlay();
+    super.dispose();
+  }
+
+  void _attachGlobalRoute() {
+    if (_globalRouteAttached) return;
+    GestureBinding.instance.pointerRouter.addGlobalRoute(_onGlobalPointer);
+    _globalRouteAttached = true;
+  }
+
+  void _detachGlobalRoute() {
+    if (!_globalRouteAttached) return;
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(_onGlobalPointer);
+    _globalRouteAttached = false;
+  }
+
+  void _onGlobalPointer(PointerEvent event) {
+    if (event.pointer != _pointer) return;
+    if (event is PointerMoveEvent) {
+      _setGlobal(event.position);
+    } else if (event is PointerUpEvent || event is PointerCancelEvent) {
+      _pointer = null;
+      _pressed = false;
+      _detachGlobalRoute();
+      _clearHandIfIdle();
+    }
+  }
+
+  void _removeHandOverlay() {
+    _handOverlay?.remove();
+    _handOverlay = null;
+  }
+
+  void _syncHandOverlay() {
+    if (!mounted) return;
+    if (!_showHand || _global == null) {
+      _removeHandOverlay();
+      return;
+    }
+    if (_handOverlay == null) {
+      _handOverlay = OverlayEntry(
+        builder: (ctx) {
+          final g = _global;
+          if (g == null) return const SizedBox.shrink();
+          return Positioned(
+            left: g.dx - _hotspot.dx,
+            top: g.dy - _hotspot.dy,
+            width: _handSize.width,
+            height: _handSize.height,
+            child: IgnorePointer(
+              child: _AccentGrabHand(squeezing: _squeezing),
+            ),
+          );
+        },
+      );
+      final overlay = Overlay.maybeOf(context, rootOverlay: true);
+      if (overlay == null) return;
+      overlay.insert(_handOverlay!);
+    } else {
+      _handOverlay!.markNeedsBuild();
+    }
+  }
+
+  void _setGlobal(Offset global) {
+    final prev = _global;
+    if (prev != null && (prev - global).distance < 0.4) return;
+    _global = global;
+    _syncHandOverlay();
+  }
+
+  void _clearHandIfIdle() {
+    if (_hovering || _pressed || _dragging) {
+      _syncHandOverlay();
+      return;
+    }
+    _global = null;
+    _removeHandOverlay();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final swipe = _SwipeToReply.maybeOf(context);
+    if (swipe == null || !swipe.widget.enabled) {
+      _detachGlobalRoute();
+      _removeHandOverlay();
+      return widget.child;
+    }
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.none,
+      onEnter: (event) {
+        _hovering = true;
+        _setGlobal(event.position);
       },
-      onHorizontalDragUpdate: (d) {
-        var next = _dx + d.delta.dx;
-        // Constrain to the allowed reply direction only.
-        next = widget.mine
-            ? next.clamp(-_maxDrag, 0.0)
-            : next.clamp(0.0, _maxDrag);
-        if (!_fired && next.abs() >= _trigger) {
-          _fired = true;
-          HapticFeedback.selectionClick();
-        }
-        setState(() => _dx = next);
+      onExit: (_) {
+        _hovering = false;
+        // Keep the hand while pressed/dragging — bubble translation often
+        // exits the header hit target mid-swipe (the "header glitch").
+        _clearHandIfIdle();
       },
-      onHorizontalDragEnd: (_) {
-        final fire = _dx.abs() >= _trigger;
-        setState(() {
-          _dragging = false;
-          _dx = 0;
-        });
-        if (fire) widget.onReply();
-      },
-      onHorizontalDragCancel: () {
-        setState(() {
-          _dragging = false;
-          _dx = 0;
-        });
-      },
-      child: Stack(
-        children: [
-          arrow,
-          AnimatedContainer(
-            duration: Duration(milliseconds: _dragging ? 0 : 160),
-            curve: Curves.easeOut,
-            transform: Matrix4.translationValues(_dx, 0, 0),
-            child: widget.child,
-          ),
-        ],
+      onHover: (event) => _setGlobal(event.position),
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (event) {
+          if (event.buttons != kPrimaryMouseButton) return;
+          _pointer = event.pointer;
+          _pressed = true;
+          _attachGlobalRoute();
+          _setGlobal(event.position);
+        },
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onHorizontalDragStart: (details) {
+            swipe.onDragStart();
+            _setGlobal(details.globalPosition);
+            // Parent setState — refresh fist color in overlay.
+            _handOverlay?.markNeedsBuild();
+          },
+          onHorizontalDragUpdate: (d) {
+            swipe.onDragUpdate(d.delta.dx);
+            _setGlobal(d.globalPosition);
+          },
+          onHorizontalDragEnd: (_) {
+            swipe.onDragEnd();
+            _pressed = false;
+            _pointer = null;
+            _detachGlobalRoute();
+            _clearHandIfIdle();
+          },
+          onHorizontalDragCancel: () {
+            swipe.onDragCancel();
+            _pressed = false;
+            _pointer = null;
+            _detachGlobalRoute();
+            _clearHandIfIdle();
+          },
+          child: widget.child,
+        ),
       ),
     );
   }
@@ -1617,10 +1938,14 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
   ScrollHoldController? _webScrollHold;
   bool _hovering = false;
   bool _webPainterHover = false;
+  /// Native accent I-beam in an overlay — never setState on pointer move.
+  OverlayEntry? _ibeamOverlay;
+  Offset? _ibeamGlobal;
 
   @override
   void dispose() {
     setPrivetMessageSelectHover(false);
+    _removeIBeamOverlay();
     _releaseWebScrollHold();
     _removeToolbar();
     if (_activeMessageSelection == _selected) {
@@ -1637,6 +1962,51 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     }
     _linkRecognizers.clear();
     super.dispose();
+  }
+
+  void _removeIBeamOverlay() {
+    _ibeamOverlay?.remove();
+    _ibeamOverlay = null;
+    _ibeamGlobal = null;
+  }
+
+  void _syncIBeamOverlay() {
+    if (kIsWeb ||
+        !_hovering ||
+        privetBubbleDragging ||
+        _webSelectMoved ||
+        _ibeamGlobal == null) {
+      if (_ibeamOverlay != null) {
+        _ibeamOverlay!.remove();
+        _ibeamOverlay = null;
+      }
+      return;
+    }
+    if (_ibeamOverlay == null) {
+      _ibeamOverlay = OverlayEntry(
+        builder: (ctx) {
+          final pos = _ibeamGlobal;
+          if (pos == null) return const SizedBox.shrink();
+          return Positioned(
+            left: pos.dx - 3.5,
+            top: pos.dy - 10,
+            child: const IgnorePointer(child: _AccentIBeam()),
+          );
+        },
+      );
+      final overlay = Overlay.maybeOf(context, rootOverlay: true);
+      if (overlay == null) return;
+      overlay.insert(_ibeamOverlay!);
+    } else {
+      _ibeamOverlay!.markNeedsBuild();
+    }
+  }
+
+  void _setIBeamGlobal(Offset global) {
+    final prev = _ibeamGlobal;
+    if (prev != null && (prev - global).distance < 0.5) return;
+    _ibeamGlobal = global;
+    _syncIBeamOverlay();
   }
 
   void _releaseWebScrollHold() {
@@ -1708,39 +2078,6 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
       _dismissMessageSelectionUi!();
     }
     _dismissMessageSelectionUi = _clearSelectionTracking;
-  }
-
-  void _onSelectionChanged(
-    TextSelection selection,
-    SelectionChangedCause? cause,
-  ) {
-    final next = selection.isValid && !selection.isCollapsed
-        ? selection.textInside(widget.text)
-        : '';
-    _selected = next;
-    _activeMessageSelection = next.isEmpty ? null : next;
-
-    if (next.isEmpty) {
-      if (_dismissMessageSelectionUi == _clearSelectionTracking) {
-        _dismissMessageSelectionUi = null;
-      }
-      _removeToolbar();
-      return;
-    }
-    _claimSelectionDismiss();
-    // Only show the bar when the gesture finished — not on every drag frame
-    // (that was making Linux selection feel sluggish).
-    if (cause == SelectionChangedCause.drag) return;
-    if (_blockToolbarForSecondary || _reactionMenuOpen) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted ||
-          _selected.isEmpty ||
-          _blockToolbarForSecondary ||
-          _reactionMenuOpen) {
-        return;
-      }
-      _showToolbar();
-    });
   }
 
   void _showToolbar() {
@@ -1929,116 +2266,123 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
   }
 
   Widget _buildWebBody() {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final maxW = constraints.maxWidth.isFinite
-            ? constraints.maxWidth
-            : MediaQuery.sizeOf(context).width * 0.68;
-        // Green hover tint hides the green selection highlight — only tint when
-        // there is no active selection / drag.
-        final tintHover =
-            _hovering && _selected.isEmpty && !_webSelectMoved;
-        _ensureWebPainter(maxW, hovering: tintHover);
-        final painter = _webPainter!;
-        // Hug glyph bounds so bubbles stay content-sized.
-        final size = Size(painter.width, painter.height);
+    // Hug content: layout at bubble max without LayoutBuilder (IntrinsicWidth
+    // used to need that; Column hug no longer does, but this stays cheap).
+    final maxW =
+        (MediaQuery.sizeOf(context).width * 0.68 - 24).clamp(64.0, 10000.0);
+    // Never rebuild glyphs for hover tint — that relayout felt like low CPU on
+    // Linux. Accent is on the I-beam / web CSS cursor only.
+    _ensureWebPainter(maxW, hovering: false);
+    final painter = _webPainter!;
+    final size = Size(painter.width, painter.height);
 
-        return MouseRegion(
-          cursor: SystemMouseCursors.text,
-          onEnter: (_) {
-            setPrivetMessageSelectHover(true);
-            setState(() => _hovering = true);
-          },
-          onExit: (_) {
-            setPrivetMessageSelectHover(false);
-            if (mounted) setState(() => _hovering = false);
-          },
-          child: Listener(
-            behavior: HitTestBehavior.opaque,
-            onPointerDown: (event) {
-              if (event.buttons == kSecondaryMouseButton) {
-                _blockToolbarForSecondary = true;
-                _removeToolbar();
+    return MouseRegion(
+      cursor: privetBubbleDragging
+          ? MouseCursor.defer
+          : (kIsWeb ? SystemMouseCursors.text : SystemMouseCursors.none),
+      onEnter: (event) {
+        setPrivetMessageSelectHover(true);
+        _hovering = true;
+        if (!kIsWeb) _setIBeamGlobal(event.position);
+      },
+      onExit: (_) {
+        setPrivetMessageSelectHover(false);
+        _hovering = false;
+        _removeIBeamOverlay();
+      },
+      onHover: kIsWeb
+          ? null
+          : (event) {
+              if (_webSelectMoved || privetBubbleDragging) {
+                _syncIBeamOverlay();
                 return;
               }
-              if (event.buttons != kPrimaryMouseButton) return;
-
-              // Release composer focus so its caret doesn't keep blinking
-              // while message-body CustomPaint selection runs (web never
-              // claims FocusNode itself).
-              FocusManager.instance.primaryFocus?.unfocus();
-
-              _messageBodyPointerEpoch++;
-              privetMessageBodyClaimedPointer = true;
-              _webSelectPointer = event.pointer;
-              _webSelectOrigin = event.localPosition;
-              _webSelectBase = _webOffsetAt(event.localPosition);
-              _webSelectMoved = false;
-              _webMultiTapSelect = false;
-              privetMessageSelectionDragging = false;
+              _setIBeamGlobal(event.position);
+            },
+      child: SizedBox(
+        width: size.width,
+        height: size.height,
+        child: Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (event) {
+            if (event.buttons == kSecondaryMouseButton) {
+              _blockToolbarForSecondary = true;
               _removeToolbar();
+              return;
+            }
+            if (event.buttons != kPrimaryMouseButton) return;
 
-              _updateWebTapCount(event.localPosition);
-              if (_webTapCount == 2) {
-                _selectWebWordAt(_webSelectBase);
-                setState(() {});
-              } else if (_webTapCount >= 3) {
-                _selectWebAll();
-                _webTapCount = 0;
-                setState(() {});
-              }
+            FocusManager.instance.primaryFocus?.unfocus();
 
-              if (event.kind == PointerDeviceKind.mouse) {
-                _releaseWebScrollHold();
-                _webScrollHold =
-                    Scrollable.maybeOf(context)?.position.hold(() {});
-              }
-            },
-            onPointerMove: (event) {
-              if (_webSelectPointer != event.pointer) return;
-              if (_blockToolbarForSecondary) return;
-              final origin = _webSelectOrigin;
-              if (origin == null) return;
+            _messageBodyPointerEpoch++;
+            privetMessageBodyClaimedPointer = true;
+            _webSelectPointer = event.pointer;
+            _webSelectOrigin = event.localPosition;
+            _webSelectBase = _webOffsetAt(event.localPosition);
+            _webSelectMoved = false;
+            _webMultiTapSelect = false;
+            privetMessageSelectionDragging = false;
+            _removeToolbar();
+            _syncIBeamOverlay();
 
-              final delta = event.localPosition - origin;
-              if (!_webSelectMoved) {
-                if (delta.distance < 2) return;
-                _webSelectMoved = true;
-                _webMultiTapSelect = false;
-                privetMessageSelectionDragging = true;
-                // Drop green hover glyphs so the selection fill is visible
-                // while dragging (not only after mouse leave).
-                setState(() {});
-              }
+            _updateWebTapCount(event.localPosition);
+            if (_webTapCount == 2) {
+              _selectWebWordAt(_webSelectBase);
+              setState(() {});
+            } else if (_webTapCount >= 3) {
+              _selectWebAll();
+              _webTapCount = 0;
+              setState(() {});
+            }
 
-              final extent = _webOffsetAt(event.localPosition);
-              _setWebSelection(
-                TextSelection(
-                  baseOffset: _webSelectBase,
-                  extentOffset: extent,
-                ),
-              );
-            },
-            onPointerUp: (event) {
-              if (_webSelectPointer != event.pointer) return;
-              _finishWebPointer(event.localPosition);
-            },
-            onPointerCancel: (event) {
-              if (_webSelectPointer != event.pointer) return;
-              _finishWebPointer(null);
-            },
-            child: CustomPaint(
-              key: _hostKey,
-              size: size,
-              painter: _WebMessageTextPainter(
-                textPainter: painter,
-                getSelection: () => _webSel,
-                repaint: _webSelRepaint,
+            if (event.kind == PointerDeviceKind.mouse) {
+              _releaseWebScrollHold();
+              _webScrollHold =
+                  Scrollable.maybeOf(context)?.position.hold(() {});
+            }
+          },
+          onPointerMove: (event) {
+            if (_webSelectPointer != event.pointer) return;
+            if (_blockToolbarForSecondary) return;
+            final origin = _webSelectOrigin;
+            if (origin == null) return;
+
+            final delta = event.localPosition - origin;
+            if (!_webSelectMoved) {
+              if (delta.distance < 2) return;
+              _webSelectMoved = true;
+              _webMultiTapSelect = false;
+              privetMessageSelectionDragging = true;
+              _syncIBeamOverlay();
+            }
+
+            final extent = _webOffsetAt(event.localPosition);
+            _setWebSelection(
+              TextSelection(
+                baseOffset: _webSelectBase,
+                extentOffset: extent,
               ),
+            );
+          },
+          onPointerUp: (event) {
+            if (_webSelectPointer != event.pointer) return;
+            _finishWebPointer(event.localPosition);
+          },
+          onPointerCancel: (event) {
+            if (_webSelectPointer != event.pointer) return;
+            _finishWebPointer(null);
+          },
+          child: CustomPaint(
+            key: _hostKey,
+            size: size,
+            painter: _WebMessageTextPainter(
+              textPainter: painter,
+              getSelection: () => _webSel,
+              repaint: _webSelRepaint,
             ),
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 
@@ -2095,69 +2439,178 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     });
   }
 
-  Widget _buildDesktopBody() {
-    final span = _spanFor(
-      widget.text,
-      withRecognizers: true,
-      hovering: _hovering,
-    );
-    return MouseRegion(
-      cursor: SystemMouseCursors.text,
-      onEnter: (_) {
-        setPrivetMessageSelectHover(true);
-        setState(() => _hovering = true);
-      },
-      onExit: (_) {
-        setPrivetMessageSelectHover(false);
-        if (mounted) setState(() => _hovering = false);
-      },
-      child: Listener(
-        onPointerDown: (event) {
-          if (event.buttons == kPrimaryMouseButton) {
-            // Drop composer focus so SelectableText can own the caret.
-            FocusManager.instance.primaryFocus?.unfocus();
-            _messageBodyPointerEpoch++;
-            privetMessageBodyClaimedPointer = true;
-          }
-          if (event.buttons == kSecondaryMouseButton) {
-            _blockToolbarForSecondary = true;
-            _removeToolbar();
-          }
-        },
-        onPointerUp: (_) {
-          if (_blockToolbarForSecondary) {
-            _blockToolbarForSecondary = false;
-            return;
-          }
-          if (_selected.isEmpty || _reactionMenuOpen) return;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted ||
-                _selected.isEmpty ||
-                _blockToolbarForSecondary ||
-                _reactionMenuOpen) {
-              return;
-            }
-            _showToolbar();
-          });
-        },
-        child: SelectableText.rich(
-          key: _hostKey,
-          span,
-          onSelectionChanged: _onSelectionChanged,
-          // Faster path — no magnifier, no system toolbar.
-          magnifierConfiguration: TextMagnifierConfiguration.disabled,
-          contextMenuBuilder: (context, editableTextState) =>
-              const SizedBox.shrink(),
-        ),
-      ),
-    );
+  @override
+  Widget build(BuildContext context) {
+    // Custom TextPainter selection (green rounded highlight) on all platforms.
+    // SelectableText on Linux paints a stock system selection that hides under
+    // the hover tint and does not match the web look.
+    return _buildWebBody();
   }
+}
+
+/// Accent-colored I-beam drawn under the pointer on native desktop (system
+/// text cursors cannot be recolored to [PrivetTheme.signal]).
+class _AccentIBeam extends StatelessWidget {
+  const _AccentIBeam();
 
   @override
   Widget build(BuildContext context) {
-    if (kIsWeb) return _buildWebBody();
-    return _buildDesktopBody();
+    return CustomPaint(
+      size: const Size(8, 20),
+      painter: _AccentIBeamPainter(PrivetTheme.signal),
+    );
   }
+}
+
+class _AccentIBeamPainter extends CustomPainter {
+  _AccentIBeamPainter(this.color);
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.square
+      ..style = PaintingStyle.stroke;
+    final cx = size.width / 2;
+    // Caps
+    canvas.drawLine(Offset(1, 1), Offset(size.width - 1, 1), paint);
+    canvas.drawLine(
+      Offset(1, size.height - 1),
+      Offset(size.width - 1, size.height - 1),
+      paint,
+    );
+    // Stem
+    canvas.drawLine(Offset(cx, 1), Offset(cx, size.height - 1), paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _AccentIBeamPainter oldDelegate) =>
+      oldDelegate.color != color;
+}
+
+/// Classic OS-style grab / grabbing hand (CSS/X11 shape), not a custom blob.
+/// Hover uses a neutral fill; press/drag uses the user accent.
+class _AccentGrabHand extends StatelessWidget {
+  const _AccentGrabHand({required this.squeezing});
+
+  final bool squeezing;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      size: const Size(32, 32),
+      painter: _AccentGrabHandPainter(
+        fill: squeezing ? PrivetTheme.signal : const Color(0xFFF5F5F5),
+        // OS grab cursors use a dark outline on any fill.
+        outline: const Color(0xFF1A1A1A),
+        squeezing: squeezing,
+      ),
+    );
+  }
+}
+
+class _AccentGrabHandPainter extends CustomPainter {
+  _AccentGrabHandPainter({
+    required this.fill,
+    required this.outline,
+    required this.squeezing,
+  });
+
+  final Color fill;
+  final Color outline;
+  final bool squeezing;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = squeezing ? _grabbingPath() : _grabPath();
+    final fillPaint = Paint()
+      ..color = fill
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+    final strokePaint = Paint()
+      ..color = outline
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.4
+      ..strokeJoin = StrokeJoin.round
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = true;
+    canvas.drawPath(path, fillPaint);
+    canvas.drawPath(path, strokePaint);
+  }
+
+  /// Open hand — approximate standard CSS `cursor: grab` silhouette.
+  Path _grabPath() {
+    final p = Path();
+    // Palm
+    p.moveTo(10, 14);
+    p.lineTo(10, 24);
+    p.quadraticBezierTo(10, 28, 15, 28);
+    p.lineTo(22, 28);
+    p.quadraticBezierTo(26, 28, 26, 23);
+    p.lineTo(26, 16);
+    // Pinky
+    p.lineTo(26, 11);
+    p.quadraticBezierTo(26, 8.5, 24.2, 8.5);
+    p.quadraticBezierTo(22.5, 8.5, 22.5, 11);
+    p.lineTo(22.5, 14);
+    // Ring
+    p.lineTo(22.5, 8);
+    p.quadraticBezierTo(22.5, 5.5, 20.7, 5.5);
+    p.quadraticBezierTo(19, 5.5, 19, 8);
+    p.lineTo(19, 14);
+    // Middle
+    p.lineTo(19, 6.5);
+    p.quadraticBezierTo(19, 4, 17.2, 4);
+    p.quadraticBezierTo(15.5, 4, 15.5, 6.5);
+    p.lineTo(15.5, 14);
+    // Index
+    p.lineTo(15.5, 7.5);
+    p.quadraticBezierTo(15.5, 5, 13.7, 5);
+    p.quadraticBezierTo(12, 5, 12, 7.5);
+    p.lineTo(12, 14);
+    // Thumb
+    p.lineTo(12, 16);
+    p.quadraticBezierTo(12, 12, 8, 11);
+    p.quadraticBezierTo(5.5, 10.5, 5.5, 13);
+    p.quadraticBezierTo(5.5, 15, 8.5, 16.5);
+    p.lineTo(10, 17.5);
+    p.close();
+    return p;
+  }
+
+  /// Closed fist — approximate standard CSS `cursor: grabbing`.
+  Path _grabbingPath() {
+    final p = Path();
+    p.moveTo(9, 16);
+    p.quadraticBezierTo(8, 12.5, 11, 11);
+    // Knuckle line
+    p.lineTo(12.5, 10);
+    p.quadraticBezierTo(13, 8.2, 14.8, 8.2);
+    p.quadraticBezierTo(16.2, 8.2, 16.5, 10);
+    p.quadraticBezierTo(17, 7.5, 19, 7.5);
+    p.quadraticBezierTo(20.8, 7.5, 21, 10);
+    p.quadraticBezierTo(21.5, 8, 23.5, 8.2);
+    p.quadraticBezierTo(25.2, 8.5, 25, 11);
+    p.lineTo(25, 18);
+    p.quadraticBezierTo(25, 24, 19.5, 25.5);
+    p.lineTo(13, 25.5);
+    p.quadraticBezierTo(9, 25, 9, 20);
+    p.close();
+    // Thumb tuck
+    p.moveTo(9, 17);
+    p.quadraticBezierTo(6.5, 16, 6.2, 18.2);
+    p.quadraticBezierTo(6, 20.5, 9, 21);
+    p.close();
+    return p;
+  }
+
+  @override
+  bool shouldRepaint(covariant _AccentGrabHandPainter oldDelegate) =>
+      oldDelegate.fill != fill ||
+      oldDelegate.outline != outline ||
+      oldDelegate.squeezing != squeezing;
 }
 
 class _WebSelRepaint extends ChangeNotifier {

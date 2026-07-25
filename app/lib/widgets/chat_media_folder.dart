@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import '../models.dart';
 import '../theme.dart';
 import '../util/media_download.dart';
+import 'image_lightbox.dart';
 import 'inline_video_player.dart';
 
 enum ChatMediaFolderKind { photos, files }
@@ -241,7 +242,22 @@ class _PhotosGrid extends StatelessWidget {
           borderRadius: BorderRadius.circular(10),
           clipBehavior: Clip.antiAlias,
           child: InkWell(
-            onTap: () => _openPhoto(context, url, entry),
+            mouseCursor: SystemMouseCursors.click,
+            onTap: () {
+              final urls = [
+                for (final e in items)
+                  mediaAbsoluteUrl(mediaBase, e.attachment.mediaUrl),
+              ];
+              final names = [
+                for (final e in items) _downloadName(e.attachment),
+              ];
+              showImageLightbox(
+                context,
+                urls: urls,
+                initialIndex: i,
+                filenames: names,
+              );
+            },
             child: Stack(
               fit: StackFit.expand,
               children: [
@@ -282,71 +298,6 @@ class _PhotosGrid extends StatelessWidget {
                         ),
                       ),
                     ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  void _openPhoto(BuildContext context, String url, SharedMediaEntry entry) {
-    showDialog<void>(
-      context: context,
-      builder: (ctx) {
-        return Dialog(
-          backgroundColor: PrivetTheme.ink,
-          insetPadding: const EdgeInsets.all(24),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 720, maxHeight: 720),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: IconButton(
-                    tooltip: 'Close',
-                    onPressed: () => Navigator.pop(ctx),
-                    icon: const Icon(Icons.close_rounded),
-                  ),
-                ),
-                Flexible(
-                  child: InteractiveViewer(
-                    child: Image.network(
-                      url,
-                      fit: BoxFit.contain,
-                      errorBuilder: (context, error, stackTrace) =>
-                          const Padding(
-                        padding: EdgeInsets.all(24),
-                        child: Text('Image unavailable'),
-                      ),
-                    ),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '${entry.senderName} · ${DateFormat.yMMMd().add_jm().format(entry.createdAt.toLocal())}',
-                          style: TextStyle(
-                            color: PrivetTheme.mist,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                      TextButton.icon(
-                        onPressed: () => downloadMedia(
-                          url,
-                          filename: _downloadName(entry.attachment),
-                        ),
-                        icon: const Icon(Icons.download_rounded, size: 18),
-                        label: const Text('Download'),
-                      ),
-                    ],
                   ),
                 ),
               ],

@@ -24,7 +24,7 @@ class ApiClient {
       }
       return base.origin;
     }
-    return 'https://messanger.banderdog.com';
+    return 'https://messenger.banderdog.com';
   }
 
   Uri _u(String path) => Uri.parse('$baseUrl$path');

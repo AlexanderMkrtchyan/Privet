@@ -183,7 +183,7 @@ jobs:
             - **Linux:** `.deb` (Ubuntu/Debian) and `.tar.gz`
             - **Windows:** native Flutter installer (`Privet-Setup.exe`) — unsigned; SmartScreen may warn (More info → Run anyway)
 
-            Default API: `https://messanger.banderdog.com`
+            Default API: `https://messenger.banderdog.com`
 
             ### Install
             - Ubuntu: `sudo apt install ./privet-linux-amd64.deb`

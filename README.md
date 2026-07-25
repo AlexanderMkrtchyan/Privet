@@ -6,12 +6,12 @@ Messenger for web, Linux, and Windows.
 
 | What | URL |
 |------|-----|
-| App (HTTPS) | https://messanger.banderdog.com/ |
-| Install | https://messanger.banderdog.com/install/ |
+| App (HTTPS) | https://messenger.banderdog.com/ |
+| Install | https://messenger.banderdog.com/install/ |
 
 Demo: `alex / privet` · one-click join available.
 
-Backend listens on `127.0.0.1:7777`; nginx terminates TLS for `messanger.banderdog.com`.
+Backend listens on `127.0.0.1:7777`; nginx terminates TLS for `messenger.banderdog.com`.
 
 ## Desktop builds
 
@@ -32,7 +32,7 @@ Artifacts land in `server/public/downloads/`:
 - `privet-linux-x64.tar.gz`
 - `Privet-Setup.exe` / `Privet-Setup-<ver>.exe` (from Windows CI)
 
-Default API for desktop clients: `https://messanger.banderdog.com`.
+Default API for desktop clients: `https://messenger.banderdog.com`.
 
 ### Releases
 

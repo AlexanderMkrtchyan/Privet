@@ -2812,11 +2812,7 @@ Examples:
       withVideo: mode != 'audio',
     );
     callMinimized = false;
-    if (mode == 'screen') {
-      stopAllCallSounds();
-    } else {
-      playOutgoingCallSound();
-    }
+    playOutgoingCallSound();
     notifyListeners();
     wakeUiAfterMediaDialog();
 
@@ -3270,12 +3266,10 @@ Examples:
           withVideo: call.mode != 'audio',
         );
         callMinimized = false;
-        // Never play ringback during screen share — tab/system capture can
-        // pick it up and keep looping it through the call after accept.
         // Skip restart when we already started tone in startCall.
-        if (call.mode == 'screen') {
-          stopAllCallSounds();
-        } else if (!alreadyOutgoing) {
+        // Display capture strips audio tracks, so classical ringback won't
+        // leak into the shared stream after accept (suppressCallTones stops it).
+        if (!alreadyOutgoing) {
           playOutgoingCallSound();
         }
         notifyListeners();

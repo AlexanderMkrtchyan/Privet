@@ -76,7 +76,8 @@ if (fs.existsSync(publicDir)) {
         pathName.endsWith('flutter_bootstrap.js') ||
         pathName.endsWith('flutter.js') ||
         pathName.endsWith('main.dart.js') ||
-        pathName.endsWith('manifest.json')
+        pathName.endsWith('manifest.json') ||
+        pathName.endsWith('sw.js')
       ) {
         // @fastify/static may pass a Fastify reply or a Node response.
         if (typeof res.setHeader === 'function') {
@@ -93,6 +94,13 @@ if (fs.existsSync(publicDir)) {
   app.setNotFoundHandler((request, reply) => {
     if (request.method === 'GET') {
       const url = request.url.split('?')[0];
+      // Native chat client (hash-routed Flutter shell) lives under /app/.
+      if (
+        (url === '/app' || url.startsWith('/app/')) &&
+        fs.existsSync(path.join(publicDir, 'app', 'index.html'))
+      ) {
+        return reply.sendFile('app/index.html');
+      }
       const apiLike =
         url.startsWith('/auth') ||
         url.startsWith('/me') ||

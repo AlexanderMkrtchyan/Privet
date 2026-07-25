@@ -24,6 +24,7 @@ import '../util/display_capture.dart';
 import '../util/media_permissions.dart';
 import '../util/media_ui_wake.dart';
 import '../util/recording_bytes.dart';
+import '../util/sounds.dart';
 import '../widgets/avatar.dart';
 import '../widgets/chat_media_folder.dart';
 import '../widgets/chat_task_pane.dart';
@@ -222,49 +223,53 @@ class InboxPane extends StatelessWidget {
                 children: [
                   Tooltip(
                     message: 'Profile & settings',
-                    child: InkWell(
-                      onTap: () => _showProfile(context),
-                      customBorder: const CircleBorder(),
-                      child: Padding(
-                        padding: const EdgeInsets.all(8),
-                        child: state.user == null
-                            ? const Icon(Icons.settings_rounded)
-                            : Stack(
-                                clipBehavior: Clip.none,
-                                children: [
-                                  PrivetAvatar(
-                                    name: state.user!.displayName,
-                                    hue: state.user!.avatarHue,
-                                    avatarUrl: state.user!.avatarUrl == null
-                                        ? null
-                                        : state.api.absoluteMediaUrl(
-                                            state.user!.avatarUrl,
+                    child: MouseRegion(
+                      cursor: SystemMouseCursors.click,
+                      child: InkWell(
+                        onTap: () => _showProfile(context),
+                        mouseCursor: SystemMouseCursors.click,
+                        customBorder: const CircleBorder(),
+                        child: Padding(
+                          padding: const EdgeInsets.all(8),
+                          child: state.user == null
+                              ? const Icon(Icons.settings_rounded)
+                              : Stack(
+                                  clipBehavior: Clip.none,
+                                  children: [
+                                    PrivetAvatar(
+                                      name: state.user!.displayName,
+                                      hue: state.user!.avatarHue,
+                                      avatarUrl: state.user!.avatarUrl == null
+                                          ? null
+                                          : state.api.absoluteMediaUrl(
+                                              state.user!.avatarUrl,
+                                            ),
+                                      size: compact ? 36 : 32,
+                                    ),
+                                    Positioned(
+                                      right: -3,
+                                      bottom: -3,
+                                      child: Container(
+                                        width: 16,
+                                        height: 16,
+                                        alignment: Alignment.center,
+                                        decoration: BoxDecoration(
+                                          color: PrivetTheme.panel,
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                            color: PrivetTheme.line,
                                           ),
-                                    size: compact ? 36 : 32,
-                                  ),
-                                  Positioned(
-                                    right: -3,
-                                    bottom: -3,
-                                    child: Container(
-                                      width: 16,
-                                      height: 16,
-                                      alignment: Alignment.center,
-                                      decoration: BoxDecoration(
-                                        color: PrivetTheme.panel,
-                                        shape: BoxShape.circle,
-                                        border: Border.all(
-                                          color: PrivetTheme.line,
+                                        ),
+                                        child: Icon(
+                                          Icons.settings_rounded,
+                                          size: 11,
+                                          color: PrivetTheme.mist,
                                         ),
                                       ),
-                                      child: Icon(
-                                        Icons.settings_rounded,
-                                        size: 11,
-                                        color: PrivetTheme.mist,
-                                      ),
                                     ),
-                                  ),
-                                ],
-                              ),
+                                  ],
+                                ),
+                        ),
                       ),
                     ),
                   ),
@@ -321,6 +326,7 @@ class InboxPane extends StatelessWidget {
                         : Colors.transparent,
                     child: InkWell(
                       onTap: () => state.openConversation(c.id),
+                      mouseCursor: SystemMouseCursors.click,
                       onSecondaryTapUp: (details) {
                         _openConversationMenu(
                           context,
@@ -3318,14 +3324,17 @@ class _ConversationPaneState extends State<ConversationPane> {
                     );
                     return KeyedSubtree(
                       key: key,
-                      child: showDaySeparator
-                          ? Column(
-                              children: [
-                                _DaySeparator(label: _dayLabel(m.createdAt)),
-                                bubble,
-                              ],
-                            )
-                          : bubble,
+                      child: RepaintBoundary(
+                        child: showDaySeparator
+                            ? Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  _DaySeparator(label: _dayLabel(m.createdAt)),
+                                  bubble,
+                                ],
+                              )
+                            : bubble,
+                      ),
                     );
                   },
                 ),
@@ -3840,6 +3849,10 @@ class _ConversationPaneState extends State<ConversationPane> {
   Future<void> _startCall(String mode) async {
     final needsCamera = mode == 'video';
     final isScreen = mode == 'screen';
+
+    // Chrome drops user-activation across getUserMedia awaits — unlock call
+    // AudioElements here, while the click gesture is still live.
+    unlockNotificationAudio();
 
     // Firefox (and Chrome): getDisplayMedia requires transient user activation.
     // Show Privet chooser first; capture runs inside that option's click.
@@ -5060,34 +5073,37 @@ class _ThemeModeSelector extends StatelessWidget {
     required String label,
     required VoidCallback onTap,
   }) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        padding: const EdgeInsets.symmetric(vertical: 9),
-        decoration: BoxDecoration(
-          color: selected ? PrivetTheme.signal : Colors.transparent,
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              icon,
-              size: 16,
-              color: selected ? PrivetTheme.onAccent : PrivetTheme.mist,
-            ),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding: const EdgeInsets.symmetric(vertical: 9),
+          decoration: BoxDecoration(
+            color: selected ? PrivetTheme.signal : Colors.transparent,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                size: 16,
                 color: selected ? PrivetTheme.onAccent : PrivetTheme.mist,
               ),
-            ),
-          ],
+              const SizedBox(width: 6),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: selected ? PrivetTheme.onAccent : PrivetTheme.mist,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -5117,22 +5133,25 @@ class _AccentPicker extends StatelessWidget {
     final isSelected = seed.toARGB32() == selected.toARGB32();
     return Tooltip(
       message: label,
-      child: GestureDetector(
-        onTap: () => onPick(seed),
-        child: Container(
-          width: 34,
-          height: 34,
-          decoration: BoxDecoration(
-            color: seed,
-            shape: BoxShape.circle,
-            border: Border.all(
-              color: isSelected ? PrivetTheme.paper : PrivetTheme.line,
-              width: isSelected ? 2.5 : 1,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () => onPick(seed),
+          child: Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: seed,
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: isSelected ? PrivetTheme.paper : PrivetTheme.line,
+                width: isSelected ? 2.5 : 1,
+              ),
             ),
+            child: isSelected
+                ? Icon(Icons.check_rounded, size: 18, color: PrivetTheme.onAccent)
+                : null,
           ),
-          child: isSelected
-              ? Icon(Icons.check_rounded, size: 18, color: PrivetTheme.onAccent)
-              : null,
         ),
       ),
     );

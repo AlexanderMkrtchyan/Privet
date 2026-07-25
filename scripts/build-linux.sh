@@ -23,8 +23,12 @@ mkdir -p "$OUT"
 
 cd "$ROOT/app"
 flutter pub get
+# Default production API; override for local installs:
+#   PRIVET_API=http://127.0.0.1:7777 scripts/build-linux.sh
+PRIVET_API_DEFINE="${PRIVET_API:-https://messenger.banderdog.com}"
 flutter build linux --release \
-  --dart-define=PRIVET_BUILD="$STAMP"
+  --dart-define=PRIVET_BUILD="$STAMP" \
+  --dart-define=PRIVET_API="$PRIVET_API_DEFINE"
 
 BUNDLE="$ROOT/app/build/linux/x64/release/bundle"
 test -x "$BUNDLE/privet"
@@ -74,7 +78,7 @@ Privet for Linux (native) v${VERSION}
 Run: ./privet
 
 This is a native GTK desktop app (not a browser window).
-Talks to https://messanger.banderdog.com by default.
+Talks to https://messenger.banderdog.com by default.
 
 Optional menu launcher:
   mkdir -p ~/.local/share/applications
@@ -165,7 +169,7 @@ Maintainer: Privet <privet@local>
 Depends: libgtk-3-0 | libgtk-3-0t64, libglib2.0-0 | libglib2.0-0t64, libstdc++6, libc6
 Description: Privet messenger (native Linux desktop)
  Native Flutter/GTK client for Privet. Connects to
- https://messanger.banderdog.com by default.
+ https://messenger.banderdog.com by default.
 EOF
 
 # Ensure RPATH-friendly permissions on bundled libs

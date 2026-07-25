@@ -8,21 +8,29 @@ import 'display_share_surface.dart';
 
 export 'display_share_surface.dart';
 
-/// Capture a display surface with Linux/Ubuntu-friendly constraint fallbacks.
+/// Capture a display surface.
 ///
-/// Chromium on Ubuntu often throws `NotFoundError` / "Requested device not found"
-/// when PipeWire / xdg-desktop-portal is missing, or when overly strict
-/// constraints (esp. `audio: false`) are passed. We try several shapes and
-/// surface a clear fix hint.
+/// **Web:** Chromium on Ubuntu often throws `NotFoundError` when PipeWire /
+/// xdg-desktop-portal is missing, or when overly strict constraints are
+/// passed. We try several shapes and surface a clear fix hint.
 ///
-/// [prefer] is a soft hint for Chrome's native picker (Entire screen /
-/// Window / Tab). The browser still shows its own dialog — web apps cannot
-/// replace that UI. Firefox ignores [prefer] and rejects Chromium-only
-/// constraints — we use a single plain `getDisplayMedia` there so the native
-/// picker never opens twice.
+/// **Native desktop (Linux/Windows/macOS):** flutter_webrtc requires a
+/// [DesktopCapturer] source id — bare `getDisplayMedia` fails with
+/// "source not found!". Pass [sourceId] from the picker, or we auto-pick
+/// the first screen/window matching [prefer].
+///
+/// [prefer] is a soft hint (Chrome picker / desktop source type). The OS
+/// still shows its own dialog on web. Firefox ignores [prefer] and rejects
+/// Chromium-only constraints — we use a single plain `getDisplayMedia`
+/// there so the native picker never opens twice.
 Future<MediaStream> captureDisplayMedia({
   DisplayShareSurface? prefer,
+  String? sourceId,
 }) async {
+  if (WebRTC.platformIsDesktop) {
+    return _captureDesktop(prefer: prefer, sourceId: sourceId);
+  }
+
   // Firefox: one plain capture. Chromium-only constraints (displaySurface,
   // CaptureController, selfBrowserSurface) either no-op or fail and would
   // reopen the portal picker on each fallback attempt.
@@ -82,6 +90,70 @@ Future<MediaStream> captureDisplayMedia({
   }
 
   throw StateError(_friendlyDisplayError(last));
+}
+
+/// Native desktop: list sources via DesktopCapturer, then capture by id.
+Future<MediaStream> _captureDesktop({
+  DisplayShareSurface? prefer,
+  String? sourceId,
+}) async {
+  try {
+    final types = _desktopTypesFor(prefer);
+    // Populate the native plugin's source list — getDisplayMedia looks up
+    // by id in that list and fails with "source not found!" otherwise.
+    final sources = await desktopCapturer.getSources(
+      types: types,
+      thumbnailSize: ThumbnailSize(160, 90),
+    );
+    if (sources.isEmpty) {
+      throw StateError(
+        'No screens or windows available to share. '
+        'On Wayland, grant screen sharing permission when prompted.',
+      );
+    }
+
+    final id = sourceId ?? sources.first.id;
+    if (sourceId != null && !sources.any((s) => s.id == sourceId)) {
+      // Source may have closed; refresh both types once.
+      final all = await desktopCapturer.getSources(
+        types: [SourceType.Screen, SourceType.Window],
+        thumbnailSize: ThumbnailSize(160, 90),
+      );
+      if (!all.any((s) => s.id == sourceId)) {
+        throw StateError(
+          'That screen or window is no longer available. Pick again.',
+        );
+      }
+    }
+
+    final stream = await navigator.mediaDevices.getDisplayMedia({
+      'video': {
+        'deviceId': {'exact': id},
+        'mandatory': {'frameRate': 30.0},
+      },
+    });
+    await stripDisplayAudioTracks(stream);
+    return stream;
+  } catch (e) {
+    if (e is StateError) rethrow;
+    if (_isUserCancel(e)) {
+      throw StateError('Screen share cancelled.');
+    }
+    throw StateError(_friendlyDisplayError(e));
+  }
+}
+
+List<SourceType> _desktopTypesFor(DisplayShareSurface? prefer) {
+  switch (prefer) {
+    case DisplayShareSurface.window:
+      return [SourceType.Window];
+    case DisplayShareSurface.browser:
+      // Native apps cannot capture browser tabs — fall back to windows.
+      return [SourceType.Window];
+    case DisplayShareSurface.monitor:
+    case null:
+      return [SourceType.Screen];
+  }
 }
 
 Map<String, dynamic> _constraintsFor(DisplayShareSurface prefer) {
@@ -158,11 +230,16 @@ bool _isNotFound(Object? e) {
   return s.contains('notfound') ||
       s.contains('not found') ||
       s.contains('requested device not found') ||
-      s.contains('devicesnotfound');
+      s.contains('devicesnotfound') ||
+      s.contains('source not found');
 }
 
 String _friendlyDisplayError(Object? e) {
   if (_isNotFound(e)) {
+    if (WebRTC.platformIsDesktop) {
+      return 'Screen capture failed (source not found). '
+          'Pick a screen or window from the Share dialog and try again. ($e)';
+    }
     return 'Screen capture not available (device not found). '
         'On Ubuntu: install PipeWire + a desktop portal, then restart the browser — '
         'e.g. `sudo apt install pipewire wireplumber xdg-desktop-portal '

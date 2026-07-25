@@ -10,7 +10,7 @@
   #define MyAppVersion "0.1.0"
 #endif
 #define MyAppPublisher "Privet"
-#define MyAppURL "https://messanger.banderdog.com"
+#define MyAppURL "https://messenger.banderdog.com"
 #define MyAppExeName "privet.exe"
 #ifndef SourceDir
   #define SourceDir "..\..\app\build\windows\x64\runner\Release"

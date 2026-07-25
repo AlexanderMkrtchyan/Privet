@@ -8,7 +8,7 @@ import (
 
 // Thin Windows launcher: opens Privet in an Edge/Chrome app window.
 func main() {
-	const url = "https://messanger.banderdog.com"
+	const url = "https://messenger.banderdog.com"
 	if runtime.GOOS == "windows" {
 		candidates := [][]string{
 			{"cmd", "/c", "start", "", "msedge", "--app=" + url},

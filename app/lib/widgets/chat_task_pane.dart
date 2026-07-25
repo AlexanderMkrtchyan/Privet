@@ -244,42 +244,36 @@ class _ChatTaskPaneState extends State<ChatTaskPane> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Container(
-          padding: const EdgeInsets.fromLTRB(4, 4, 12, 8),
+          padding: const EdgeInsets.fromLTRB(12, 4, 4, 8),
           decoration: BoxDecoration(
             border: Border(bottom: BorderSide(color: PrivetTheme.line)),
           ),
           child: Row(
             children: [
-              IconButton(
-                tooltip: 'Back to chat',
-                onPressed: widget.onClose,
-                icon: const Icon(Icons.close_rounded),
-              ),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Tasks',
-                      style: GoogleFonts.syne(
-                        fontWeight: FontWeight.w700,
-                        fontSize: 18,
-                      ),
+              const Spacer(),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    'Tasks',
+                    style: GoogleFonts.syne(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 18,
                     ),
-                    Text(
-                      done
-                          ? (items.isEmpty
-                              ? 'Nothing open — add a step below'
-                              : 'All ${items.length} done')
-                          : '${board.doneCount} of ${board.total} done',
-                      style: TextStyle(
-                        color: done ? PrivetTheme.signal : PrivetTheme.mist,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
+                  ),
+                  Text(
+                    done
+                        ? (items.isEmpty
+                            ? 'Nothing open — add a step below'
+                            : 'All ${items.length} done')
+                        : '${board.doneCount} of ${board.total} done',
+                    style: TextStyle(
+                      color: done ? PrivetTheme.signal : PrivetTheme.mist,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
               if (board.doneCount > 0)
                 TextButton(
@@ -287,6 +281,11 @@ class _ChatTaskPaneState extends State<ChatTaskPane> {
                       widget.state.clearDoneTasks(widget.conversationId),
                   child: const Text('Clear done'),
                 ),
+              IconButton(
+                tooltip: 'Back to chat',
+                onPressed: widget.onClose,
+                icon: const Icon(Icons.close_rounded),
+              ),
             ],
           ),
         ),

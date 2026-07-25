@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import 'util/web_select_cursor.dart';
+
 /// A named accent the user can pick from the Appearance settings. [seed] is a
 /// hue reference; the actual accent used per theme mode is derived from it so
 /// it stays bright on dark surfaces and deep enough to read on light ones.
@@ -126,6 +128,8 @@ class PrivetTheme {
     _active = brightness == Brightness.light
         ? _buildLight(accent)
         : _buildDark(accent);
+    // Keep web painted I-beam / move cursors on the live accent.
+    syncPrivetAccentCursors(_active.signal);
   }
 
   static Color _tone(Color seed, double lightness, {double satScale = 1.0}) {
@@ -264,6 +268,14 @@ class PrivetTheme {
           minimumSize: const WidgetStatePropertyAll(Size(44, 44)),
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         ),
+      ),
+      textSelectionTheme: TextSelectionThemeData(
+        cursorColor: p.signal,
+        selectionColor: p.signal.withValues(alpha: 0.45),
+        selectionHandleColor: p.signal,
+      ),
+      listTileTheme: ListTileThemeData(
+        mouseCursor: WidgetStateMouseCursor.clickable,
       ),
       dividerColor: p.line,
     );
