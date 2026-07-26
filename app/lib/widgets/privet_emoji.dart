@@ -1,9 +1,9 @@
 import 'package:animated_emoji/animated_emoji.dart';
 import 'package:flutter/material.dart';
 
-/// Global switch flipped by [PrivetState.lowResourceMode]. When true, skip
-/// network Lottie emoji entirely (static unicode glyphs only).
-bool privetLowResourceEmoji = false;
+import '../util/low_resource.dart';
+
+export '../util/low_resource.dart' show privetLowResourceEmoji;
 
 /// Renders a Noto animated emoji when available; falls back to the unicode glyph.
 ///
@@ -46,7 +46,7 @@ class PrivetEmoji extends StatelessWidget {
       textAlign: TextAlign.center,
     );
 
-    if (privetLowResourceEmoji || size < staticGlyphThreshold) {
+    if (privetLowResource || size < staticGlyphThreshold) {
       return glyphFallback();
     }
 

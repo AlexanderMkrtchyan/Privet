@@ -1,24 +1,31 @@
 import 'app_clipboard_stub.dart'
     if (dart.library.html) 'app_clipboard_web_store.dart' as store;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 /// Text clipboard with an in-app mirror.
 ///
-/// On Flutter web, toolbar **Paste** uses `navigator.clipboard.readText()`,
-/// which often hangs or fails. We keep the last text from in-app Copy / Ctrl+C
-/// (and DOM copy/cut/paste events) so toolbar Paste can insert synchronously.
+/// On Flutter web, toolbar **Paste** must never call
+/// `navigator.clipboard.readText()` — Chromium shows a Paste permission
+/// bubble that steals the next left-click (breaks remote control). We keep
+/// the last text from in-app Copy / Ctrl+C (and DOM copy/cut/paste events).
 class AppClipboard {
   AppClipboard._();
 
   static String? _lastText;
+
+  /// Fired when text is mirrored (copy/cut/paste DOM or in-app Copy).
+  /// Used by remote control on web instead of clipboard polling/readText.
+  static void Function(String text)? onRemembered;
 
   /// Sync remember without touching the system clipboard.
   static void remember(String text) {
     if (text.isEmpty) return;
     _lastText = text;
     store.persistClipboardText(text);
+    onRemembered?.call(text);
   }
 
   static String? peek() {
@@ -34,14 +41,15 @@ class AppClipboard {
   static Future<void> setText(String text) async {
     if (text.isEmpty) return;
     remember(text);
+    if (kIsWeb) return; // writeText can also prompt; mirror is enough on web
     try {
       await Clipboard.setData(ClipboardData(text: text));
     } catch (_) {}
   }
 
-  /// System clipboard first (short timeout), then in-app mirror.
-  /// Prefer [peek] for toolbar Paste — never block the button on readText().
+  /// Prefer [peek] — never call clipboard.readText on web.
   static Future<String?> getText() async {
+    if (kIsWeb) return peek();
     try {
       final data = await Clipboard.getData(Clipboard.kTextPlain)
           .timeout(const Duration(milliseconds: 200));

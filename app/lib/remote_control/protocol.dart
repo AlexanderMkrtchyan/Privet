@@ -5,7 +5,80 @@ import 'dart:math' as math;
 const int kRemoteControlProtocolVersion = 1;
 
 /// Max UTF-8 size for a single data-channel payload (bytes).
-const int kRemoteControlMaxMessageBytes = 2048;
+/// Sized for text clipboard sync (~64KB) plus protocol overhead.
+const int kRemoteControlMaxMessageBytes = 65536;
+
+/// Soft cap on clipboard text synced over the control channel.
+const int kRemoteControlMaxClipboardChars = 60000;
+
+/// Controller-requested encode / capture preference.
+enum RemoteControlQuality {
+  quality,
+  balanced,
+  speed,
+}
+
+extension RemoteControlQualityWire on RemoteControlQuality {
+  String get wire {
+    switch (this) {
+      case RemoteControlQuality.quality:
+        return 'quality';
+      case RemoteControlQuality.balanced:
+        return 'balanced';
+      case RemoteControlQuality.speed:
+        return 'speed';
+    }
+  }
+
+  static RemoteControlQuality? parse(Object? raw) {
+    switch (raw) {
+      case 'quality':
+        return RemoteControlQuality.quality;
+      case 'balanced':
+        return RemoteControlQuality.balanced;
+      case 'speed':
+        return RemoteControlQuality.speed;
+      default:
+        return null;
+    }
+  }
+}
+
+/// One host display surface advertised to the controller.
+class RemoteDisplayInfo {
+  const RemoteDisplayInfo({
+    required this.id,
+    required this.name,
+    this.width = 0,
+    this.height = 0,
+  });
+
+  final String id;
+  final String name;
+  final int width;
+  final int height;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        if (width > 0) 'w': width,
+        if (height > 0) 'h': height,
+      };
+
+  static RemoteDisplayInfo? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final map = Map<String, dynamic>.from(raw);
+    final id = map['id'] as String?;
+    final name = map['name'] as String?;
+    if (id == null || id.isEmpty || name == null) return null;
+    return RemoteDisplayInfo(
+      id: id,
+      name: name,
+      width: (map['w'] as num?)?.toInt() ?? 0,
+      height: (map['h'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
 
 /// Soft cap on input events accepted per second on the host.
 const int kRemoteControlMaxEventsPerSecond = 120;
@@ -104,7 +177,8 @@ class RemoteControlProtocol {
   }) =>
       encode({
         't': 'key',
-        'code': code,
+        // Strip spaces so "Alt Left" / "Meta Left" match native maps.
+        'code': code.replaceAll(' ', ''),
         'down': down,
         'mods': mods,
         if (key != null && key.isNotEmpty) 'key': key,
@@ -120,8 +194,35 @@ class RemoteControlProtocol {
 
   static String releaseAll() => encode({'t': 'release'});
 
+  static String quality(RemoteControlQuality mode) => encode({
+        't': 'quality',
+        'mode': mode.wire,
+      });
+
+  static String clipboard(String text) {
+    final clipped = text.length > kRemoteControlMaxClipboardChars
+        ? text.substring(0, kRemoteControlMaxClipboardChars)
+        : text;
+    return encode({'t': 'clip', 'text': clipped});
+  }
+
+  static String displays(List<RemoteDisplayInfo> list, {String? activeId}) =>
+      encode({
+        't': 'displays',
+        'list': list.map((e) => e.toJson()).toList(),
+        if (activeId != null && activeId.isNotEmpty) 'active': activeId,
+      });
+
+  static String switchDisplay(String id) => encode({
+        't': 'switch_display',
+        'id': id,
+      });
+
   /// Map a point inside a letterboxed video viewport to normalized [0,1] coords
-  /// on the shared display, or null when the point is in the letterbox.
+  /// on the shared display.
+  ///
+  /// Points in the letterbox gutters clamp to the nearest content edge so the
+  /// controller can reach the host top bar / dock (GNOME needs x≈0 / y≈0).
   static ({double x, double y})? mapLetterboxedPoint({
     required double localX,
     required double localY,
@@ -150,7 +251,6 @@ class RemoteControlProtocol {
     }
     final px = localX - originX;
     final py = localY - originY;
-    if (px < 0 || py < 0 || px > contentW || py > contentH) return null;
     return (x: _clamp01(px / contentW), y: _clamp01(py / contentH));
   }
 
@@ -208,8 +308,11 @@ class RemoteControlSessionState {
   void noteHeartbeat() => lastHeartbeatAt = DateTime.now();
 
   /// Returns false when the host should drop the event (rate / auth).
-  bool acceptHostEvent(DateTime now) {
+  ///
+  /// Pass [force] for key/button ups so rate-limiting never leaves stuck input.
+  bool acceptHostEvent(DateTime now, {bool force = false}) {
     if (!isHost) return false;
+    if (force) return true;
     _eventTimes.removeWhere((t) => now.difference(t).inMilliseconds > 1000);
     if (_eventTimes.length >= kRemoteControlMaxEventsPerSecond) return false;
     _eventTimes.add(now);

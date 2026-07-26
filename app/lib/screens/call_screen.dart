@@ -5,11 +5,13 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../models.dart';
-import '../remote_control/protocol.dart';
 import '../state.dart';
 import '../theme.dart';
+import '../util/remote_input.dart';
+import '../util/webrtc_safe.dart';
 import '../util/web_select_cursor.dart';
 import '../widgets/avatar.dart';
+import '../widgets/immersive_control_chrome.dart';
 import '../widgets/remote_control_layer.dart';
 import '../widgets/screen_share_picker.dart';
 
@@ -20,6 +22,8 @@ String _modeLabel(String mode) {
       return 'Audio call';
     case 'screen':
       return 'Screen share';
+    case 'control':
+      return 'Remote control';
     default:
       return 'Video call';
   }
@@ -31,9 +35,68 @@ IconData _modeIcon(String mode) {
       return Icons.call_rounded;
     case 'screen':
       return Icons.screen_share_rounded;
+    case 'control':
+      return Icons.mouse_rounded;
     default:
       return Icons.videocam_rounded;
   }
+}
+
+Future<void> _acceptRemoteControlInvite(
+  BuildContext context,
+  PrivetState state,
+) async {
+  final cap = await RemoteInput.probe();
+  if (!cap.canInject) {
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: PrivetTheme.panel,
+        title: Text(
+          'Cannot allow remote control',
+          style: GoogleFonts.syne(fontWeight: FontWeight.w700),
+        ),
+        content: Text(
+          cap.detail.isNotEmpty
+              ? cap.detail
+              : 'Use the Linux or Windows Privet app to let someone control your screen. A browser tab cannot move your mouse or type on your behalf.',
+          style: TextStyle(color: PrivetTheme.mist, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+    state.rejectIncoming();
+    return;
+  }
+
+  if (!context.mounted) return;
+  MediaStream? stream;
+  try {
+    stream = await showScreenSharePicker(context, screensOnly: true);
+  } catch (e) {
+    state.setError('$e');
+    return;
+  }
+  if (stream == null) return; // cancelled — stay ringing
+
+  try {
+    await RemoteInput.ensureReady();
+  } catch (e) {
+    for (final t in stream.getTracks()) {
+      await t.stop();
+    }
+    await stream.dispose();
+    state.setError('Could not enable OS input for remote control: $e');
+    return;
+  }
+
+  await state.acceptRemoteControl(displayStream: stream);
 }
 
 class CallOverlay extends StatelessWidget {
@@ -226,36 +289,50 @@ class _MiniCallBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final mode = session.call.mode;
     final sharing = session.isSharingLocally;
-    final isScreen = mode == 'screen';
+    final isScreen = session.isScreenLike;
 
     // Any live video worth previewing — decoupled from call *mode* so a screen
     // share started during an audio call still lights up the tile.
+    final hostingControl = session.isRemoteHost ||
+        (session.isControlCall && sharing);
     final localCamLive = session.hasCamTrack &&
         session.camOn &&
         !sharing &&
         session.localRenderer.srcObject != null;
     final remoteVideo = session.remoteHasVideo && !session.showShareStopped;
-    final showLocalPreview = sharing || (!remoteVideo && localCamLive);
-    final showVideo = sharing || remoteVideo || localCamLive;
+    // Control host: no nested local screen preview in the mini bar.
+    final showLocalPreview =
+        !hostingControl && (sharing || (!remoteVideo && localCamLive));
+    final showVideo =
+        (!hostingControl && sharing) || remoteVideo || localCamLive;
     final videoRenderer =
-        (sharing || (!remoteVideo && localCamLive)) ? session.localRenderer : session.remoteRenderer;
-    final videoIsScreen = sharing ? true : (isScreen || session.peerSharingScreen);
+        (showLocalPreview) ? session.localRenderer : session.remoteRenderer;
+    final videoIsScreen =
+        showLocalPreview && sharing ? true : (isScreen || session.peerSharingScreen);
 
-    final label = mode == 'screen'
+    final label = mode == 'control'
         ? (sharing
-            ? 'Sharing screen'
-            : session.showShareStopped
-                ? 'Share stopped'
-                : remoteVideo
+            ? 'Being controlled'
+            : session.remoteControlActive
+                ? 'Controlling'
+                : session.showShareStopped
+                    ? 'Control ended'
+                    : 'Remote control')
+        : mode == 'screen'
+            ? (sharing
+                ? 'Sharing screen'
+                : session.showShareStopped
+                    ? 'Share stopped'
+                    : remoteVideo
+                        ? 'Watching screen'
+                        : 'Screen call')
+            : sharing
+                ? 'Sharing screen'
+                : session.peerSharingScreen && remoteVideo
                     ? 'Watching screen'
-                    : 'Screen call')
-        : sharing
-            ? 'Sharing screen'
-            : session.peerSharingScreen && remoteVideo
-                ? 'Watching screen'
-                : mode == 'video'
-                    ? 'Video call'
-                    : 'Audio call';
+                    : mode == 'video'
+                        ? 'Video call'
+                        : 'Audio call';
 
     const railW = 220.0;
     final videoH = (height - 24).clamp(72.0, height - 24);
@@ -272,38 +349,45 @@ class _MiniCallBar extends StatelessWidget {
               : session.micOn
                   ? PrivetTheme.panel
                   : PrivetTheme.danger,
-          enabled: session.hasMicTrack,
-          tooltip: session.micOn ? 'Mute' : 'Unmute',
+          enabled: true,
+          tooltip: !session.hasMicTrack
+              ? 'Enable microphone'
+              : session.micOn
+                  ? 'Mute'
+                  : 'Unmute',
           onTap: session.toggleMic,
         ),
-        _MiniIconBtn(
-          icon: sharing
-              ? Icons.stop_screen_share_rounded
-              : Icons.screen_share_rounded,
-          color: sharing ? const Color(0xFFFFA726) : PrivetTheme.signal,
-          ink: !sharing,
-          enabled: sharing || session.canStartScreenShare,
-          tooltip: sharing
-              ? 'Stop sharing'
-              : session.canStartScreenShare
-                  ? 'Share screen'
-                  : 'Peer sharing',
-          onTap: () async {
-            if (sharing) {
-              await session.toggleScreenShare();
-              return;
-            }
-            final stream = await showScreenSharePicker(context);
-            if (stream != null) {
-              await session.startScreenShare(stream);
-            }
-          },
-        ),
+        if (!session.isControlCall)
+          _MiniIconBtn(
+            icon: sharing
+                ? Icons.stop_screen_share_rounded
+                : Icons.screen_share_rounded,
+            color: sharing ? const Color(0xFFFFA726) : PrivetTheme.signal,
+            ink: !sharing,
+            enabled: sharing || session.canStartScreenShare,
+            tooltip: sharing
+                ? 'Stop sharing'
+                : session.canStartScreenShare
+                    ? 'Share screen'
+                    : 'Peer sharing',
+            onTap: () async {
+              if (sharing) {
+                await session.toggleScreenShare();
+                return;
+              }
+              final stream = await showScreenSharePicker(context);
+              if (stream != null) {
+                await session.startScreenShare(stream);
+              }
+            },
+          ),
         _MiniIconBtn(
           icon: Icons.open_in_full_rounded,
           color: PrivetTheme.signal,
           ink: true,
-          tooltip: 'Maximize',
+          tooltip: session.isControlCall && session.remoteControlActive
+              ? 'Expand to control'
+              : 'Maximize',
           onTap: () => state.setCallMinimized(false),
         ),
         _MiniIconBtn(
@@ -601,9 +685,7 @@ class _RingingViewState extends State<_RingingView> {
     if (identical(_bound, stream)) return;
     _bound = stream;
     _preview.srcObject = stream;
-    try {
-      _preview.muted = true;
-    } catch (_) {}
+    unawaited(muteLocalRenderer(_preview));
     if (mounted) setState(() {});
   }
 
@@ -628,10 +710,14 @@ class _RingingViewState extends State<_RingingView> {
         _preview.srcObject != null;
 
     final title = incoming
-        ? 'Incoming ${_modeLabel(mode).toLowerCase()}'
+        ? (mode == 'control'
+            ? '${ring.peer.displayName} wants to control your screen'
+            : 'Incoming ${_modeLabel(mode).toLowerCase()}')
         : mode == 'screen'
             ? 'Sharing screen…'
-            : 'Ringing…';
+            : mode == 'control'
+                ? 'Waiting for them to allow control…'
+                : 'Ringing…';
 
     final peerBlock = Column(
       mainAxisSize: MainAxisSize.min,
@@ -662,16 +748,22 @@ class _RingingViewState extends State<_RingingView> {
             Icon(_modeIcon(mode),
                 size: 16, color: PrivetTheme.signal),
             const SizedBox(width: 8),
-            Text(
-              title.toUpperCase(),
-              style: GoogleFonts.ibmPlexSans(
-                fontSize: 12,
-                letterSpacing: 1.6,
-                fontWeight: FontWeight.w700,
-                color: PrivetTheme.signal,
-                shadows: showSelfPreview
-                    ? const [Shadow(blurRadius: 10, color: Colors.black87)]
-                    : null,
+            Flexible(
+              child: Text(
+                (incoming && mode == 'control'
+                        ? 'Remote control request'
+                        : title)
+                    .toUpperCase(),
+                textAlign: TextAlign.center,
+                style: GoogleFonts.ibmPlexSans(
+                  fontSize: 12,
+                  letterSpacing: 1.6,
+                  fontWeight: FontWeight.w700,
+                  color: PrivetTheme.signal,
+                  shadows: showSelfPreview
+                      ? const [Shadow(blurRadius: 10, color: Colors.black87)]
+                      : null,
+                ),
               ),
             ),
           ],
@@ -689,6 +781,24 @@ class _RingingViewState extends State<_RingingView> {
                 : null,
           ),
         ),
+        if (incoming && mode == 'control') ...[
+          const SizedBox(height: 10),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Text(
+              'Allowing shares your screen and lets them move your mouse and type. Use the Linux or Windows Privet app.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: showSelfPreview ? PrivetTheme.paper : PrivetTheme.mist,
+                fontSize: 13,
+                height: 1.35,
+                shadows: showSelfPreview
+                    ? const [Shadow(blurRadius: 10, color: Colors.black87)]
+                    : null,
+              ),
+            ),
+          ),
+        ],
         if (ring.peer.handle.isNotEmpty) ...[
           const SizedBox(height: 6),
           Text(
@@ -718,7 +828,16 @@ class _RingingViewState extends State<_RingingView> {
             big: true,
             onTap: state.rejectIncoming,
           ),
-          if (videoInvite) ...[
+          if (mode == 'control')
+            _CallButton(
+              color: PrivetTheme.signal,
+              icon: Icons.mouse_rounded,
+              label: 'Allow control',
+              ink: true,
+              big: true,
+              onTap: () => _acceptRemoteControlInvite(context, state),
+            )
+          else if (videoInvite) ...[
             _CallButton(
               color: PrivetTheme.panelElevated,
               icon: Icons.call_rounded,
@@ -872,7 +991,7 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
     final compact = PrivetTheme.isCompact(context);
 
     final mode = session.call.mode;
-    final isScreenCall = mode == 'screen';
+    final isScreenCall = session.isScreenLike;
     final sharing = session.isSharingLocally;
     final shareStopped = session.showShareStopped;
 
@@ -884,16 +1003,20 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
     final remoteVideo = session.remoteHasVideo && !shareStopped;
     final remoteIsScreen = isScreenCall || session.peerSharingScreen;
 
+    // Hosting control: never stage our own capture — it nests in the stream.
+    final hostingControl = session.isRemoteHost ||
+        (session.isControlCall && sharing);
     // Stage priority: my share → remote video → my camera (self-preview) → avatar.
-    final stageIsLocalScreen = sharing;
-    final stageIsRemote = !sharing && remoteVideo;
-    final stageIsLocalCam = !sharing && !remoteVideo && localCamLive;
+    final stageIsLocalScreen = sharing && !hostingControl;
+    final stageIsRemote = !stageIsLocalScreen && remoteVideo;
+    final stageIsLocalCam =
+        !stageIsLocalScreen && !remoteVideo && localCamLive;
     final hasStageVideo = stageIsLocalScreen || stageIsRemote || stageIsLocalCam;
 
     // Self-view PiP: always visible when my camera isn't already the stage.
     final showSelfPip = localCamLive && stageIsRemote;
     // While I share my screen, keep the peer's camera visible in the corner.
-    final showRemotePip = sharing && remoteVideo;
+    final showRemotePip = stageIsLocalScreen && remoteVideo;
     final showPip = showSelfPip || showRemotePip;
 
     // Re-bind renderers when the PiP (re)appears — flutter_webrtc reuses one
@@ -935,6 +1058,10 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
       remoteVideo: remoteVideo,
     );
 
+    final immersive = session.isControlCall ||
+        (session.remoteControlActive &&
+            (session.isRemoteController || session.isRemoteHost));
+
     // ── Stage ──
     final stage = hasStageVideo
         ? RTCVideoView(
@@ -970,7 +1097,7 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
           );
 
     Widget? pip;
-    if (showPip) {
+    if (showPip && !immersive) {
       final pipRenderer =
           showSelfPip ? session.localRenderer : session.remoteRenderer;
       final pipMirror = showSelfPip;
@@ -1005,107 +1132,124 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
 
     return Material(
       color: PrivetTheme.ink,
-      child: RemoteControlLayer(
-        session: session,
-        child: Stack(
+      child: Stack(
+        fit: StackFit.expand,
         children: [
-          Positioned.fill(child: ColoredBox(color: Colors.black, child: stage)),
-          // Top scrim for legibility of the header.
-          const Positioned(
-            left: 0,
-            right: 0,
-            top: 0,
-            height: 120,
-            child: IgnorePointer(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [Color(0x99000000), Color(0x00000000)],
-                  ),
+          RemoteControlLayer(
+            session: session,
+            state: state,
+            immersive: immersive,
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: ColoredBox(color: Colors.black, child: stage),
                 ),
-              ),
-            ),
-          ),
-          // Bottom scrim behind the controls.
-          const Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            height: 200,
-            child: IgnorePointer(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.bottomCenter,
-                    end: Alignment.topCenter,
-                    colors: [Color(0xB3000000), Color(0x00000000)],
-                  ),
-                ),
-              ),
-            ),
-          ),
-          ?pip,
-          // ── Header: identity + status ──
-          Positioned(
-            left: 0,
-            right: 0,
-            top: 0,
-            child: SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 12, 0),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: _CallHeader(
-                        session: session,
-                        elapsed: _elapsedLabel,
-                        sharing: sharing,
+                if (!immersive) ...[
+                  const Positioned(
+                    left: 0,
+                    right: 0,
+                    top: 0,
+                    height: 120,
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [Color(0x99000000), Color(0x00000000)],
+                          ),
+                        ),
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    Tooltip(
-                      message: 'Minimize',
-                      child: _GlassIconButton(
-                        icon: Icons.close_fullscreen_rounded,
-                        onTap: () => state.setCallMinimized(true),
+                  ),
+                  const Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    height: 200,
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.bottomCenter,
+                            end: Alignment.topCenter,
+                            colors: [Color(0xB3000000), Color(0x00000000)],
+                          ),
+                        ),
                       ),
                     ),
-                  ],
-                ),
-              ),
+                  ),
+                ],
+                ?pip,
+                if (!immersive) ...[
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    top: 0,
+                    child: SafeArea(
+                      bottom: false,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 12, 0),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: _CallHeader(
+                                session: session,
+                                elapsed: _elapsedLabel,
+                                sharing: sharing,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Tooltip(
+                              message: 'Minimize',
+                              child: _GlassIconButton(
+                                icon: Icons.close_fullscreen_rounded,
+                                onTap: () => state.setCallMinimized(true),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: SafeArea(
+                      top: false,
+                      child: Padding(
+                        padding: EdgeInsets.only(bottom: compact ? 18 : 30),
+                        child: _ControlDock(
+                          state: state,
+                          session: session,
+                          compact: compact,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+                if (session.error != null || session.remoteControlError != null)
+                  Positioned(
+                    left: 16,
+                    right: 16,
+                    bottom: immersive ? 64 : (compact ? 120 : 132),
+                    child: _ErrorBanner(
+                      message: session.error ?? session.remoteControlError!,
+                    ),
+                  ),
+              ],
             ),
           ),
-          // ── Control dock ──
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: SafeArea(
-              top: false,
-              child: Padding(
-                padding: EdgeInsets.only(bottom: compact ? 18 : 30),
-                child: _ControlDock(
-                  state: state,
-                  session: session,
-                  compact: compact,
-                ),
-              ),
-            ),
-          ),
-          if (session.error != null || session.remoteControlError != null)
-            Positioned(
-              left: 16,
-              right: 16,
-              bottom: compact ? 120 : 132,
-              child: _ErrorBanner(
-                message: session.error ?? session.remoteControlError!,
+          if (immersive)
+            Positioned.fill(
+              child: ImmersiveControlChrome(
+                state: state,
+                session: session,
+                elapsed: _elapsedLabel,
               ),
             ),
         ],
-        ),
       ),
     );
   }
@@ -1124,12 +1268,30 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
           : 'Screen share stopped';
     }
     if (sharing) {
-      return session.ready ? 'You are sharing your screen' : 'Starting screen share…';
+      return session.isControlCall
+          ? (session.ready
+              ? 'Remote control active'
+              : 'Starting remote control…')
+          : (session.ready
+              ? 'You are sharing your screen'
+              : 'Starting screen share…');
+    }
+    if (session.isControlCall) {
+      if (session.remoteControlActive) {
+        return 'Controlling their screen';
+      }
+      return remoteVideo
+          ? 'Connected — waiting for control…'
+          : 'Waiting for their screen…';
     }
     if (isScreenCall) return 'Waiting for screen…';
     if (mode == 'video') {
-      if (session.joinedAudioOnly) return 'On audio — tap the camera to go live';
-      if (session.cameraPending) return 'Camera unavailable — tap the camera to retry';
+      if (session.joinedAudioOnly) {
+        return 'On audio — tap the camera to go live';
+      }
+      if (session.cameraPending) {
+        return 'Camera unavailable — tap the camera to retry';
+      }
       return 'Connecting…';
     }
     return 'On call';
@@ -1151,11 +1313,17 @@ class _CallHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final mode = session.call.mode;
-    final statusLine = sharing
-        ? 'You are sharing • $elapsed'
-        : session.peerSharingScreen && session.remoteHasVideo
-            ? 'Watching screen • $elapsed'
-            : '${_modeLabel(mode)} • $elapsed';
+    final statusLine = session.isControlCall
+        ? (sharing
+            ? 'Remote control • $elapsed'
+            : session.remoteControlActive
+                ? 'Controlling • $elapsed'
+                : 'Remote control • $elapsed')
+        : sharing
+            ? 'You are sharing • $elapsed'
+            : session.peerSharingScreen && session.remoteHasVideo
+                ? 'Watching screen • $elapsed'
+                : '${_modeLabel(mode)} • $elapsed';
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -1195,7 +1363,11 @@ class _CallHeader extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Icon(
-                        sharing ? Icons.screen_share_rounded : _modeIcon(mode),
+                        session.isControlCall
+                            ? Icons.mouse_rounded
+                            : sharing
+                                ? Icons.screen_share_rounded
+                                : _modeIcon(mode),
                         size: 12,
                         color: PrivetTheme.signal,
                       ),
@@ -1377,30 +1549,31 @@ class _ControlDock extends StatelessWidget {
   Widget build(BuildContext context) {
     final mode = session.call.mode;
     final sharing = session.isSharingLocally;
-    final showCamera = mode == 'video';
+    final isControl = session.isControlCall;
+    final showCamera = mode == 'video' || isControl;
 
     final buttons = <Widget>[
       _CallButton(
         color: !session.hasMicTrack
-            ? PrivetTheme.panelElevated.withValues(alpha: 0.4)
+            ? PrivetTheme.panelElevated
             : session.micOn
                 ? PrivetTheme.panelElevated
                 : PrivetTheme.danger,
         icon: !session.hasMicTrack || !session.micOn
             ? Icons.mic_off_rounded
             : Icons.mic_rounded,
-        label: session.micOn ? 'Mute' : 'Unmute',
-        enabled: session.hasMicTrack,
+        label: !session.hasMicTrack
+            ? 'Mic'
+            : session.micOn
+                ? 'Mute'
+                : 'Unmute',
+        enabled: true,
         onTap: session.toggleMic,
       ),
       if (showCamera)
         _CallButton(
           color: !session.hasCamTrack
-              ? (session.joinedAudioOnly
-                  ? PrivetTheme.panelElevated
-                  : session.cameraPending
-                      ? PrivetTheme.danger
-                      : PrivetTheme.panelElevated.withValues(alpha: 0.4))
+              ? PrivetTheme.panelElevated
               : session.camOn && !session.sharingScreen
                   ? PrivetTheme.panelElevated
                   : PrivetTheme.danger,
@@ -1408,43 +1581,38 @@ class _ControlDock extends StatelessWidget {
               ? Icons.videocam_off_rounded
               : Icons.videocam_rounded,
           label: !session.hasCamTrack
-              ? (session.joinedAudioOnly
-                  ? 'Start video'
-                  : session.cameraPending
-                      ? 'Retry cam'
-                      : 'Camera')
+              ? 'Camera'
               : session.camOn
                   ? 'Camera'
-                  : 'Camera',
-          enabled: (session.hasCamTrack || session.cameraPending) &&
-              !session.sharingScreen,
+                  : 'Camera off',
+          enabled: !session.sharingScreen,
           onTap:
               session.hasCamTrack ? session.toggleCam : session.retryCamera,
         ),
-      _CallButton(
-        color: sharing ? const Color(0xFFFFA726) : PrivetTheme.signal,
-        icon: sharing
-            ? Icons.stop_screen_share_rounded
-            : Icons.screen_share_rounded,
-        ink: !sharing,
-        label: sharing
-            ? 'Stop share'
-            : (session.peerSharingScreen && !session.remoteShareStopped
-                ? 'Peer sharing'
-                : 'Share'),
-        enabled: sharing || session.canStartScreenShare,
-        onTap: () async {
-          if (sharing) {
-            await session.toggleScreenShare();
-            return;
-          }
-          final stream = await showScreenSharePicker(context);
-          if (stream != null) {
-            await session.startScreenShare(stream);
-          }
-        },
-      ),
-      _remoteControlButton(session),
+      if (!isControl)
+        _CallButton(
+          color: sharing ? const Color(0xFFFFA726) : PrivetTheme.signal,
+          icon: sharing
+              ? Icons.stop_screen_share_rounded
+              : Icons.screen_share_rounded,
+          ink: !sharing,
+          label: sharing
+              ? 'Stop share'
+              : (session.peerSharingScreen && !session.remoteShareStopped
+                  ? 'Peer sharing'
+                  : 'Share'),
+          enabled: sharing || session.canStartScreenShare,
+          onTap: () async {
+            if (sharing) {
+              await session.toggleScreenShare();
+              return;
+            }
+            final stream = await showScreenSharePicker(context);
+            if (stream != null) {
+              await session.startScreenShare(stream);
+            }
+          },
+        ),
       _CallButton(
         color: PrivetTheme.danger,
         icon: Icons.call_end_rounded,
@@ -1480,63 +1648,6 @@ class _ControlDock extends StatelessWidget {
       ),
     );
   }
-}
-
-Widget _remoteControlButton(CallSession session) {
-  final active = session.remoteControlActive;
-  final pending = session.remoteControl?.state.auth == RemoteControlAuth.requested &&
-      session.remoteControl?.state.role == RemoteControlRole.controller;
-  final canRequest = session.canRequestRemoteControl;
-  final hosting = session.isRemoteHost;
-  final blocked = session.remoteControlBlockedReason;
-
-  String label;
-  if (hosting || (active && session.isRemoteController)) {
-    label = 'Stop ctrl';
-  } else if (pending) {
-    label = 'Waiting…';
-  } else if (session.isSharingLocally &&
-      session.remoteInputCapability?.canInject == true) {
-    label = 'Host';
-  } else {
-    label = 'Control';
-  }
-
-  final enabled = active || hosting || canRequest || pending;
-  final tip = active || hosting
-      ? 'Stop remote control'
-      : pending
-          ? 'Waiting for them to Allow'
-          : (blocked ??
-              (canRequest
-                  ? 'Request control of their shared screen'
-                  : 'Control unavailable'));
-
-  return Tooltip(
-    message: tip,
-    child: _CallButton(
-      color: active || hosting
-          ? const Color(0xFFFFA726)
-          : session.isSharingLocally &&
-                  session.remoteInputCapability?.canInject == true
-              ? PrivetTheme.signal.withValues(alpha: 0.35)
-              : PrivetTheme.panelElevated,
-      icon: active || hosting || pending
-          ? Icons.mouse_rounded
-          : Icons.mouse_outlined,
-      ink: canRequest && !pending,
-      label: label,
-      enabled: enabled,
-      onTap: () async {
-        if (active || hosting) {
-          await session.revokeRemoteControl();
-          return;
-        }
-        if (pending) return;
-        await session.requestRemoteControl();
-      },
-    ),
-  );
 }
 
 class _GlassIconButton extends StatelessWidget {

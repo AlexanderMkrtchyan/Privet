@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../theme.dart';
+import '../util/low_resource.dart';
 import '../util/media_download.dart';
 
 /// Full-screen messenger-style image viewer: tap backdrop / close to dismiss,
@@ -14,12 +15,13 @@ Future<void> showImageLightbox(
 }) {
   assert(urls.isNotEmpty);
   final index = initialIndex.clamp(0, urls.length - 1);
+  final instant = privetLowResource;
   return showGeneralDialog<void>(
     context: context,
     barrierDismissible: true,
     barrierLabel: 'Close image',
     barrierColor: Colors.black.withValues(alpha: 0.92),
-    transitionDuration: const Duration(milliseconds: 180),
+    transitionDuration: privetAnim(const Duration(milliseconds: 180)),
     pageBuilder: (ctx, animation, secondaryAnimation) {
       return _ImageLightboxPage(
         urls: urls,
@@ -28,6 +30,7 @@ Future<void> showImageLightbox(
       );
     },
     transitionBuilder: (ctx, animation, secondaryAnimation, child) {
+      if (instant) return child;
       return FadeTransition(
         opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
         child: child,
@@ -150,7 +153,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     if (next == _index) return;
     _pageController.animateToPage(
       next,
-      duration: const Duration(milliseconds: 220),
+      duration: privetAnim(const Duration(milliseconds: 220)),
       curve: Curves.easeOutCubic,
     );
   }

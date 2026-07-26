@@ -28,20 +28,41 @@ class _LoginScreenState extends State<LoginScreen> {
   final _password = TextEditingController();
   final _confirm = TextEditingController();
 
+  /// Only these fields should rebuild the login form — not inbox/WS traffic.
+  (bool, String?, String?, String?)? _paintKey;
+
   @override
   void initState() {
     super.initState();
-    widget.state.addListener(_onState);
+    widget.state.sessionTick.addListener(_onSession);
+    widget.state.addListener(_onLegacy);
+    _paintKey = _currentPaintKey();
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoJoin());
   }
 
-  void _onState() {
+  (bool, String?, String?, String?) _currentPaintKey() {
+    final s = widget.state;
+    return (
+      s.busy,
+      s.error,
+      s.pendingInviteHandle,
+      s.invitePreview?['displayName']?.toString(),
+    );
+  }
+
+  void _onSession() {
+    final next = _currentPaintKey();
+    if (next == _paintKey) return;
+    _paintKey = next;
     if (mounted) setState(() {});
   }
 
+  void _onLegacy() => _onSession();
+
   @override
   void dispose() {
-    widget.state.removeListener(_onState);
+    widget.state.sessionTick.removeListener(_onSession);
+    widget.state.removeListener(_onLegacy);
     _handleDebounce?.cancel();
     _handle.dispose();
     _displayName.dispose();

@@ -3,6 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Old invite links used /?invite=…; chat now lives under /app/. -->
+  <script>
+    (function () {
+      var params = new URLSearchParams(location.search);
+      if (!params.get('invite')) return;
+      location.replace('/app/' + location.search + location.hash);
+    })();
+  </script>
   <title>Privet — a messenger you'll actually enjoy</title>
   <meta name="description" content="Privet is a fast, private messenger for web, Windows, and Linux. Real-time chat, calls, and media — beautifully simple." />
   <meta name="theme-color" content="#0e1114" />

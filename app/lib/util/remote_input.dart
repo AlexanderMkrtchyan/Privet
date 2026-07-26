@@ -86,4 +86,12 @@ abstract final class RemoteInput {
       impl.keyEvent(code: code, down: down, mods: mods, key: key);
 
   static Future<void> releaseAll() => impl.releaseAll();
+
+  static Future<String?> getClipboardText() => impl.getClipboardText();
+
+  static Future<void> setClipboardText(String text) =>
+      impl.setClipboardText(text);
+
+  /// Best-effort lock of local keyboard/mouse while hosting control.
+  static Future<bool> setInputLock(bool locked) => impl.setInputLock(locked);
 }

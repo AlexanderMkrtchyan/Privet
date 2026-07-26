@@ -14,6 +14,7 @@ import '../models.dart';
 import '../theme.dart';
 import '../util/ai_turn.dart';
 import '../util/app_clipboard.dart';
+import '../util/low_resource.dart';
 import '../util/media_download.dart';
 import '../util/perf.dart';
 import '../util/web_select_cursor.dart';
@@ -294,166 +295,136 @@ class MessageBubble extends StatelessWidget {
                 width: accent ? 1.4 : 1,
               ),
             ),
-            // Hug content width. Swipe handles are Positioned strips that span the
-            // hugged bubble width (no IntrinsicWidth) — including own messages,
-            // which have no username row.
-            child: Stack(
+            // Hug content width (no IntrinsicWidth).
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    if (showSender && !mine)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          widthFactor: 1,
-                          child: Text(
-                            message.sender.displayName.isNotEmpty
-                                ? message.sender.displayName
-                                : (message.sender.handle.isNotEmpty
-                                      ? '@${message.sender.handle}'
-                                      : ''),
-                            textAlign: TextAlign.left,
-                            style: GoogleFonts.syne(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                              color: PrivetTheme.signal,
-                            ),
-                          ),
-                        ),
-                      ),
-                    if (message.forwardedFrom != null) ...[
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 6),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.shortcut_rounded,
-                              size: 14,
-                              color: PrivetTheme.mist.withValues(alpha: 0.9),
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              'Forwarded from ${message.forwardedFrom!.label}',
-                              style: GoogleFonts.ibmPlexSans(
-                                fontSize: 11,
-                                fontStyle: FontStyle.italic,
-                                color: PrivetTheme.mist,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                    if (message.replyTo != null) ...[
-                      _ReplyQuote(reply: message.replyTo!),
-                      const SizedBox(height: 6),
-                    ],
-                    // Body text: selection only — not covered by drag strips.
-                    Align(
+                if (showSender && !mine)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Align(
                       alignment: Alignment.centerLeft,
                       widthFactor: 1,
-                      child: _body(mediaBase),
-                    ),
-                    if (message.linkPreview != null) ...[
-                      const SizedBox(height: 8),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        widthFactor: 1,
-                        child: _LinkPreviewCard(preview: message.linkPreview!),
-                      ),
-                    ],
-                    // Extra gap above time/ticks (and mobile swipe handle strip).
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      widthFactor: 1,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (message.editedAt != null)
-                            Padding(
-                              padding: const EdgeInsets.only(right: 6),
-                              child: Text(
-                                'edited',
-                                style: TextStyle(
-                                  color: PrivetTheme.mist.withValues(
-                                    alpha: 0.75,
-                                  ),
-                                  fontSize: 10,
-                                  fontStyle: FontStyle.italic,
-                                ),
-                              ),
-                            ),
-                          Text(
-                            _messageTimeFormat.format(message.createdAt),
-                            style: TextStyle(
-                              color: PrivetTheme.mist.withValues(alpha: 0.8),
-                              fontSize: 10,
-                            ),
-                          ),
-                          if (mine) ...[
-                            const SizedBox(width: 4),
-                            GestureDetector(
-                              onTap: readByPeer && onSeenBy != null
-                                  ? () => onSeenBy!(message)
-                                  : null,
-                              child: Icon(
-                                readByPeer
-                                    ? Icons.done_all_rounded
-                                    : Icons.done_rounded,
-                                size: 14,
-                                color: readByPeer
-                                    ? PrivetTheme.signal
-                                    : PrivetTheme.mist.withValues(alpha: 0.75),
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                    if (mine &&
-                        seenByLabel != null &&
-                        seenByLabel!.isNotEmpty) ...[
-                      const SizedBox(height: 2),
-                      GestureDetector(
-                        onTap: onSeenBy == null
-                            ? null
-                            : () => onSeenBy!(message),
-                        child: Text(
-                          seenByLabel!,
-                          style: TextStyle(
-                            color: PrivetTheme.mist.withValues(alpha: 0.85),
-                            fontSize: 10,
-                          ),
+                      child: Text(
+                        message.sender.displayName.isNotEmpty
+                            ? message.sender.displayName
+                            : (message.sender.handle.isNotEmpty
+                                  ? '@${message.sender.handle}'
+                                  : ''),
+                        textAlign: TextAlign.left,
+                        style: GoogleFonts.syne(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: PrivetTheme.signal,
                         ),
                       ),
-                    ],
-                  ],
-                ),
-                // Drag-to-reply handles: mobile/compact only (desktop selects text).
-                if (PrivetTheme.isCompact(context)) ...[
-                  // Full-width header chrome for peers (username + empty space on
-                  // that row). Own messages have no username — they use the footer.
-                  if (showSender && !mine)
-                    const Positioned(
-                      left: 0,
-                      right: 0,
-                      top: 0,
-                      height: 22,
-                      child: _SwipeReplyHandle(child: SizedBox.expand()),
                     ),
-                  // Full-width footer (time / ticks) — every message, including
-                  // your own (no username shown on own bubbles).
-                  const Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    height: 18,
-                    child: _SwipeReplyHandle(child: SizedBox.expand()),
+                  ),
+                if (message.forwardedFrom != null) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.shortcut_rounded,
+                          size: 14,
+                          color: PrivetTheme.mist.withValues(alpha: 0.9),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Forwarded from ${message.forwardedFrom!.label}',
+                          style: GoogleFonts.ibmPlexSans(
+                            fontSize: 11,
+                            fontStyle: FontStyle.italic,
+                            color: PrivetTheme.mist,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+                if (message.replyTo != null) ...[
+                  _ReplyQuote(reply: message.replyTo!),
+                  const SizedBox(height: 6),
+                ],
+                Align(
+                  alignment: Alignment.centerLeft,
+                  widthFactor: 1,
+                  child: _body(mediaBase),
+                ),
+                if (message.linkPreview != null) ...[
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: 1,
+                    child: _LinkPreviewCard(preview: message.linkPreview!),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  widthFactor: 1,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (message.editedAt != null)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: Text(
+                            'edited',
+                            style: TextStyle(
+                              color: PrivetTheme.mist.withValues(
+                                alpha: 0.75,
+                              ),
+                              fontSize: 10,
+                              fontStyle: FontStyle.italic,
+                            ),
+                          ),
+                        ),
+                      Text(
+                        _messageTimeFormat.format(message.createdAt),
+                        style: TextStyle(
+                          color: PrivetTheme.mist.withValues(alpha: 0.8),
+                          fontSize: 10,
+                        ),
+                      ),
+                      if (mine) ...[
+                        const SizedBox(width: 4),
+                        GestureDetector(
+                          onTap: readByPeer && onSeenBy != null
+                              ? () => onSeenBy!(message)
+                              : null,
+                          child: Icon(
+                            readByPeer
+                                ? Icons.done_all_rounded
+                                : Icons.done_rounded,
+                            size: 14,
+                            color: readByPeer
+                                ? PrivetTheme.signal
+                                : PrivetTheme.mist.withValues(alpha: 0.75),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                if (mine &&
+                    seenByLabel != null &&
+                    seenByLabel!.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  GestureDetector(
+                    onTap: onSeenBy == null
+                        ? null
+                        : () => onSeenBy!(message),
+                    child: Text(
+                      seenByLabel!,
+                      style: TextStyle(
+                        color: PrivetTheme.mist.withValues(alpha: 0.85),
+                        fontSize: 10,
+                      ),
+                    ),
                   ),
                 ],
               ],
@@ -462,6 +433,11 @@ class MessageBubble extends StatelessWidget {
         ),
       ),
     );
+
+    // Mobile: whole bubble is the swipe-to-reply target (no text selection).
+    final swipeableBubble = PrivetTheme.isCompact(context)
+        ? _SwipeReplyHandle(child: bubble)
+        : bubble;
 
     return _SwipeToReply(
       mine: mine,
@@ -479,7 +455,7 @@ class MessageBubble extends StatelessWidget {
                 ? CrossAxisAlignment.end
                 : CrossAxisAlignment.start,
             children: [
-              bubble,
+              swipeableBubble,
               if (message.reactions.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
@@ -549,12 +525,13 @@ class MessageBubble extends StatelessWidget {
 
     String? result;
     try {
+      final instant = privetLowResource;
       result = await showGeneralDialog<String>(
         context: context,
         barrierDismissible: true,
         barrierLabel: 'Message actions',
         barrierColor: Colors.black.withValues(alpha: 0.25),
-        transitionDuration: const Duration(milliseconds: 140),
+        transitionDuration: privetAnim(const Duration(milliseconds: 140)),
         pageBuilder: (dialogCtx, anim, secondary) {
           var showMore = false;
           return StatefulBuilder(
@@ -564,32 +541,9 @@ class MessageBubble extends StatelessWidget {
                 if (nav.canPop()) nav.pop(value);
               }
 
-              return Stack(
-                children: [
-                  // Explicit dismiss layer — barrier alone is unreliable on web.
-                  Positioned.fill(
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: () => close(),
-                      onSecondaryTap: () => close(),
-                    ),
-                  ),
-                  Positioned(
-                    left: left,
-                    top: top,
-                    child: FadeTransition(
-                      opacity: anim,
-                      child: ScaleTransition(
-                        scale: Tween<double>(begin: 0.94, end: 1).animate(
-                          CurvedAnimation(
-                            parent: anim,
-                            curve: Curves.easeOutCubic,
-                          ),
-                        ),
-                        alignment: Alignment.topLeft,
-                        child: Material(
+              Widget menu = Material(
                           color: PrivetTheme.panelElevated,
-                          elevation: 16,
+                          elevation: privetElevation(16),
                           shadowColor: Colors.black54,
                           borderRadius: BorderRadius.circular(16),
                           child: Container(
@@ -872,9 +826,36 @@ class MessageBubble extends StatelessWidget {
                               ],
                             ),
                           ),
-                        ),
+                        );
+              if (!instant) {
+                menu = FadeTransition(
+                  opacity: anim,
+                  child: ScaleTransition(
+                    scale: Tween<double>(begin: 0.94, end: 1).animate(
+                      CurvedAnimation(
+                        parent: anim,
+                        curve: Curves.easeOutCubic,
                       ),
                     ),
+                    alignment: Alignment.topLeft,
+                    child: menu,
+                  ),
+                );
+              }
+              return Stack(
+                children: [
+                  // Explicit dismiss layer — barrier alone is unreliable on web.
+                  Positioned.fill(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => close(),
+                      onSecondaryTap: () => close(),
+                    ),
+                  ),
+                  Positioned(
+                    left: left,
+                    top: top,
+                    child: menu,
                   ),
                 ],
               );
@@ -985,31 +966,55 @@ class _BigEmoji extends StatefulWidget {
 
 class _BigEmojiState extends State<_BigEmoji>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 900),
-  )..forward();
+  AnimationController? _ctrl;
+  Animation<double>? _scale;
 
-  late final Animation<double> _scale = TweenSequence<double>([
-    TweenSequenceItem(tween: Tween(begin: 0.6, end: 1.18), weight: 45),
-    TweenSequenceItem(tween: Tween(begin: 1.18, end: 0.95), weight: 25),
-    TweenSequenceItem(tween: Tween(begin: 0.95, end: 1.0), weight: 30),
-  ]).animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOutCubic));
+  @override
+  void initState() {
+    super.initState();
+    privetLowResourceListenable.addListener(_sync);
+    _sync();
+  }
 
   @override
   void dispose() {
-    _ctrl.dispose();
+    privetLowResourceListenable.removeListener(_sync);
+    _ctrl?.dispose();
     super.dispose();
+  }
+
+  void _sync() {
+    if (privetLowResource) {
+      if (_ctrl != null) {
+        _ctrl!.dispose();
+        _ctrl = null;
+        _scale = null;
+        if (mounted) setState(() {});
+      }
+      return;
+    }
+    if (_ctrl != null) return;
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..forward();
+    _scale = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 0.6, end: 1.18), weight: 45),
+      TweenSequenceItem(tween: Tween(begin: 1.18, end: 0.95), weight: 25),
+      TweenSequenceItem(tween: Tween(begin: 0.95, end: 1.0), weight: 30),
+    ]).animate(CurvedAnimation(parent: _ctrl!, curve: Curves.easeOutCubic));
+    if (mounted) setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
     final size = widget.text.characters.length == 1 ? 64.0 : 48.0;
-    if (privetLowResourceEmoji) {
+    final scale = _scale;
+    if (privetLowResource || scale == null) {
       return PrivetEmoji(widget.text, size: size, animate: false);
     }
     return ScaleTransition(
-      scale: _scale,
+      scale: scale,
       child: PrivetEmoji(widget.text, size: size),
     );
   }
@@ -1560,9 +1565,9 @@ class _ReactionChip extends StatelessWidget {
   }
 }
 
-/// Telegram-style swipe-to-reply. Drag starts only from [_SwipeReplyHandle]
-/// regions (username / empty header chrome) — never from message body text.
-/// Others swipe right; own swipe left.
+/// Telegram-style swipe-to-reply on compact/mobile. The whole bubble is the
+/// drag target (no message text selection on mobile). Others swipe right;
+/// own swipe left.
 ///
 /// Drag offset lives in a [ValueNotifier] so per-frame updates only rebuild
 /// the transform/arrow layer — not the message contents underneath. That
@@ -1589,7 +1594,7 @@ class _SwipeToReply extends StatefulWidget {
 }
 
 class _SwipeToReplyState extends State<_SwipeToReply> {
-  static const _trigger = 56.0;
+  static const _trigger = 48.0;
   static const _maxDrag = 84.0;
   final ValueNotifier<double> _dx = ValueNotifier(0);
   bool _dragging = false;
@@ -1688,12 +1693,10 @@ class _SwipeToReplyState extends State<_SwipeToReply> {
   }
 }
 
-/// Drag-to-reply hit target (username / empty header chrome / time row).
-/// Message body text must NOT be wrapped in this — selection stays free there.
+/// Whole-bubble drag-to-reply hit target (compact/mobile only).
 ///
-/// Uses the OS grab/grabbing cursor. A custom Overlay-drawn hand that
-/// followed the pointer on every move was a major Linux stutter source
-/// (global pointer route + OverlayEntry.markNeedsBuild + CustomPaint).
+/// Uses a custom horizontal recognizer so a slightly diagonal finger still
+/// wins against the chat ListView's vertical scroll.
 class _SwipeReplyHandle extends StatefulWidget {
   const _SwipeReplyHandle({required this.child});
 
@@ -1716,20 +1719,40 @@ class _SwipeReplyHandleState extends State<_SwipeReplyHandle> {
     final grabbing = _pressed || swipe.dragging;
     return MouseRegion(
       cursor: grabbing ? SystemMouseCursors.grabbing : SystemMouseCursors.grab,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onHorizontalDragStart: (_) {
-          setState(() => _pressed = true);
-          swipe.onDragStart();
-        },
-        onHorizontalDragUpdate: (d) => swipe.onDragUpdate(d.delta.dx),
-        onHorizontalDragEnd: (_) {
-          setState(() => _pressed = false);
-          swipe.onDragEnd();
-        },
-        onHorizontalDragCancel: () {
-          setState(() => _pressed = false);
-          swipe.onDragCancel();
+      child: RawGestureDetector(
+        behavior: HitTestBehavior.translucent,
+        gestures: <Type, GestureRecognizerFactory>{
+          HorizontalDragGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<
+                  HorizontalDragGestureRecognizer>(
+            () {
+              // Beat the ListView's ~18px vertical slop: claim horizontal
+              // reply swipes after a shorter travel so diagonal wobble still
+              // starts a drag instead of canceling into scroll.
+              final recognizer =
+                  HorizontalDragGestureRecognizer(debugOwner: this);
+              recognizer.gestureSettings =
+                  const DeviceGestureSettings(touchSlop: 8);
+              return recognizer;
+            },
+            (instance) {
+              instance.onStart = (_) {
+                setState(() => _pressed = true);
+                swipe.onDragStart();
+              };
+              instance.onUpdate = (d) {
+                swipe.onDragUpdate(d.delta.dx);
+              };
+              instance.onEnd = (_) {
+                setState(() => _pressed = false);
+                swipe.onDragEnd();
+              };
+              instance.onCancel = () {
+                setState(() => _pressed = false);
+                swipe.onDragCancel();
+              };
+            },
+          ),
         },
         child: widget.child,
       ),
@@ -1833,6 +1856,7 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
   bool _webMultiTapSelect = false;
   ScrollHoldController? _webScrollHold;
   bool _hovering = false;
+  bool _hoveringLink = false;
   bool _webPainterHover = false;
 
   /// Native accent I-beam in an overlay — never setState on pointer move.
@@ -1841,6 +1865,7 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
 
   @override
   void dispose() {
+    setPrivetMessageLinkHover(false);
     setPrivetMessageSelectHover(false);
     _removeIBeamOverlay();
     _releaseWebScrollHold();
@@ -1870,6 +1895,7 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
   void _syncIBeamOverlay() {
     if (kIsWeb ||
         !_hovering ||
+        _hoveringLink ||
         privetBubbleDragging ||
         _webSelectMoved ||
         _ibeamGlobal == null) {
@@ -2154,17 +2180,32 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     _webSelRepaint.tick();
   }
 
-  void _openLinkAt(Offset local) {
+  String? _linkAt(Offset local) {
     final offset = _webOffsetAt(local);
     for (final m in _urlPattern.allMatches(widget.text)) {
       var raw = m.group(0)!;
       raw = raw.replaceFirst(RegExp(r'''[.,;:!?)\]>'"]+$'''), '');
       final end = m.start + raw.length;
-      if (offset >= m.start && offset < end) {
-        _openExternal(raw);
-        return;
-      }
+      if (offset >= m.start && offset < end) return raw;
     }
+    return null;
+  }
+
+  void _openLinkAt(Offset local) {
+    final url = _linkAt(local);
+    if (url != null) _openExternal(url);
+  }
+
+  void _setHoveringLink(bool overLink) {
+    if (_hoveringLink == overLink) return;
+    _hoveringLink = overLink;
+    setPrivetMessageLinkHover(overLink);
+    if (!overLink && !kIsWeb && _hovering) {
+      _syncIBeamOverlay();
+    } else if (overLink) {
+      _removeIBeamOverlay();
+    }
+    if (mounted) setState(() {});
   }
 
   Widget _buildWebBody({required bool selectable}) {
@@ -2181,34 +2222,40 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     final size = Size(painter.width, painter.height);
 
     return MouseRegion(
-      cursor: !selectable
-          ? SystemMouseCursors.basic
-          : privetBubbleDragging
+      cursor: privetBubbleDragging
           ? MouseCursor.defer
+          : _hoveringLink
+          ? SystemMouseCursors.click
+          : !selectable
+          ? SystemMouseCursors.basic
           : (kIsWeb ? SystemMouseCursors.text : SystemMouseCursors.none),
-      onEnter: selectable
-          ? (event) {
-              setPrivetMessageSelectHover(true);
-              _hovering = true;
-              if (!kIsWeb) _setIBeamGlobal(event.position);
-            }
-          : null,
-      onExit: selectable
-          ? (_) {
-              setPrivetMessageSelectHover(false);
-              _hovering = false;
-              _removeIBeamOverlay();
-            }
-          : null,
-      onHover: !selectable || kIsWeb
-          ? null
-          : (event) {
-              if (_webSelectMoved || privetBubbleDragging) {
-                _syncIBeamOverlay();
-                return;
-              }
-              _setIBeamGlobal(event.position);
-            },
+      onEnter: (event) {
+        if (selectable) {
+          setPrivetMessageSelectHover(true);
+          _hovering = true;
+        }
+        _setHoveringLink(_linkAt(event.localPosition) != null);
+        if (selectable && !kIsWeb && !_hoveringLink) {
+          _setIBeamGlobal(event.position);
+        }
+      },
+      onExit: (_) {
+        _setHoveringLink(false);
+        if (selectable) {
+          setPrivetMessageSelectHover(false);
+          _hovering = false;
+          _removeIBeamOverlay();
+        }
+      },
+      onHover: (event) {
+        _setHoveringLink(_linkAt(event.localPosition) != null);
+        if (!selectable || kIsWeb) return;
+        if (_webSelectMoved || privetBubbleDragging || _hoveringLink) {
+          _syncIBeamOverlay();
+          return;
+        }
+        _setIBeamGlobal(event.position);
+      },
       child: SizedBox(
         width: size.width,
         height: size.height,

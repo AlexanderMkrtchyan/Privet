@@ -24,6 +24,8 @@ import '../util/clipboard_files.dart';
 import '../util/ai_turn.dart';
 import '../util/media_permissions.dart';
 import '../util/media_ui_wake.dart';
+import '../util/privet_sheet.dart';
+import '../util/low_resource.dart';
 import '../util/recording_bytes.dart';
 import '../util/sounds.dart';
 import '../util/throttle.dart';
@@ -35,6 +37,7 @@ import '../widgets/compact_emoji_picker.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/user_name.dart';
+import '../widgets/typing_indicator.dart';
 import '../widgets/web_attach_button.dart';
 import 'call_screen.dart';
 
@@ -48,10 +51,49 @@ class MessengerShell extends StatefulWidget {
 }
 
 class _MessengerShellState extends State<MessengerShell> {
+  /// First frame after login is a huge tree. Show a static placeholder (not a
+  /// spinner) for one frame so we never freeze an indeterminate indicator
+  /// mid-arc while the inbox builds — that looked like a slideshow.
+  bool _shellReady = false;
+
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowWelcome());
+    widget.state.sessionTick.addListener(_onSessionHints);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() => _shellReady = true);
+      _maybeShowWelcome();
+      _maybeShowLowResourceHint();
+    });
+  }
+
+  @override
+  void dispose() {
+    widget.state.sessionTick.removeListener(_onSessionHints);
+    super.dispose();
+  }
+
+  void _onSessionHints() {
+    if (widget.state.lowResourceAutoHint) {
+      _maybeShowLowResourceHint();
+    }
+  }
+
+  void _maybeShowLowResourceHint() {
+    if (!mounted || !widget.state.lowResourceAutoHint) return;
+    widget.state.clearLowResourceAutoHint();
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    messenger?.showSnackBar(
+      SnackBar(
+        content: const Text(
+          'Smooth mode on — this device was dropping frames. '
+          'You can change it in Profile → Low RAM & CPU mode.',
+        ),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 6),
+      ),
+    );
   }
 
   Future<void> _maybeShowWelcome() async {
@@ -135,9 +177,18 @@ class _MessengerShellState extends State<MessengerShell> {
   @override
   Widget build(BuildContext context) {
     final state = widget.state;
+    if (!_shellReady) {
+      return Scaffold(
+        backgroundColor: PrivetTheme.ink,
+        body: const SizedBox.expand(),
+      );
+    }
     final wide = PrivetTheme.isWide(context);
 
-    return Listener(
+    // Cache the messenger tree as a layer so modal/dialog transitions do not
+    // re-paint the entire inbox every animation frame (Linux slideshow jank).
+    return RepaintBoundary(
+      child: Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: (_) => state.noteUserPresence(),
       onPointerSignal: (_) => state.noteUserPresence(),
@@ -155,7 +206,10 @@ class _MessengerShellState extends State<MessengerShell> {
                       SizedBox(
                         width: 360,
                         child: ListenableBuilder(
-                          listenable: state.inboxTick,
+                          listenable: Listenable.merge([
+                            state.inboxTick,
+                            state.typingTick,
+                          ]),
                           builder: (context, _) => InboxPane(state: state),
                         ),
                       ),
@@ -192,7 +246,10 @@ class _MessengerShellState extends State<MessengerShell> {
                         ),
                       )
                     : ListenableBuilder(
-                        listenable: state.inboxTick,
+                        listenable: Listenable.merge([
+                          state.inboxTick,
+                          state.typingTick,
+                        ]),
                         builder: (context, _) => InboxPane(state: state),
                       ),
               );
@@ -209,6 +266,7 @@ class _MessengerShellState extends State<MessengerShell> {
           ),
         ],
       ),
+    ),
     );
   }
 }
@@ -448,7 +506,19 @@ class InboxPane extends StatelessWidget {
                                     ],
                                   ),
                                   const SizedBox(height: 2),
-                                  if (c.peer != null &&
+                                  if (state.isTypingIn(c.id))
+                                    Text(
+                                      state.typingLabel(conversationId: c.id),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: PrivetTheme.signal,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w600,
+                                        fontStyle: FontStyle.italic,
+                                      ),
+                                    )
+                                  else if (c.peer != null &&
                                       c.peer!.handle.isNotEmpty)
                                     Text(
                                       '@${c.peer!.handle}',
@@ -471,7 +541,8 @@ class InboxPane extends StatelessWidget {
                                             : FontWeight.w400,
                                       ),
                                     ),
-                                  if (c.peer != null &&
+                                  if (!state.isTypingIn(c.id) &&
+                                      c.peer != null &&
                                       c.peer!.handle.isNotEmpty &&
                                       c.lastMessage != null)
                                     Text(
@@ -486,7 +557,8 @@ class InboxPane extends StatelessWidget {
                                             : FontWeight.w400,
                                       ),
                                     )
-                                  else if (c.peer != null &&
+                                  else if (!state.isTypingIn(c.id) &&
+                                      c.peer != null &&
                                       c.peer!.handle.isNotEmpty &&
                                       c.lastMessage == null)
                                     Text(
@@ -583,7 +655,7 @@ class InboxPane extends StatelessWidget {
   }
 
   Future<void> _showSearch(BuildContext context) async {
-    await showModalBottomSheet<void>(
+    await showPrivetSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: PrivetTheme.panel,
@@ -881,7 +953,7 @@ class InboxPane extends StatelessWidget {
     final me = state.user!;
     final shareText =
         'Join me on Privet — open this link to get an account instantly and chat with @${me.handle}:\n$link';
-    await showModalBottomSheet<void>(
+    await showPrivetSheet<void>(
       context: context,
       backgroundColor: PrivetTheme.panel,
       showDragHandle: true,
@@ -972,7 +1044,7 @@ class InboxPane extends StatelessWidget {
       pasteCtrl.dispose();
     }
 
-    await showModalBottomSheet<void>(
+    await showPrivetSheet<void>(
       context: context,
       backgroundColor: PrivetTheme.panel,
       showDragHandle: true,
@@ -1077,158 +1149,189 @@ class InboxPane extends StatelessWidget {
             final matches = filtering
                 ? <PrivetUser>[if (resolved != null) resolved!]
                 : state.directory;
+            final blocked = filtering ? const <PrivetUser>[] : state.blocked;
 
             return Padding(
               padding: EdgeInsets.only(
                 bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
               ),
-              child: ListView(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
-                    child: Text(
-                      'Start a chat',
-                      style: GoogleFonts.syne(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-                    child: TextField(
-                      controller: pasteCtrl,
-                      textInputAction: TextInputAction.go,
-                      onChanged: onPasteChanged,
-                      onSubmitted: (_) => openResolved(),
-                      decoration: InputDecoration(
-                        hintText: 'Paste invite link or @handle',
-                        prefixIcon: const Icon(Icons.link_rounded),
-                        suffixIcon: lookingUp
-                            ? const Padding(
-                                padding: EdgeInsets.all(12),
-                                child: SizedBox(
-                                  width: 20,
-                                  height: 20,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                ),
-                              )
-                            : (pasteCtrl.text.isNotEmpty
-                                  ? IconButton(
-                                      tooltip: 'Clear',
-                                      onPressed: () {
-                                        pasteCtrl.clear();
-                                        onPasteChanged('');
-                                      },
-                                      icon: const Icon(Icons.close_rounded),
-                                    )
-                                  : null),
-                      ),
-                    ),
-                  ),
-                  if (!filtering)
-                    ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: PrivetTheme.signal.withValues(
-                          alpha: 0.15,
-                        ),
-                        child: Icon(
-                          Icons.ios_share_rounded,
-                          color: PrivetTheme.signal,
-                        ),
-                      ),
-                      title: const Text('Share my invite link'),
-                      subtitle: const Text('Copy a one-tap join link'),
-                      onTap: () {
-                        Navigator.pop(sheetContext);
-                        _showInvite(context);
-                      },
-                    ),
-                  if (!filtering) Divider(color: PrivetTheme.line),
-                  if (filtering && lookingUp)
-                    const Padding(
-                      padding: EdgeInsets.all(24),
-                      child: Center(child: CircularProgressIndicator()),
-                    )
-                  else if (filtering && resolveError != null)
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
-                      child: Text(
-                        resolveError!,
-                        style: GoogleFonts.ibmPlexSans(
-                          color: PrivetTheme.danger,
-                          fontSize: 14,
-                        ),
-                      ),
-                    )
-                  else
-                    ...matches.map(
-                      (u) => ListTile(
-                        leading: PrivetAvatar(
-                          name: u.displayName,
-                          hue: u.avatarHue,
-                          avatarUrl: u.avatarUrl == null
-                              ? null
-                              : state.api.absoluteMediaUrl(u.avatarUrl),
-                          online: state.online.contains(u.id),
-                        ),
-                        title: UserNameBlock.fromUser(u, titleSize: 15),
-                        subtitle: Text(
-                          filtering
-                              ? '@${u.handle}'
-                              : state.presenceLabel(u.id),
-                        ),
-                        trailing: filtering
-                            ? TextButton(
-                                onPressed: openResolved,
-                                child: const Text('Chat'),
-                              )
-                            : null,
-                        onTap: () async {
-                          Navigator.pop(sheetContext);
-                          await state.openDm(u);
-                        },
-                      ),
-                    ),
-                  if (!filtering && state.blocked.isNotEmpty) ...[
-                    Divider(color: PrivetTheme.line),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
-                      child: Text(
-                        'Blocked',
-                        style: GoogleFonts.syne(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w700,
+              child: CustomScrollView(
+                  slivers: [
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                        child: Text(
+                          'Start a chat',
+                          style: GoogleFonts.syne(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w700,
+                          ),
                         ),
                       ),
                     ),
-                    ...state.blocked.map(
-                      (u) => ListTile(
-                        leading: PrivetAvatar(
-                          name: u.displayName,
-                          hue: u.avatarHue,
-                          avatarUrl: u.avatarUrl == null
-                              ? null
-                              : state.api.absoluteMediaUrl(u.avatarUrl),
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                        child: TextField(
+                          controller: pasteCtrl,
+                          textInputAction: TextInputAction.go,
+                          onChanged: onPasteChanged,
+                          onSubmitted: (_) => openResolved(),
+                          decoration: InputDecoration(
+                            hintText: 'Paste invite link or @handle',
+                            prefixIcon: const Icon(Icons.link_rounded),
+                            suffixIcon: lookingUp
+                                ? const Padding(
+                                    padding: EdgeInsets.all(12),
+                                    child: SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    ),
+                                  )
+                                : (pasteCtrl.text.isNotEmpty
+                                      ? IconButton(
+                                          tooltip: 'Clear',
+                                          onPressed: () {
+                                            pasteCtrl.clear();
+                                            onPasteChanged('');
+                                          },
+                                          icon: const Icon(Icons.close_rounded),
+                                        )
+                                      : null),
+                          ),
                         ),
-                        title: Text(u.displayName),
-                        subtitle: Text('@${u.handle}'),
-                        trailing: TextButton(
-                          onPressed: () async {
-                            await state.unblockUser(u.id);
-                            if (sheetContext.mounted) {
-                              Navigator.pop(sheetContext);
-                            }
+                      ),
+                    ),
+                    if (!filtering)
+                      SliverToBoxAdapter(
+                        child: ListTile(
+                          leading: CircleAvatar(
+                            backgroundColor: PrivetTheme.signal.withValues(
+                              alpha: 0.15,
+                            ),
+                            child: Icon(
+                              Icons.ios_share_rounded,
+                              color: PrivetTheme.signal,
+                            ),
+                          ),
+                          title: const Text('Share my invite link'),
+                          subtitle: const Text('Copy a one-tap join link'),
+                          onTap: () {
+                            Navigator.pop(sheetContext);
+                            _showInvite(context);
                           },
-                          child: const Text('Unblock'),
                         ),
                       ),
-                    ),
+                    if (!filtering)
+                      const SliverToBoxAdapter(
+                        child: Divider(height: 1),
+                      ),
+                    if (filtering && lookingUp)
+                      const SliverToBoxAdapter(
+                        child: Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Center(child: CircularProgressIndicator()),
+                        ),
+                      )
+                    else if (filtering && resolveError != null)
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+                          child: Text(
+                            resolveError!,
+                            style: GoogleFonts.ibmPlexSans(
+                              color: PrivetTheme.danger,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ),
+                      )
+                    else
+                      SliverList(
+                        delegate: SliverChildBuilderDelegate(
+                          (context, i) {
+                            final u = matches[i];
+                            return ListTile(
+                              leading: PrivetAvatar(
+                                name: u.displayName,
+                                hue: u.avatarHue,
+                                avatarUrl: u.avatarUrl == null
+                                    ? null
+                                    : state.api.absoluteMediaUrl(u.avatarUrl),
+                                online: state.online.contains(u.id),
+                              ),
+                              title: UserNameBlock.fromUser(u, titleSize: 15),
+                              subtitle: Text(
+                                filtering
+                                    ? '@${u.handle}'
+                                    : state.presenceLabel(u.id),
+                              ),
+                              trailing: filtering
+                                  ? TextButton(
+                                      onPressed: openResolved,
+                                      child: const Text('Chat'),
+                                    )
+                                  : null,
+                              onTap: () async {
+                                Navigator.pop(sheetContext);
+                                await state.openDm(u);
+                              },
+                            );
+                          },
+                          childCount: matches.length,
+                          addAutomaticKeepAlives: false,
+                          addRepaintBoundaries: true,
+                        ),
+                      ),
+                    if (blocked.isNotEmpty) ...[
+                      const SliverToBoxAdapter(child: Divider(height: 1)),
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+                          child: Text(
+                            'Blocked',
+                            style: GoogleFonts.syne(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                      SliverList(
+                        delegate: SliverChildBuilderDelegate(
+                          (context, i) {
+                            final u = blocked[i];
+                            return ListTile(
+                              leading: PrivetAvatar(
+                                name: u.displayName,
+                                hue: u.avatarHue,
+                                avatarUrl: u.avatarUrl == null
+                                    ? null
+                                    : state.api.absoluteMediaUrl(u.avatarUrl),
+                              ),
+                              title: Text(u.displayName),
+                              subtitle: Text('@${u.handle}'),
+                              trailing: TextButton(
+                                onPressed: () async {
+                                  await state.unblockUser(u.id);
+                                  if (sheetContext.mounted) {
+                                    Navigator.pop(sheetContext);
+                                  }
+                                },
+                                child: const Text('Unblock'),
+                              ),
+                            );
+                          },
+                          childCount: blocked.length,
+                          addAutomaticKeepAlives: false,
+                        ),
+                      ),
+                    ],
                   ],
-                ],
-              ),
+                ),
             );
           },
         );
@@ -1240,13 +1343,16 @@ class InboxPane extends StatelessWidget {
   Future<void> _showProfile(BuildContext context) async {
     final me = state.user;
     if (me == null) return;
-    await state.refreshAiStatus();
-    final packageInfo = await PackageInfo.fromPlatform();
-    final updateStatus = await AppUpdate.check(baseUrl: state.api.baseUrl);
-    if (!context.mounted) return;
-    final versionLabel = packageInfo.buildNumber.isEmpty
-        ? packageInfo.version
-        : '${packageInfo.version} (${packageInfo.buildNumber})';
+    // Opening the sheet used to await two network calls (AI status +
+    // update check) before the animation started, which made the click
+    // feel like ~2fps. Kick both off in the background instead — the
+    // sheet reacts to `state` as they finish.
+    final versionLabelFuture = PackageInfo.fromPlatform().then((info) =>
+        info.buildNumber.isEmpty
+            ? info.version
+            : '${info.version} (${info.buildNumber})');
+    unawaited(state.refreshAiStatus());
+    final updateStatusFuture = AppUpdate.check(baseUrl: state.api.baseUrl);
     final nameCtrl = TextEditingController(text: me.displayName);
     var enabled = state.aiEnabled && state.aiActive;
     Uint8List? pendingAvatarBytes;
@@ -1255,17 +1361,40 @@ class InboxPane extends StatelessWidget {
     var pendingClearAvatar = false;
     var updating = false;
     var updateProgress = 0.0;
-    await showModalBottomSheet<void>(
+    var versionLabel = '';
+    var updateStatus = AppUpdateStatus.unavailable;
+    var subscribedToVersion = false;
+    var subscribedToUpdate = false;
+    await showPrivetSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: PrivetTheme.panel,
       showDragHandle: true,
       builder: (ctx) {
+        // Listening to the whole `state` here caused the entire
+        // 500-line sheet to rebuild on every notifyListeners tick
+        // (typing, presence, WS pings). Scope down to the ticks that
+        // actually change what this sheet renders.
         return ListenableBuilder(
-          listenable: state,
+          listenable: Listenable.merge([
+            state.sessionTick,
+            state.shellTick,
+          ]),
           builder: (ctx, _) {
             return StatefulBuilder(
               builder: (ctx, setSheet) {
+                if (!subscribedToVersion) {
+                  subscribedToVersion = true;
+                  versionLabelFuture.then((label) {
+                    if (ctx.mounted) setSheet(() => versionLabel = label);
+                  });
+                }
+                if (!subscribedToUpdate) {
+                  subscribedToUpdate = true;
+                  updateStatusFuture.then((status) {
+                    if (ctx.mounted) setSheet(() => updateStatus = status);
+                  });
+                }
                 final active = state.activeAiProfile;
                 final inUseLabel = !enabled || active == null || !active.isReady
                     ? 'Not activated — add an AI and turn it on'
@@ -1598,8 +1727,9 @@ class InboxPane extends StatelessWidget {
                           contentPadding: EdgeInsets.zero,
                           title: const Text('Low RAM & CPU mode'),
                           subtitle: Text(
-                            'Cheaper media decode, static emoji, less animation. '
-                            'Recommended on older PCs.',
+                            'Turns off UI motion, uses static emoji, smaller '
+                            'images. Leave off on a GPU PC (e.g. RTX) — this '
+                            'never auto-enables.',
                             style: TextStyle(
                               color: PrivetTheme.mist,
                               fontSize: 12,
@@ -1717,7 +1847,9 @@ class InboxPane extends StatelessWidget {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'Privet $versionLabel',
+                          versionLabel.isEmpty
+                              ? 'Privet'
+                              : 'Privet $versionLabel',
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             color: PrivetTheme.mist,
@@ -1930,7 +2062,8 @@ class InboxPane extends StatelessWidget {
   Future<void> _showNewGroup(BuildContext context) async {
     final selected = <String>{};
     final titleCtrl = TextEditingController();
-    await showModalBottomSheet<void>(
+    final directory = state.directory;
+    await showPrivetSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: PrivetTheme.panel,
@@ -1938,80 +2071,84 @@ class InboxPane extends StatelessWidget {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setModal) {
+            final sheetH = MediaQuery.sizeOf(context).height * 0.75;
             return Padding(
               padding: EdgeInsets.only(
                 bottom: MediaQuery.viewInsetsOf(context).bottom,
               ),
               child: SizedBox(
-                height: MediaQuery.sizeOf(context).height * 0.75,
+                height: sheetH,
                 child: Column(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
-                      child: Text(
-                        'New group',
-                        style: GoogleFonts.syne(
-                          fontSize: 20,
-                          fontWeight: FontWeight.w700,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+                        child: Text(
+                          'New group',
+                          style: GoogleFonts.syne(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w700,
+                          ),
                         ),
                       ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 20),
-                      child: TextField(
-                        controller: titleCtrl,
-                        decoration: const InputDecoration(
-                          hintText: 'Group name',
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        child: TextField(
+                          controller: titleCtrl,
+                          decoration: const InputDecoration(
+                            hintText: 'Group name',
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    Expanded(
-                      child: ListView(
-                        children: state.directory.map((u) {
-                          final on = selected.contains(u.id);
-                          return CheckboxListTile(
-                            value: on,
-                            onChanged: (v) {
-                              setModal(() {
-                                if (v == true) {
-                                  selected.add(u.id);
-                                } else {
-                                  selected.remove(u.id);
-                                }
-                              });
-                            },
-                            secondary: PrivetAvatar(
-                              name: u.displayName,
-                              hue: u.avatarHue,
-                              online: state.online.contains(u.id),
-                            ),
-                            title: UserNameBlock.fromUser(u, titleSize: 15),
-                          );
-                        }).toList(),
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton(
-                          onPressed: selected.isEmpty
-                              ? null
-                              : () async {
-                                  Navigator.pop(context);
-                                  await state.createGroup(
-                                    title: titleCtrl.text.trim().isEmpty
-                                        ? 'Group chat'
-                                        : titleCtrl.text.trim(),
-                                    memberIds: selected.toList(),
-                                  );
-                                },
-                          child: const Text('Create group'),
+                      const SizedBox(height: 8),
+                      Expanded(
+                        child: ListView.builder(
+                          itemCount: directory.length,
+                          addAutomaticKeepAlives: false,
+                          itemBuilder: (context, i) {
+                            final u = directory[i];
+                            final on = selected.contains(u.id);
+                            return CheckboxListTile(
+                              value: on,
+                              onChanged: (v) {
+                                setModal(() {
+                                  if (v == true) {
+                                    selected.add(u.id);
+                                  } else {
+                                    selected.remove(u.id);
+                                  }
+                                });
+                              },
+                              secondary: PrivetAvatar(
+                                name: u.displayName,
+                                hue: u.avatarHue,
+                                online: state.online.contains(u.id),
+                              ),
+                              title: UserNameBlock.fromUser(u, titleSize: 15),
+                            );
+                          },
                         ),
                       ),
-                    ),
-                  ],
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton(
+                            onPressed: selected.isEmpty
+                                ? null
+                                : () async {
+                                    Navigator.pop(context);
+                                    await state.createGroup(
+                                      title: titleCtrl.text.trim().isEmpty
+                                          ? 'Group chat'
+                                          : titleCtrl.text.trim(),
+                                      memberIds: selected.toList(),
+                                    );
+                                  },
+                            child: const Text('Create group'),
+                          ),
+                        ),
+                      ),
+                    ],
                 ),
               ),
             );
@@ -2465,7 +2602,7 @@ class _ConversationPaneState extends State<ConversationPane> {
       return;
     }
     setState(() => _showEmoji = true);
-    showModalBottomSheet<void>(
+    showPrivetSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: PrivetTheme.panel,
@@ -2530,6 +2667,10 @@ class _ConversationPaneState extends State<ConversationPane> {
   }
 
   Widget _buildChatTitleColumn(PrivetState state, Conversation? chat) {
+    final typing = state.typingUserId != null;
+    final typingText = typing
+        ? state.typingLabel(conversationId: chat?.id)
+        : null;
     if (chat?.isGroup == true) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -2541,12 +2682,15 @@ class _ConversationPaneState extends State<ConversationPane> {
             style: GoogleFonts.syne(fontWeight: FontWeight.w700, fontSize: 18),
           ),
           Text(
-            state.typingUserId != null
-                ? 'typing…'
-                : '${chat!.memberCount} members',
+            typingText ?? '${chat!.memberCount} members',
             overflow: TextOverflow.ellipsis,
             maxLines: 1,
-            style: TextStyle(color: PrivetTheme.mist, fontSize: 12),
+            style: TextStyle(
+              color: typing ? PrivetTheme.signal : PrivetTheme.mist,
+              fontSize: 12,
+              fontWeight: typing ? FontWeight.w600 : FontWeight.w400,
+              fontStyle: typing ? FontStyle.italic : FontStyle.normal,
+            ),
           ),
         ],
       );
@@ -2561,21 +2705,23 @@ class _ConversationPaneState extends State<ConversationPane> {
           style: GoogleFonts.syne(fontWeight: FontWeight.w700, fontSize: 18),
         ),
         Text(
-          state.typingUserId != null
-              ? 'typing…'
-              : [
-                  if (chat?.peer?.handle.isNotEmpty == true)
-                    '@${chat!.peer!.handle}',
-                  if (chat?.peer != null) state.presenceLabel(chat!.peer!.id),
-                ].whereType<String>().join(' · '),
+          typingText ??
+              [
+                if (chat?.peer?.handle.isNotEmpty == true)
+                  '@${chat!.peer!.handle}',
+                if (chat?.peer != null) state.presenceLabel(chat!.peer!.id),
+              ].whereType<String>().join(' · '),
           overflow: TextOverflow.ellipsis,
           maxLines: 1,
           style: TextStyle(
-            color: chat?.peer?.handle.isNotEmpty == true
+            color: typing
                 ? PrivetTheme.signal
-                : PrivetTheme.mist,
+                : (chat?.peer?.handle.isNotEmpty == true
+                    ? PrivetTheme.signal
+                    : PrivetTheme.mist),
             fontSize: 12,
             fontWeight: FontWeight.w600,
+            fontStyle: typing ? FontStyle.italic : FontStyle.normal,
           ),
         ),
       ],
@@ -2612,7 +2758,7 @@ class _ConversationPaneState extends State<ConversationPane> {
   }
 
   Future<void> _showChatMoreSheet(PrivetState state, Conversation? chat) async {
-    await showModalBottomSheet<void>(
+    await showPrivetSheet<void>(
       context: context,
       backgroundColor: PrivetTheme.panel,
       shape: const RoundedRectangleBorder(
@@ -2652,6 +2798,21 @@ class _ConversationPaneState extends State<ConversationPane> {
                   onTap: () {
                     Navigator.pop(ctx);
                     _startCall('screen');
+                  },
+                ),
+                ListTile(
+                  leading: Icon(
+                    Icons.mouse_rounded,
+                    color: PrivetTheme.signal,
+                  ),
+                  title: const Text('Remote control'),
+                  subtitle: Text(
+                    'Ask to control their desktop — they must use the Privet app',
+                    style: TextStyle(color: PrivetTheme.mist, fontSize: 12),
+                  ),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _startCall('control');
                   },
                 ),
                 ListTile(
@@ -2786,6 +2947,14 @@ class _ConversationPaneState extends State<ConversationPane> {
         active: _mediaPerms.screenReady,
         enabled: _mediaPerms.canStartScreen,
         onPressed: () => _startCall('screen'),
+      ),
+      _CallActionButton(
+        tooltip:
+            'Ask to control their desktop (they must use the Linux/Windows Privet app)',
+        icon: Icons.mouse_rounded,
+        active: true,
+        enabled: true,
+        onPressed: () => _startCall('control'),
       ),
       if (chat?.isGroup == true)
         IconButton(
@@ -3056,7 +3225,7 @@ class _ConversationPaneState extends State<ConversationPane> {
             alignment: 0.4,
             duration: attempt == 0
                 ? Duration.zero
-                : const Duration(milliseconds: 220),
+                : privetAnim(const Duration(milliseconds: 220)),
             curve: Curves.easeOutCubic,
           );
         }
@@ -3069,7 +3238,7 @@ class _ConversationPaneState extends State<ConversationPane> {
           await _scroll.position.ensureVisible(
             settledRo,
             alignment: 0.4,
-            duration: const Duration(milliseconds: 120),
+            duration: privetAnim(const Duration(milliseconds: 120)),
             curve: Curves.easeOutCubic,
           );
         }
@@ -3531,12 +3700,12 @@ class _ConversationPaneState extends State<ConversationPane> {
                     right: 16,
                     bottom: 16,
                     child: AnimatedSlide(
-                      duration: const Duration(milliseconds: 180),
+                      duration: privetAnim(const Duration(milliseconds: 180)),
                       offset: _showJumpToBottom
                           ? Offset.zero
                           : const Offset(0, 1.5),
                       child: AnimatedOpacity(
-                        duration: const Duration(milliseconds: 180),
+                        duration: privetAnim(const Duration(milliseconds: 180)),
                         opacity: _showJumpToBottom ? 1 : 0,
                         child: IgnorePointer(
                           ignoring: !_showJumpToBottom,
@@ -3545,7 +3714,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                             shape: CircleBorder(
                               side: BorderSide(color: PrivetTheme.line),
                             ),
-                            elevation: 3,
+                            elevation: privetElevation(3),
                             child: InkWell(
                               customBorder: const CircleBorder(),
                               onTap: _scrollToEnd,
@@ -3571,6 +3740,12 @@ class _ConversationPaneState extends State<ConversationPane> {
                 minHeight: 2,
                 color: PrivetTheme.signal,
                 backgroundColor: PrivetTheme.line,
+              ),
+            if (state.typingUserId != null)
+              TypingIndicatorBubble(
+                label: chat?.isGroup == true
+                    ? state.typingLabel(conversationId: chat?.id)
+                    : null,
               ),
             if (_recording)
               Container(
@@ -4048,6 +4223,7 @@ class _ConversationPaneState extends State<ConversationPane> {
   Future<void> _startCall(String mode) async {
     final needsCamera = mode == 'video';
     final isScreen = mode == 'screen';
+    final isControl = mode == 'control';
 
     // Chrome drops user-activation across getUserMedia awaits — unlock call
     // AudioElements here, while the click gesture is still live.
@@ -4057,7 +4233,9 @@ class _ConversationPaneState extends State<ConversationPane> {
     // Show Privet chooser first; capture runs inside that option's click.
     MediaStream? screenStream;
     MediaStream? localStream;
-    if (isScreen) {
+    if (isControl) {
+      // Controller starts with no media — host shares on Allow.
+    } else if (isScreen) {
       try {
         screenStream = await showScreenSharePicker(context);
         if (screenStream == null) return; // cancelled
@@ -4140,7 +4318,7 @@ class _ConversationPaneState extends State<ConversationPane> {
         await _stopStream(localStream);
         return;
       }
-      final picked = await showModalBottomSheet<PrivetUser>(
+      final picked = await showPrivetSheet<PrivetUser>(
         context: context,
         backgroundColor: PrivetTheme.panel,
         showDragHandle: true,
@@ -4154,6 +4332,8 @@ class _ConversationPaneState extends State<ConversationPane> {
                       ? 'Audio call'
                       : mode == 'screen'
                       ? 'Screen share'
+                      : mode == 'control'
+                      ? 'Remote control'
                       : 'Video call',
                   style: GoogleFonts.syne(
                     fontSize: 20,
@@ -4257,7 +4437,7 @@ class _ConversationPaneState extends State<ConversationPane> {
     var members = await state.api.members(chat.id);
     if (!mounted) return;
 
-    await showModalBottomSheet<void>(
+    await showPrivetSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: PrivetTheme.panel,
@@ -4294,7 +4474,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                               ? null
                               : () async {
                                   final picked =
-                                      await showModalBottomSheet<PrivetUser>(
+                                      await showPrivetSheet<PrivetUser>(
                                         context: context,
                                         backgroundColor:
                                             PrivetTheme.panelElevated,
@@ -4557,7 +4737,7 @@ class _ConversationPaneState extends State<ConversationPane> {
       names.add(found?.displayName ?? id);
     }
     if (!context.mounted) return;
-    await showModalBottomSheet<void>(
+    await showPrivetSheet<void>(
       context: context,
       backgroundColor: PrivetTheme.panel,
       showDragHandle: true,
@@ -4724,7 +4904,7 @@ class _ConversationPaneState extends State<ConversationPane> {
     ChatMessage message,
   ) async {
     final state = widget.state;
-    final target = await showModalBottomSheet<Conversation>(
+    final target = await showPrivetSheet<Conversation>(
       context: context,
       backgroundColor: PrivetTheme.panel,
       showDragHandle: true,
@@ -5082,7 +5262,7 @@ class _ConversationPaneState extends State<ConversationPane> {
         // reverse: true ListView — offset 0 is the newest message
         _scroll.animateTo(
           0,
-          duration: const Duration(milliseconds: 220),
+          duration: privetAnim(const Duration(milliseconds: 220)),
           curve: Curves.easeOut,
         );
       }
@@ -5165,9 +5345,8 @@ class _CallActionButton extends StatelessWidget {
       child: IconButton(
         onPressed: enabled ? onPressed : null,
         style: ButtonStyle(
-          // Call controls keep the default arrow — not pointer.
           mouseCursor: WidgetStatePropertyAll(
-            enabled ? SystemMouseCursors.basic : SystemMouseCursors.basic,
+            enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
           ),
         ),
         icon: Icon(
@@ -5282,7 +5461,7 @@ class _ThemeModeSelector extends StatelessWidget {
         onTap: onTap,
         behavior: HitTestBehavior.opaque,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 160),
+          duration: privetAnim(const Duration(milliseconds: 160)),
           padding: const EdgeInsets.symmetric(vertical: 9),
           decoration: BoxDecoration(
             color: selected ? PrivetTheme.signal : Colors.transparent,

@@ -38,6 +38,12 @@ class Throttle {
     _trailing = null;
     _pending = null;
   }
+
+  /// Drop trailing work and allow the next [call] to fire immediately.
+  void reset() {
+    cancel();
+    _last = null;
+  }
 }
 
 /// Trailing-only debounce (draft persistence, inbox reconcile).

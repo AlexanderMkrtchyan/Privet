@@ -54,6 +54,20 @@ app.addContentTypeParser(
 await registerRoutes(app);
 registerWebsocket(app);
 
+// Old invite links were /?invite=handle; chat moved to /app/ after landing split.
+app.addHook('onRequest', async (request, reply) => {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return;
+  const qIndex = request.url.indexOf('?');
+  const pathOnly = qIndex === -1 ? request.url : request.url.slice(0, qIndex);
+  if (pathOnly !== '/') return;
+  const search = qIndex === -1 ? '' : request.url.slice(qIndex);
+  const invite = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search)
+    .get('invite')
+    ?.trim();
+  if (!invite) return;
+  return reply.redirect(`/app/${search || `?invite=${encodeURIComponent(invite)}`}`);
+});
+
 fs.mkdirSync(uploadsDir, { recursive: true });
 await app.register(fastifyStatic, {
   root: uploadsDir,

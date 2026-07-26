@@ -37,3 +37,9 @@ Future<void> keyEvent({
 }) async {}
 
 Future<void> releaseAll() async {}
+
+Future<String?> getClipboardText() async => null;
+
+Future<void> setClipboardText(String text) async {}
+
+Future<bool> setInputLock(bool locked) async => false;

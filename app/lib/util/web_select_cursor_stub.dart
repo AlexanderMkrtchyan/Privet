@@ -10,4 +10,7 @@ void syncPrivetAccentCursors(Color accent) {}
 void setPrivetMessageSelectHover(bool hovering) {}
 
 /// No-op on non-web.
+void setPrivetMessageLinkHover(bool hovering) {}
+
+/// No-op on non-web.
 void setPrivetDragHover(bool hovering) {}

@@ -223,7 +223,8 @@ export function registerWebsocket(app) {
           const key = `${userId}:${conversationId}`;
           const now = Date.now();
           const last = typingLastSent.get(key) || 0;
-          if (now - last < 2000) return;
+          // Stay under the client throttle (~800ms) so RTT cannot drop pulses.
+          if (now - last < 500) return;
           typingLastSent.set(key, now);
           broadcastToUsers(
             memberIds(conversationId),
@@ -482,7 +483,14 @@ export function registerWebsocket(app) {
           const call = {
             id: callId,
             conversationId,
-            mode: mode === 'audio' ? 'audio' : mode === 'screen' ? 'screen' : 'video',
+            mode:
+              mode === 'audio'
+                ? 'audio'
+                : mode === 'screen'
+                  ? 'screen'
+                  : mode === 'control'
+                    ? 'control'
+                    : 'video',
             fromUserId: userId,
             toUserId,
             createdAt: Date.now(),

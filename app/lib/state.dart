@@ -23,9 +23,11 @@ import 'util/page_uri.dart';
 import 'util/media_ui_wake.dart';
 import 'util/remote_input.dart';
 import 'util/sounds.dart';
+import 'util/low_resource.dart';
 import 'util/throttle.dart';
+import 'util/ui_overlay_pause.dart';
+import 'util/webrtc_safe.dart';
 import 'util/web_notifications.dart';
-import 'widgets/privet_emoji.dart';
 
 /// How Privet AI replies are delivered once the user enables AI.
 enum AiUsageScope {
@@ -92,7 +94,8 @@ class CallSession extends ChangeNotifier {
   final MediaStream? preparedLocal;
 
   /// Whether this side intends to send camera (video invites can be answered audio-only).
-  final bool wantLocalVideo;
+  /// Mutable: audio-only answer starts false; [retryCamera] flips it true.
+  bool wantLocalVideo;
 
   final localRenderer = RTCVideoRenderer();
   final remoteRenderer = RTCVideoRenderer();
@@ -100,6 +103,10 @@ class CallSession extends ChangeNotifier {
   RTCPeerConnection? _pc;
   MediaStream? _local;
   MediaStream? _display;
+  String? _displaySourceId;
+
+  /// Set by [disposeSession] so a hangup racing [init] cannot leave live tracks.
+  bool _disposed = false;
 
   /// Kept across stop/replace so we can find the video m-line after track=null.
   RTCRtpSender? _videoSender;
@@ -210,19 +217,23 @@ class CallSession extends ChangeNotifier {
   bool get hasMicTrack => _local?.getAudioTracks().isNotEmpty == true;
   bool get hasCamTrack => _local?.getVideoTracks().isNotEmpty == true;
   bool get isScreenCall => call.mode == 'screen';
+  bool get isControlCall => call.mode == 'control';
+
+  /// Screen share or dedicated remote-control session (display-first stage).
+  bool get isScreenLike => isScreenCall || isControlCall;
 
   /// True when this side is the one sending a display surface.
   bool get isSharingLocally => sharingScreen;
 
-  /// Screen call where we stopped sharing (or peer stopped) — not "still connecting".
-  /// Video calls never use this placeholder: a peer camera mute/end must not
-  /// look like "Screen share stopped".
+  /// Screen/control call where we stopped sharing (or peer stopped) — not
+  /// "still connecting". Video calls never use this placeholder: a peer camera
+  /// mute/end must not look like "Screen share stopped".
   ///
   /// Do not treat "I shared earlier" as stopped once the peer is sharing (or
   /// their video is bound). Sticky [everSharedLocally] alone used to hide
   /// remote video after maximize following a share take-over.
   bool get showShareStopped =>
-      call.mode == 'screen' &&
+      isScreenLike &&
       !sharingScreen &&
       !peerSharingScreen &&
       !remoteHasVideo &&
@@ -230,22 +241,37 @@ class CallSession extends ChangeNotifier {
 
   /// Share button: unlocked after peer stop even if a mute/unmute race left
   /// [peerSharingScreen] stuck true (that regression blocked take-over).
-  bool get canStartScreenShare => !peerSharingScreen || remoteShareStopped;
+  bool get canStartScreenShare =>
+      !isControlCall && (!peerSharingScreen || remoteShareStopped);
 
-  /// Video call where we wanted a camera but have none yet (denied / busy /
-  /// answered audio-only). Tapping the camera button calls [retryCamera].
+  /// Video/control call where we wanted a camera but have none yet (denied /
+  /// busy / answered audio-only / joined without A/V). Tapping the camera
+  /// button calls [retryCamera].
   bool get cameraPending =>
-      call.mode == 'video' && !sharingScreen && !hasCamTrack;
+      (call.mode == 'video' || isControlCall) &&
+      !sharingScreen &&
+      !hasCamTrack;
 
   /// Intentionally joined without camera (can still enable later).
   bool get joinedAudioOnly =>
-      call.mode == 'video' && !wantLocalVideo && !hasCamTrack;
+      (call.mode == 'video' || isControlCall) &&
+      !wantLocalVideo &&
+      !hasCamTrack;
 
   Future<void> init() async {
+    if (_disposed) return;
     await localRenderer.initialize();
     await remoteRenderer.initialize();
+    if (_disposed) {
+      await _releaseRenderers();
+      return;
+    }
 
     final ice = await api.iceServers();
+    if (_disposed) {
+      await _releaseRenderers();
+      return;
+    }
     _pc = await createPeerConnection({
       'iceServers': ice.isEmpty
           ? [
@@ -254,6 +280,11 @@ class CallSession extends ChangeNotifier {
           : ice,
       'sdpSemantics': 'unified-plan',
     });
+    if (_disposed) {
+      await _releasePeerConnection();
+      await _releaseRenderers();
+      return;
+    }
 
     _pc!.onIceCandidate = (c) {
       if (c.candidate == null) return;
@@ -272,14 +303,44 @@ class CallSession extends ChangeNotifier {
       notify: notifyListeners,
       isSharingLocally: () => sharingScreen,
       peerSharingScreen: () => peerSharingScreen && !remoteShareStopped,
+      onQualityRequested: applyRemoteControlQuality,
+      onSwitchDisplay: switchRemoteControlDisplay,
+      listDisplays: _listRemoteControlDisplays,
     );
     await remoteControl!.attach(_pc!);
 
     final isScreen = call.mode == 'screen';
+    final isControl = call.mode == 'control';
     // Asymmetric: video-mode invite can still join send-audio / recv-video only.
     final withCamera = call.mode == 'video' && wantLocalVideo;
 
-    if (isScreen) {
+    if (isControl) {
+      // Dedicated remote control: no A/V until the user enables mic/cam.
+      // Host (callee) shares display + auto-grants; controller (caller) watches.
+      micOn = false;
+      camOn = false;
+      _local = null;
+      localRenderer.srcObject = null;
+
+      if (!isCaller) {
+        // Host: prepared display from Allow + picker.
+        await _attachPreparedDisplayShare(
+          preparedDisplay,
+          autoGrantControl: true,
+        );
+      } else {
+        // Controller: recv-only so the host can send screen (and either side
+        // can add mic/cam later via renegotiation).
+        await _pc!.addTransceiver(
+          kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+        );
+        await _pc!.addTransceiver(
+          kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+        );
+      }
+    } else if (isScreen) {
       // Screen share must work with zero mic/camera hardware.
       // Do NOT call getUserMedia first — on Firefox it can end the display
       // capture stream and/or hang the call when no device exists.
@@ -287,59 +348,7 @@ class CallSession extends ChangeNotifier {
       _local = null;
 
       if (isCaller) {
-        late final MediaStream display;
-        if (preparedDisplay != null) {
-          display = preparedDisplay!;
-        } else {
-          // Fallback (e.g. mid-call toggle) — may fail on Firefox without a click.
-          try {
-            display = await captureDisplayMedia();
-          } catch (e) {
-            throw StateError(
-              'Screen share unavailable (start from the Share button click). ($e)',
-            );
-          }
-        }
-        await stripDisplayAudioTracks(display);
-        final videoTracks = display.getVideoTracks();
-        if (videoTracks.isEmpty) {
-          throw StateError(
-            'Screen capture ended before the call connected. Click Share again.',
-          );
-        }
-        final screenTrack = videoTracks.first;
-        screenTrack.enabled = true;
-
-        // Recv-only audio so the peer can still send mic if they have one.
-        await _pc!.addTransceiver(
-          kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-        );
-        // Send screen via addTrack — simplest unified-plan path on web.
-        _videoSender = await _pc!.addTrack(screenTrack, display);
-        _display = display;
-        sharingScreen = true;
-        everSharedLocally = true;
-        // Video-only preview: never attach display audio to the local
-        // renderer — tab/system capture can loop ringback through its
-        // HTMLAudioElement after accept.
-        final preview = await createLocalMediaStream('screen-preview');
-        await preview.addTrack(screenTrack);
-        localRenderer.srcObject = preview;
-        try {
-          localRenderer.muted = true;
-        } catch (_) {}
-        _scheduleRendererRebind();
-        screenTrack.onEnded = () {
-          _stopScreenShare();
-        };
-        await _announceShareStarted();
-        final settings = screenTrack.getSettings();
-        final gw = (settings['width'] as num?)?.toInt();
-        final gh = (settings['height'] as num?)?.toInt();
-        if (gw != null && gh != null) {
-          await remoteControl?.updateLocalGeometry(gw, gh);
-        }
+        await _attachPreparedDisplayShare(preparedDisplay);
       } else {
         // Callee: no local media required. Offer creates recv video m-line.
         localRenderer.srcObject = null;
@@ -352,6 +361,11 @@ class CallSession extends ChangeNotifier {
       } else {
         _local = await _acquireUserMedia(withCamera: withCamera);
       }
+      if (_disposed) {
+        await _releaseStream(_local);
+        _local = null;
+        return;
+      }
       // Keep tracks live — some browsers leave them disabled after Allow.
       for (final track in _local!.getTracks()) {
         track.enabled = true;
@@ -361,9 +375,7 @@ class CallSession extends ChangeNotifier {
       camOn = withCamera && _local!.getVideoTracks().isNotEmpty;
       localRenderer.srcObject = _local;
       // Local preview must be muted or autoplay is blocked (black / frozen).
-      try {
-        localRenderer.muted = true;
-      } catch (_) {}
+      unawaited(muteLocalRenderer(localRenderer));
       for (final track in _local!.getTracks()) {
         final sender = await _pc!.addTrack(track, _local!);
         if (track.kind == 'video') _videoSender = sender;
@@ -380,14 +392,109 @@ class CallSession extends ChangeNotifier {
       }
     }
 
+    if (_disposed) {
+      // Hangup won the race after we attached media — release leftovers.
+      await _releaseDisplayCapture(announce: false);
+      await _releaseStream(_local);
+      _local = null;
+      await _releasePeerConnection();
+      await _releaseRenderers();
+      return;
+    }
+
     ready = true;
     notifyListeners();
 
     // Apply any offer/answer/ICE that arrived while getUserMedia / picker ran.
     await _flushPendingSignaling();
 
+    if (_disposed) return;
+
     if (isCaller) {
       await _sendOffer();
+    }
+  }
+
+  /// Attach a display capture as the outbound video track (screen / control host).
+  Future<void> _attachPreparedDisplayShare(
+    MediaStream? prepared, {
+    bool autoGrantControl = false,
+  }) async {
+    if (_disposed) {
+      await _releaseStream(prepared);
+      return;
+    }
+    late final MediaStream display;
+    if (prepared != null) {
+      display = prepared;
+    } else {
+      // Fallback (e.g. mid-call toggle) — may fail on Firefox without a click.
+      try {
+        display = await captureDisplayMedia();
+      } catch (e) {
+        throw StateError(
+          'Screen share unavailable (start from the Share button click). ($e)',
+        );
+      }
+    }
+    if (_disposed) {
+      await _releaseStream(display);
+      return;
+    }
+    await stripDisplayAudioTracks(display);
+    final videoTracks = display.getVideoTracks();
+    if (videoTracks.isEmpty) {
+      throw StateError(
+        'Screen capture ended before the call connected. Click Share again.',
+      );
+    }
+    final screenTrack = videoTracks.first;
+    screenTrack.enabled = true;
+
+    // Recv-only audio so the peer can still send mic if they have one.
+    await _pc!.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+    );
+    // Send screen via addTrack — simplest unified-plan path on web.
+    _videoSender = await _pc!.addTrack(screenTrack, display);
+    _display = display;
+    _displaySourceId = lastDesktopCaptureSourceId;
+    sharingScreen = true;
+    everSharedLocally = true;
+    // Control host: do not mirror the capture into the local UI — it nests
+    // inside the shared desktop and wastes GPU. Controllers see the encode.
+    if (call.mode == 'control' || autoGrantControl) {
+      try {
+        localRenderer.srcObject = null;
+      } catch (_) {}
+    } else {
+      // Video-only preview: never attach display audio to the local
+      // renderer — tab/system capture can loop ringback through its
+      // HTMLAudioElement after accept.
+      final preview = await createLocalMediaStream('screen-preview');
+      await preview.addTrack(screenTrack);
+      localRenderer.srcObject = preview;
+      unawaited(muteLocalRenderer(localRenderer));
+    }
+    _scheduleRendererRebind();
+    screenTrack.onEnded = () {
+      _stopScreenShare();
+    };
+    await _announceShareStarted();
+    final settings = screenTrack.getSettings();
+    final gw = (settings['width'] as num?)?.toInt();
+    final gh = (settings['height'] as num?)?.toInt();
+    if (gw != null && gh != null) {
+      await remoteControl?.updateLocalGeometry(gw, gh);
+    }
+    await applyRemoteControlQuality(
+      remoteControl?.quality ?? RemoteControlQuality.balanced,
+    );
+    await remoteControl?.publishDisplaysNow(activeId: _displaySourceId);
+    if (autoGrantControl) {
+      // Dedicated control invite: grant immediately (no second Allow).
+      await remoteControl?.grantControl();
     }
   }
 
@@ -494,13 +601,22 @@ class CallSession extends ChangeNotifier {
       }
 
       if (event.track.kind == 'audio') {
+        event.track.enabled = true;
         final current = remoteRenderer.srcObject;
         if (current != null) {
           final already = current.getAudioTracks().any(
             (t) => t.id == event.track.id,
           );
           if (!already) {
-            await current.addTrack(event.track);
+            try {
+              await current.addTrack(event.track);
+            } catch (_) {
+              // Native registry miss — keep Dart-side so UI state stays coherent;
+              // WebRTC still plays remote audio via the audio device module.
+              try {
+                await current.addTrack(event.track, addToNative: false);
+              } catch (_) {}
+            }
           }
         } else {
           remoteRenderer.srcObject = stream;
@@ -537,10 +653,10 @@ class CallSession extends ChangeNotifier {
       }
       remoteRenderer.srcObject = stream;
       remoteHasVideo = true;
-      // Only dedicated screen calls treat any remote video as "peer sharing".
+      // Only dedicated screen/control calls treat any remote video as "peer sharing".
       // Mid-call share on video/audio is gated by call.share_started — marking
       // every camera track as a share locked the receiver's Share button.
-      if (call.mode == 'screen') {
+      if (call.mode == 'screen' || call.mode == 'control') {
         remoteShareStopped = false;
         if (!sharingScreen) {
           peerSharingScreen = true;
@@ -576,7 +692,9 @@ class CallSession extends ChangeNotifier {
     // Treat only a sustained mute as ended; otherwise clearing srcObject here
     // leaves mobile/PWA renderers permanently white.
     track.onMute = () {
-      if (call.mode == 'screen' || peerSharingScreen) {
+      if (call.mode == 'screen' ||
+          call.mode == 'control' ||
+          peerSharingScreen) {
         _remoteVideoMuteTimer?.cancel();
         _remoteVideoMuteTimer = Timer(const Duration(milliseconds: 900), () {
           if (track.muted == true && !remoteShareStopped) {
@@ -604,6 +722,11 @@ class CallSession extends ChangeNotifier {
   /// the peer's new share never appears — exactly the "A can't see B's screen
   /// after B takes over" bug. After every renegotiation, scan the receiving
   /// video transceivers and surface any incoming track [onTrack] missed.
+  ///
+  /// Same class of bug for "answer audio-only, peer enables camera later":
+  /// we stay [SendOnly] until renegotiation, [getCurrentDirection] can lag,
+  /// and [onTrack] often never re-fires — so also honor pending [getDirection]
+  /// and arm unmute watchers on still-SendOnly receivers.
   Future<void> _bindReceivingVideoTracks() async {
     if (_pc == null) return;
     var bound = false;
@@ -611,27 +734,56 @@ class CallSession extends ChangeNotifier {
       final list = await _pc!.getTransceivers();
       for (final t in list) {
         if (t.stoped) continue;
-        TransceiverDirection? dir;
+        TransceiverDirection? currentDir;
+        TransceiverDirection? desiredDir;
         try {
-          dir = await t.getCurrentDirection();
+          currentDir = await t.getCurrentDirection();
         } catch (_) {}
-        final receiving =
-            dir == TransceiverDirection.RecvOnly ||
-            dir == TransceiverDirection.SendRecv;
-        if (!receiving) continue;
+        try {
+          desiredDir = await t.getDirection();
+        } catch (_) {}
         final track = t.receiver.track;
         if (track == null || track.kind != 'video') continue;
+        final receiving =
+            currentDir == TransceiverDirection.RecvOnly ||
+            currentDir == TransceiverDirection.SendRecv ||
+            desiredDir == TransceiverDirection.RecvOnly ||
+            desiredDir == TransceiverDirection.SendRecv;
         final current = remoteRenderer.srcObject;
         final already =
             current != null &&
             current.getVideoTracks().any((v) => v.id == track.id);
-        if (already) continue;
+        if (!receiving) {
+          // Native often leaves an already-unmuted receiver track on SendOnly;
+          // onUnMute will never fire — also watch mute→unmute and frame path.
+          _armReceiverUnmuteBind(track);
+          continue;
+        }
         // Never resurrect a share the peer explicitly stopped.
-        if (remoteShareStopped && track.muted == true) continue;
-        final wrapper = await createLocalMediaStream('recv-${track.id}');
-        await wrapper.addTrack(track);
-        await _bindRemoteVideoStream(track, wrapper);
-        bound = true;
+        if (remoteShareStopped && track.muted == true) {
+          _armReceiverUnmuteBind(track);
+          continue;
+        }
+        // Dart MediaStream.addTrack appends locally BEFORE the native call.
+        // A failed MediaStreamAddTrack leaves a zombie "already" entry with no
+        // GPU frames — drop it and retry a real native bind.
+        if (already && !remoteHasVideo && current != null) {
+          try {
+            await current.removeTrack(track, removeFromNative: false);
+          } catch (_) {}
+        } else if (already) {
+          if (!remoteHasVideo) {
+            remoteHasVideo = true;
+            bound = true;
+            notifyListeners();
+          }
+          continue;
+        }
+        final ok = await _tryBindRemoteVideoTrack(
+          track,
+          remoteRenderer.srcObject,
+        );
+        if (ok) bound = true;
       }
     } catch (_) {}
     if (bound) {
@@ -639,6 +791,66 @@ class CallSession extends ChangeNotifier {
       // frozen frame until srcObject is rebound after the frame is laid out.
       SchedulerBinding.instance.addPostFrameCallback((_) => rebindRenderers());
     }
+  }
+
+  /// Attach a receiver video track to [remoteRenderer]. Native addTrack can
+  /// throw when the track is already owned by an internal stream — fall back
+  /// to merging into the existing remote stream.
+  Future<bool> _tryBindRemoteVideoTrack(
+    MediaStreamTrack track,
+    MediaStream? current,
+  ) async {
+    Future<void> scrubZombie(MediaStream stream) async {
+      try {
+        if (stream.getVideoTracks().any((v) => v.id == track.id)) {
+          await stream.removeTrack(track, removeFromNative: false);
+        }
+      } catch (_) {}
+    }
+
+    try {
+      final wrapper = await createLocalMediaStream('recv-${track.id}');
+      await wrapper.addTrack(track);
+      await _bindRemoteVideoStream(track, wrapper);
+      return true;
+    } catch (_) {}
+    try {
+      if (current != null) {
+        await scrubZombie(current);
+        await current.addTrack(track);
+        remoteRenderer.srcObject = null;
+        remoteRenderer.srcObject = current;
+        remoteHasVideo = true;
+        notifyListeners();
+        return true;
+      }
+      final wrapper = await createLocalMediaStream('recv-fb-${track.id}');
+      await wrapper.addTrack(track);
+      remoteRenderer.srcObject = wrapper;
+      remoteHasVideo = true;
+      notifyListeners();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// When a previously send-only m-line starts receiving, [onTrack] may not
+  /// re-fire; the receiver track simply unmutes. Re-run the bind scan then.
+  void _armReceiverUnmuteBind(MediaStreamTrack track) {
+    if (track.kind != 'video') return;
+    track.onUnMute = () {
+      if (remoteShareStopped) return;
+      unawaited(_bindReceivingVideoTracks());
+    };
+    // Some engines report the placeholder receiver as already unmuted while
+    // still SendOnly — also re-scan when mute clears after being muted.
+    track.onMute = () {
+      track.onUnMute = () {
+        if (remoteShareStopped) return;
+        unawaited(_bindReceivingVideoTracks());
+      };
+    };
   }
 
   Future<void> handleRemoteOffer(Map<String, dynamic> sdp) async {
@@ -681,7 +893,11 @@ class CallSession extends ChangeNotifier {
       // answer sendrecv, which would light up our camera on an audio-only
       // answer to a video invite. Force recvonly explicitly whenever we
       // don't intend to send our own camera.
-      if (call.mode == 'video' && !wantLocalVideo) {
+      // Only force recvonly while we still have no camera to send. After
+      // [retryCamera], wantLocalVideo/hasCamTrack are true — forcing RecvOnly
+      // here would silently kill the just-enabled outbound video on the next
+      // remote offer (collision rollback, peer renegotiation, etc.).
+      if (call.mode == 'video' && !wantLocalVideo && !hasCamTrack) {
         final videoT = await _videoTransceiver();
         if (videoT != null) {
           try {
@@ -696,6 +912,11 @@ class CallSession extends ChangeNotifier {
       // (screen-share take-over) — bind any incoming video it missed.
       await _bindReceivingVideoTracks();
       _scheduleRendererRebind();
+      // Receiver tracks from a SendOnly→SendRecv upgrade are often not
+      // readable until after the answer is fully applied on both sides.
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        unawaited(_bindReceivingVideoTracks());
+      });
       // We rolled back our own offer above — whatever local track/direction
       // change it was carrying (e.g. our own take-over) is still applied to
       // the senders but was never actually sent to the peer. Re-offer now
@@ -732,6 +953,9 @@ class CallSession extends ChangeNotifier {
       // peer started sending on a reused m-line actually gets bound/rendered.
       await _bindReceivingVideoTracks();
       _scheduleRendererRebind();
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        unawaited(_bindReceivingVideoTracks());
+      });
     } catch (e) {
       error = 'Call renegotiation failed: $e';
       notifyListeners();
@@ -760,7 +984,10 @@ class CallSession extends ChangeNotifier {
   }
 
   Future<void> toggleMic() async {
-    if (!hasMicTrack) return;
+    if (!hasMicTrack) {
+      await enableMic();
+      return;
+    }
     micOn = !micOn;
     for (final t in _local?.getAudioTracks() ?? []) {
       t.enabled = micOn;
@@ -768,8 +995,80 @@ class CallSession extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Open the microphone mid-session (control / screen sessions start without A/V).
+  Future<void> enableMic() async {
+    if (_disposed || _pc == null || hasMicTrack) return;
+    MediaStream? mic;
+    try {
+      mic = await navigator.mediaDevices.getUserMedia({
+        'audio': true,
+        'video': false,
+      });
+    } catch (e) {
+      error = 'Microphone permission is required to talk. ($e)';
+      notifyListeners();
+      return;
+    }
+    if (_disposed) {
+      await _releaseStream(mic);
+      return;
+    }
+    final tracks = mic.getAudioTracks();
+    if (tracks.isEmpty) {
+      await _releaseStream(mic);
+      error = 'No microphone track available.';
+      notifyListeners();
+      return;
+    }
+    final track = tracks.first;
+    track.enabled = true;
+    _local ??= await createLocalMediaStream('local');
+    await _local!.addTrack(track);
+    // Same Linux rule as retryCamera: never dispose the getUserMedia wrapper
+    // while it still owns the track — that unregisters/stops capture.
+    try {
+      await mic.removeTrack(track);
+    } catch (_) {}
+    try {
+      if (mic.getTracks().isEmpty) await mic.dispose();
+    } catch (_) {}
+    // Prefer upgrading an existing recv-only audio transceiver.
+    final list = await _pc!.getTransceivers();
+    RTCRtpTransceiver? audioT;
+    for (final t in list) {
+      if (t.stoped) continue;
+      try {
+        final kind = t.receiver.track?.kind ?? t.sender.track?.kind;
+        if (kind == 'audio') {
+          audioT = t;
+          break;
+        }
+      } catch (_) {}
+    }
+    if (audioT != null) {
+      try {
+        await audioT.setDirection(TransceiverDirection.SendRecv);
+      } catch (_) {}
+      try {
+        await audioT.sender.replaceTrack(track);
+      } catch (_) {
+        await _pc!.addTrack(track, _local!);
+      }
+    } else {
+      await _pc!.addTrack(track, _local!);
+    }
+    micOn = true;
+    error = null;
+    notifyListeners();
+    await _renegotiateAfterTrackChange();
+  }
+
   Future<void> toggleCam() async {
-    if (!hasCamTrack || sharingScreen || call.mode == 'screen') return;
+    if (sharingScreen || isScreenCall) return;
+    if (!hasCamTrack) {
+      await retryCamera();
+      return;
+    }
     camOn = !camOn;
     for (final t in _local?.getVideoTracks() ?? []) {
       t.enabled = camOn;
@@ -780,7 +1079,17 @@ class CallSession extends ChangeNotifier {
   /// Re-attempt to open the camera (e.g. once another app/browser tab
   /// releases it) and add it to the running call without restarting anything.
   Future<void> retryCamera() async {
-    if (!cameraPending || _pc == null) return;
+    if (_disposed || sharingScreen || isScreenCall || _pc == null) return;
+    if (hasCamTrack) {
+      if (!camOn) {
+        camOn = true;
+        for (final t in _local!.getVideoTracks()) {
+          t.enabled = true;
+        }
+        notifyListeners();
+      }
+      return;
+    }
     MediaStream? cam;
     try {
       cam = await navigator.mediaDevices.getUserMedia({
@@ -790,7 +1099,12 @@ class CallSession extends ChangeNotifier {
     } catch (_) {
       cam = await _tryAlternateCamera(audio: false);
     }
+    if (_disposed) {
+      await _releaseStream(cam);
+      return;
+    }
     if (cam == null || cam.getVideoTracks().isEmpty) {
+      await _releaseStream(cam);
       error =
           'Camera still unavailable — it may be open in another app or browser tab.';
       notifyListeners();
@@ -800,27 +1114,67 @@ class CallSession extends ChangeNotifier {
     track.enabled = true;
     _local ??= await createLocalMediaStream('local');
     await _local!.addTrack(track);
-    localRenderer.srcObject = _local;
+    // Detach from the temporary getUserMedia stream WITHOUT disposing it first.
+    // On Linux, MediaStream.dispose() erases the track from the native registry
+    // and stops the capturer — then PeerConnection.addTrack fails with
+    // "track is null" and replaceTrack sends a dead camera.
     try {
-      localRenderer.muted = true;
+      await cam.removeTrack(track);
+    } catch (_) {}
+    try {
+      if (cam.getTracks().isEmpty) await cam.dispose();
     } catch (_) {}
 
+    // Attach to the peer connection while the track is still registered.
     final transceiver = await _videoTransceiver();
+    String? dirBefore;
     if (transceiver != null) {
       try {
-        await transceiver.setDirection(TransceiverDirection.SendRecv);
+        dirBefore = (await transceiver.getCurrentDirection())?.name;
       } catch (_) {}
-      try {
-        await transceiver.sender.replaceTrack(track);
-        _videoSender = transceiver.sender;
-      } catch (_) {
-        _videoSender = await _pc!.addTrack(track, _local!);
-        _videoMid = null;
+      // RecvOnly/Inactive → prefer a fresh outbound m-line so the peer gets
+      // onTrack (replaceTrack upgrades are unreliable on Linux→Firefox).
+      final upgrading =
+          dirBefore == 'RecvOnly' ||
+          dirBefore == 'Inactive' ||
+          dirBefore == null;
+      if (upgrading) {
+        try {
+          _videoSender = await _pc!.addTrack(track, _local!);
+          _videoMid = null;
+        } catch (_) {
+          try {
+            await transceiver.setDirection(TransceiverDirection.SendRecv);
+          } catch (_) {}
+          try {
+            await transceiver.sender.replaceTrack(track);
+            _videoSender = transceiver.sender;
+          } catch (_) {}
+        }
+      } else {
+        try {
+          await transceiver.setDirection(TransceiverDirection.SendRecv);
+        } catch (_) {}
+        try {
+          await transceiver.sender.replaceTrack(track);
+          _videoSender = transceiver.sender;
+        } catch (_) {
+          _videoSender = await _pc!.addTrack(track, _local!);
+          _videoMid = null;
+        }
       }
     } else {
       _videoSender = await _pc!.addTrack(track, _local!);
       _videoMid = null;
     }
+
+    localRenderer.srcObject = null;
+    localRenderer.srcObject = _local;
+    unawaited(muteLocalRenderer(localRenderer));
+    _scheduleRendererRebind();
+    // We are now sending camera — stop treating later remote offers as
+    // audio-only (which forced RecvOnly and killed outbound video).
+    wantLocalVideo = true;
     camOn = true;
     error = null;
     notifyListeners();
@@ -944,7 +1298,10 @@ class CallSession extends ChangeNotifier {
   }
 
   /// Attach a display stream captured under a user gesture (share picker).
-  Future<void> startScreenShare(MediaStream display) async {
+  Future<void> startScreenShare(
+    MediaStream display, {
+    String? sourceId,
+  }) async {
     MediaStreamTrack? previousVideoTrack;
     var shareAnnounced = false;
     try {
@@ -1003,14 +1360,13 @@ class CallSession extends ChangeNotifier {
         _videoMid = null;
       }
       _display = display;
+      _displaySourceId = sourceId ?? lastDesktopCaptureSourceId;
       sharingScreen = true;
       everSharedLocally = true;
       final preview = await createLocalMediaStream('screen-preview');
       await preview.addTrack(screenTrack);
       localRenderer.srcObject = preview;
-      try {
-        localRenderer.muted = true;
-      } catch (_) {}
+      unawaited(muteLocalRenderer(localRenderer));
       _scheduleRendererRebind();
       screenTrack.onEnded = () {
         _stopScreenShare();
@@ -1025,6 +1381,10 @@ class CallSession extends ChangeNotifier {
       if (gw != null && gh != null) {
         await remoteControl?.updateLocalGeometry(gw, gh);
       }
+      await applyRemoteControlQuality(
+        remoteControl?.quality ?? RemoteControlQuality.balanced,
+      );
+      await remoteControl?.publishDisplaysNow(activeId: _displaySourceId);
       await _renegotiateAfterTrackChange();
       _scheduleRendererRebind();
       notifyListeners();
@@ -1044,7 +1404,7 @@ class CallSession extends ChangeNotifier {
       } catch (_) {}
       _display = null;
       sharingScreen = false;
-      if (call.mode == 'screen') {
+      if (call.mode == 'screen' || call.mode == 'control') {
         remoteShareStopped = true;
       }
       localRenderer.srcObject = _local;
@@ -1073,7 +1433,9 @@ class CallSession extends ChangeNotifier {
         // Only clear the share lock when this really was a screen share —
         // a peer turning their camera off must not flip the video UI into
         // "Screen share stopped" or unlock/lock share incorrectly.
-        if (call.mode == 'screen' || peerSharingScreen) {
+        if (call.mode == 'screen' ||
+            call.mode == 'control' ||
+            peerSharingScreen) {
           remoteShareStopped = true;
           peerSharingScreen = false;
           _clearPeerShareControlMeta();
@@ -1083,7 +1445,9 @@ class CallSession extends ChangeNotifier {
       }
     } else {
       remoteHasVideo = false;
-      if (call.mode == 'screen' || peerSharingScreen) {
+      if (call.mode == 'screen' ||
+          call.mode == 'control' ||
+          peerSharingScreen) {
         remoteShareStopped = true;
         peerSharingScreen = false;
         _clearPeerShareControlMeta();
@@ -1124,7 +1488,7 @@ class CallSession extends ChangeNotifier {
   }
 
   Future<void> _stopScreenShare() async {
-    if (!sharingScreen) return;
+    if (_disposed || !sharingScreen) return;
     // Explicit signal — browsers often leave a frozen last frame when the
     // track is merely stopped/replaced, without firing mute/ended to the peer.
     // Do NOT renegotiate here: a stop-offer races the peer's take-over offer
@@ -1132,7 +1496,7 @@ class CallSession extends ChangeNotifier {
     rt.sendShareStopped(callId: call.id, toUserId: peerId);
     await remoteControl?.onLocalShareStopped();
 
-    final isScreenCall = call.mode == 'screen';
+    final isScreenCall = call.mode == 'screen' || call.mode == 'control';
     final camTrack =
         !isScreenCall && _local?.getVideoTracks().isNotEmpty == true
         ? _local!.getVideoTracks().first
@@ -1178,6 +1542,7 @@ class CallSession extends ChangeNotifier {
     await _display?.dispose();
     await stopDisplayCaptureService();
     _display = null;
+    _displaySourceId = null;
     sharingScreen = false;
     // Local stop on a screen call — treat like share-stopped for our UI, and
     // stay ready for the peer (or us) to start sharing again.
@@ -1199,9 +1564,7 @@ class CallSession extends ChangeNotifier {
     remoteRenderer.srcObject = null;
     if (local != null) {
       localRenderer.srcObject = local;
-      try {
-        localRenderer.muted = true;
-      } catch (_) {}
+      unawaited(muteLocalRenderer(localRenderer));
     }
     if (remote != null) {
       remoteRenderer.srcObject = remote;
@@ -1229,6 +1592,13 @@ class CallSession extends ChangeNotifier {
 
   Future<void> grantRemoteControl() async {
     await remoteControl?.grantControl();
+    // Hosting: drop the nested local screen preview (capture still sends).
+    if (remoteControl?.state.isHost == true) {
+      try {
+        localRenderer.srcObject = null;
+      } catch (_) {}
+      _scheduleRendererRebind();
+    }
     notifyListeners();
   }
 
@@ -1242,20 +1612,285 @@ class CallSession extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> disposeSession() async {
-    _remoteVideoMuteTimer?.cancel();
-    await remoteControl?.dispose();
-    remoteControl = null;
-    await _stopScreenShare();
-    final local = _local ?? preparedLocal;
-    for (final t in local?.getTracks() ?? []) {
-      await t.stop();
+  Future<void> setRemoteControlQuality(RemoteControlQuality mode) async {
+    await remoteControl?.setQuality(mode);
+    notifyListeners();
+  }
+
+  Future<void> switchRemoteControlDisplay(String sourceId) async {
+    if (!sharingScreen || sourceId.isEmpty) return;
+    if (_displaySourceId == sourceId) return;
+    try {
+      final next = await captureDisplayMedia(
+        prefer: DisplayShareSurface.monitor,
+        sourceId: sourceId,
+      );
+      await stripDisplayAudioTracks(next);
+      final tracks = next.getVideoTracks();
+      if (tracks.isEmpty) {
+        for (final t in next.getTracks()) {
+          await t.stop();
+        }
+        await next.dispose();
+        return;
+      }
+      final screenTrack = tracks.first;
+      final old = _display;
+      final transceiver = await _videoTransceiver();
+      if (transceiver != null) {
+        await transceiver.sender.replaceTrack(screenTrack);
+        _videoSender = transceiver.sender;
+      } else if (_videoSender != null) {
+        await _videoSender!.replaceTrack(screenTrack);
+      } else {
+        _videoSender = await _pc!.addTrack(screenTrack, next);
+      }
+      _display = next;
+      _displaySourceId = sourceId;
+      final preview = await createLocalMediaStream('screen-preview');
+      await preview.addTrack(screenTrack);
+      localRenderer.srcObject = preview;
+      unawaited(muteLocalRenderer(localRenderer));
+      screenTrack.onEnded = () {
+        _stopScreenShare();
+      };
+      final settings = screenTrack.getSettings();
+      final gw = (settings['width'] as num?)?.toInt();
+      final gh = (settings['height'] as num?)?.toInt();
+      if (gw != null && gh != null) {
+        await remoteControl?.updateLocalGeometry(gw, gh);
+      }
+      await applyRemoteControlQuality(
+        remoteControl?.quality ?? RemoteControlQuality.balanced,
+      );
+      await remoteControl?.publishDisplaysNow(activeId: sourceId);
+      if (old != null) {
+        for (final t in old.getTracks()) {
+          try {
+            await t.stop();
+          } catch (_) {}
+        }
+        try {
+          await old.dispose();
+        } catch (_) {}
+      }
+      _scheduleRendererRebind();
+      notifyListeners();
+    } catch (e) {
+      error = 'Could not switch display: $e';
+      notifyListeners();
     }
-    await local?.dispose();
+  }
+
+  Future<List<RemoteDisplayInfo>> _listRemoteControlDisplays() async {
+    final sources = await listDesktopScreens();
+    return [
+      for (final s in sources)
+        RemoteDisplayInfo(
+          id: s.id,
+          name: s.name.isNotEmpty ? s.name : 'Display',
+        ),
+    ];
+  }
+
+  Future<void> applyRemoteControlQuality(RemoteControlQuality mode) async {
+    final track = _display?.getVideoTracks().isNotEmpty == true
+        ? _display!.getVideoTracks().first
+        : _videoSender?.track;
+    if (track == null || track.kind != 'video') return;
+
+    final int maxW;
+    final int maxH;
+    final double maxFps;
+    final int maxBitrate;
+    final double scaleDown;
+    switch (mode) {
+      case RemoteControlQuality.quality:
+        maxW = 2560;
+        maxH = 1440;
+        maxFps = 60;
+        maxBitrate = 10 * 1000 * 1000;
+        scaleDown = 1.0;
+      case RemoteControlQuality.balanced:
+        maxW = 1600;
+        maxH = 900;
+        maxFps = 30;
+        maxBitrate = 3 * 1000 * 1000;
+        scaleDown = 1.25;
+      case RemoteControlQuality.speed:
+        maxW = 960;
+        maxH = 540;
+        maxFps = 20;
+        maxBitrate = 900 * 1000;
+        scaleDown = 2.0;
+    }
+
+    try {
+      await track.applyConstraints({
+        'width': {'ideal': maxW, 'max': maxW},
+        'height': {'ideal': maxH, 'max': maxH},
+        'frameRate': {'ideal': maxFps, 'max': maxFps},
+      });
+    } catch (_) {}
+
+    final sender = _videoSender;
+    if (sender == null) return;
+    try {
+      final params = sender.parameters;
+      var encodings = params.encodings;
+      if (encodings == null || encodings.isEmpty) {
+        encodings = [RTCRtpEncoding()];
+        params.encodings = encodings;
+      }
+      for (final e in encodings) {
+        e.active = true;
+        e.maxBitrate = maxBitrate;
+        e.maxFramerate = maxFps.round();
+        // Desktop capturers often ignore applyConstraints — scaling the
+        // encoded stream is what actually changes Balanced / Speed.
+        e.scaleResolutionDownBy = scaleDown;
+      }
+      // Prefer sharpness in Quality; allow fps tradeoff in Speed.
+      params.degradationPreference = mode == RemoteControlQuality.quality
+          ? RTCDegradationPreference.MAINTAIN_RESOLUTION
+          : mode == RemoteControlQuality.speed
+              ? RTCDegradationPreference.MAINTAIN_FRAMERATE
+              : RTCDegradationPreference.BALANCED;
+      await sender.setParameters(params);
+    } catch (e) {
+      debugPrint('applyRemoteControlQuality setParameters failed: $e');
+    }
+  }
+
+  Future<void> disposeSession() async {
+    if (_disposed) return;
+    _disposed = true;
+    ready = false;
+    _remoteVideoMuteTimer?.cancel();
+    _remoteVideoMuteTimer = null;
+
+    // Detach HTML/native video elements first — flutter_webrtc web dispose()
+    // does not clear srcObject, which can keep the tab's recording indicator.
+    try {
+      localRenderer.srcObject = null;
+    } catch (_) {}
+    try {
+      remoteRenderer.srcObject = null;
+    } catch (_) {}
+
+    try {
+      await remoteControl?.dispose();
+    } catch (_) {}
+    remoteControl = null;
+
+    // Stop display without renegotiating / restoring cam onto a dying PC.
+    try {
+      await _releaseDisplayCapture(announce: false);
+    } catch (_) {}
+
+    // Sender tracks can outlive the MediaStream wrapper (replaceTrack, etc.).
+    try {
+      final pc = _pc;
+      if (pc != null) {
+        for (final sender in await pc.getSenders()) {
+          final track = sender.track;
+          if (track != null) {
+            try {
+              await sender.replaceTrack(null);
+            } catch (_) {}
+            await _stopTrack(track);
+          }
+        }
+      }
+    } catch (_) {}
+
+    await _releaseStream(_local);
     _local = null;
-    await _pc?.close();
-    await localRenderer.dispose();
-    await remoteRenderer.dispose();
+    // preparedLocal may equal _local; _releaseStream is idempotent on stopped tracks.
+    await _releaseStream(preparedLocal);
+    await _releaseStream(preparedDisplay);
+
+    await _releasePeerConnection();
+    await _releaseRenderers();
+    micOn = false;
+    camOn = false;
+    sharingScreen = false;
+  }
+
+  Future<void> _releaseDisplayCapture({required bool announce}) async {
+    if (_display == null && !sharingScreen) return;
+    // Clear before stop() so track.onEnded cannot re-enter [_stopScreenShare].
+    final wasSharing = sharingScreen;
+    sharingScreen = false;
+    if (announce && wasSharing) {
+      try {
+        rt.sendShareStopped(callId: call.id, toUserId: peerId);
+      } catch (_) {}
+      try {
+        await remoteControl?.onLocalShareStopped();
+      } catch (_) {}
+    }
+    final display = _display;
+    _display = null;
+    if (display != null) {
+      for (final t in display.getTracks()) {
+        try {
+          t.onEnded = null;
+        } catch (_) {}
+        try {
+          t.enabled = false;
+        } catch (_) {}
+      }
+      await _releaseStream(display);
+    }
+    try {
+      await stopDisplayCaptureService();
+    } catch (_) {}
+  }
+
+  Future<void> _releasePeerConnection() async {
+    final pc = _pc;
+    _pc = null;
+    _videoSender = null;
+    _videoMid = null;
+    if (pc == null) return;
+    try {
+      await pc.close();
+    } catch (_) {}
+    try {
+      await pc.dispose();
+    } catch (_) {}
+  }
+
+  Future<void> _releaseRenderers() async {
+    try {
+      localRenderer.srcObject = null;
+    } catch (_) {}
+    try {
+      remoteRenderer.srcObject = null;
+    } catch (_) {}
+    try {
+      await localRenderer.dispose();
+    } catch (_) {}
+    try {
+      await remoteRenderer.dispose();
+    } catch (_) {}
+  }
+
+  static Future<void> _stopTrack(MediaStreamTrack track) async {
+    try {
+      await track.stop();
+    } catch (_) {}
+  }
+
+  static Future<void> _releaseStream(MediaStream? stream) async {
+    if (stream == null) return;
+    for (final t in stream.getTracks()) {
+      await _stopTrack(t);
+    }
+    try {
+      await stream.dispose();
+    } catch (_) {}
   }
 }
 
@@ -1276,7 +1911,10 @@ class PrivetState extends ChangeNotifier {
   Timer? _focusedReadTimer;
   Timer? _inboxReconcileTimer;
   SharedPreferences? _prefsCache;
-  final _typingThrottle = Throttle(const Duration(seconds: 2));
+  /// Keep under the peer clear window and above the server rate limit so
+  /// refreshes are not dropped (matched 2s/2s used to lag ~3–4s).
+  final _typingThrottle = Throttle(const Duration(milliseconds: 800));
+  String? _typingThrottleChatId;
   String? _lastDraftText;
 
   /// Scoped UI ticks — listeners rebuild only the regions that care.
@@ -1318,11 +1956,19 @@ class PrivetState extends ChangeNotifier {
   final Map<String, DateTime> lastSeen = {};
   List<PrivetUser> blocked = [];
   String? activeConversationId;
+  /// Active-chat typer (convenience mirror of [typingByChat]).
   String? typingUserId;
+  /// conversationId → userId currently typing (for inbox + chat chrome).
+  final Map<String, String> typingByChat = {};
+  final Map<String, Timer> _typingClearTimers = {};
   String? error;
   bool booting = true;
   bool busy = false;
   bool uploading = false;
+
+  /// Contacts allowed to control this host without an Allow dialog while the
+  /// app stays open (cleared on logout).
+  final Set<String> autoAllowControlUserIds = {};
 
   /// Conversation id whose [ConversationPane] is currently mounted, if any.
   String? _surfaceChatId;
@@ -1356,9 +2002,13 @@ class PrivetState extends ChangeNotifier {
   /// Show OS/browser notification toasts on incoming messages (device-local).
   bool notificationsEnabled = true;
 
-  /// Prefer lower RAM/CPU: static emoji, lazy video, capped image decode.
-  /// Defaults on for Linux desktop (old notebooks); off elsewhere unless set.
+  /// Prefer lower RAM/CPU: static emoji, no UI motion, capped image decode.
+  /// Manual opt-in only (Profile). Never auto-enabled — cold boot jank on a
+  /// fast GPU is not a reason to strip animations.
   bool lowResourceMode = false;
+
+  /// Legacy toast flag (auto-detect removed; kept so old builds don't break).
+  bool lowResourceAutoHint = false;
 
   /// App appearance mode (device-local). Applied by the root [MaterialApp].
   ThemeMode themeMode = ThemeMode.dark;
@@ -1472,6 +2122,18 @@ class PrivetState extends ChangeNotifier {
     });
   }
 
+  bool shouldAutoAllowControl(String userId) =>
+      autoAllowControlUserIds.contains(userId);
+
+  void rememberAutoAllowControl(String userId) {
+    if (userId.isEmpty) return;
+    if (autoAllowControlUserIds.add(userId)) notifyListeners();
+  }
+
+  void forgetAutoAllowControl(String userId) {
+    if (autoAllowControlUserIds.remove(userId)) notifyListeners();
+  }
+
   void setMiniCallOffset(Offset value) {
     miniCallOffset = value;
     // Intentionally does not notify — drag UI keeps local state; persist on end.
@@ -1503,6 +2165,35 @@ class PrivetState extends ChangeNotifier {
 
   void _bump(ValueNotifier<int> tick) => tick.value++;
 
+  bool _pauseInbox = false;
+  bool _pauseChat = false;
+  bool _pauseShell = false;
+  bool _overlayResumeArmed = false;
+
+  void _armOverlayResume() {
+    if (_overlayResumeArmed) return;
+    _overlayResumeArmed = true;
+    UiOverlayPause.afterResume(() {
+      _overlayResumeArmed = false;
+      _flushOverlayPauses();
+    });
+  }
+
+  void _flushOverlayPauses() {
+    if (_pauseShell) {
+      _pauseShell = false;
+      _bump(shellTick);
+    }
+    if (_pauseInbox) {
+      _pauseInbox = false;
+      _bump(inboxTick);
+    }
+    if (_pauseChat) {
+      _pauseChat = false;
+      _bump(chatTick);
+    }
+  }
+
   void notifySession() {
     _bump(sessionTick);
     super.notifyListeners();
@@ -1510,21 +2201,37 @@ class PrivetState extends ChangeNotifier {
   }
 
   void notifyShell() {
+    if (UiOverlayPause.active) {
+      _pauseShell = true;
+      _armOverlayResume();
+      return;
+    }
     _bump(shellTick);
     super.notifyListeners();
   }
 
   void notifyInbox() {
+    if (UiOverlayPause.active) {
+      _pauseInbox = true;
+      _armOverlayResume();
+      return;
+    }
     _bump(inboxTick);
     super.notifyListeners();
   }
 
   void notifyChat() {
+    if (UiOverlayPause.active) {
+      _pauseChat = true;
+      _armOverlayResume();
+      return;
+    }
     _bump(chatTick);
     super.notifyListeners();
   }
 
   void notifyTypingOnly() {
+    if (UiOverlayPause.active) return;
     _bump(typingTick);
   }
 
@@ -1535,6 +2242,12 @@ class PrivetState extends ChangeNotifier {
   }
 
   void notifyChatAndInbox() {
+    if (UiOverlayPause.active) {
+      _pauseChat = true;
+      _pauseInbox = true;
+      _armOverlayResume();
+      return;
+    }
     _bump(chatTick);
     _bump(inboxTick);
     super.notifyListeners();
@@ -1542,6 +2255,13 @@ class PrivetState extends ChangeNotifier {
 
   @override
   void notifyListeners() {
+    if (UiOverlayPause.active) {
+      _pauseInbox = true;
+      _pauseChat = true;
+      _pauseShell = true;
+      _armOverlayResume();
+      return;
+    }
     // Default broad notify — prefer scoped helpers above when possible.
     _bump(inboxTick);
     _bump(chatTick);
@@ -1600,11 +2320,13 @@ class PrivetState extends ChangeNotifier {
     themeMode = _themeModeFromStorage(prefs.getString('privet_theme_mode'));
     final accentValue = prefs.getInt('privet_accent');
     if (accentValue != null) accent = Color(accentValue);
-    // Low RAM & CPU: default on for Linux (old notebooks); elsewhere off.
-    final storedLow = prefs.getBool('privet_low_resource');
-    lowResourceMode = storedLow ??
-        (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux);
-    privetLowResourceEmoji = lowResourceMode;
+    // Manual only. Boot-frame auto-detect falsely enabled this on fast NVIDIA
+    // boxes (first-paint jank ≠ weak GPU) and stuck via prefs — wipe that.
+    await prefs.remove('privet_low_resource');
+    final storedLow = prefs.getBool('privet_low_resource_user');
+    lowResourceMode = storedLow ?? false;
+    setPrivetLowResource(lowResourceMode);
+    LowResourceAutoDetect.cancel();
     aiScope = AiUsageScopeX.fromStorage(prefs.getString('privet_ai_scope'));
     if (aiEnabled && !aiActive) {
       aiEnabled = false;
@@ -1650,13 +2372,33 @@ class PrivetState extends ChangeNotifier {
     await prefs.setBool('privet_notifications_enabled', value);
   }
 
-  Future<void> setLowResourceMode(bool value) async {
+  Future<void> setLowResourceMode(bool value, {bool auto = false}) async {
     if (lowResourceMode == value) return;
     lowResourceMode = value;
-    privetLowResourceEmoji = value;
-    notifySession();
+    setPrivetLowResource(value);
+    // [auto] kept for API compat; auto-detect is disabled (false positives).
+    if (auto && value) lowResourceAutoHint = true;
+    if (!value) lowResourceAutoHint = false;
+    LowResourceAutoDetect.cancel();
+    // sessionTick rebuilds MaterialApp (theme + MediaQuery.disableAnimations).
+    // Also bump pane ticks: chat/inbox listen only to those, and may be sitting
+    // behind a Profile sheet where parent rebuilds alone left emoji/controllers
+    // mid-animation — that felt like "Low RAM & CPU sometimes works".
+    _bump(sessionTick);
+    _bump(shellTick);
+    _bump(inboxTick);
+    _bump(chatTick);
+    super.notifyListeners();
+    _syncBrowserTabIndicator();
     final prefs = await _prefs();
-    await prefs.setBool('privet_low_resource', value);
+    await prefs.remove('privet_low_resource');
+    await prefs.setBool('privet_low_resource_user', value);
+  }
+
+  void clearLowResourceAutoHint() {
+    if (!lowResourceAutoHint) return;
+    lowResourceAutoHint = false;
+    notifySession();
   }
 
   Future<void> setThemeMode(ThemeMode value) async {
@@ -1700,12 +2442,11 @@ class PrivetState extends ChangeNotifier {
   String? inviteLink() {
     final me = user;
     if (me == null) return null;
-    final origin = currentPageUri().origin;
-    // Prefer the live page origin (web). Fall back to API host for native.
-    final base = (origin.isNotEmpty && !origin.startsWith('file:'))
-        ? origin
-        : _api.baseUrl;
-    return '$base/?invite=${Uri.encodeComponent(me.handle)}';
+    // Prefer the live page origin on web. Native desktop Uri.base is file:// —
+    // Uri.origin throws for non-http(s), which used to kill Copy invite on Linux.
+    final base = httpOrigin(currentPageUri()) ?? _api.baseUrl;
+    // Chat lives under /app/ after the landing split; root / is marketing only.
+    return '$base/app/?invite=${Uri.encodeComponent(me.handle)}';
   }
 
   Future<void> loadInvitePreview(String handle) async {
@@ -2092,6 +2833,7 @@ class PrivetState extends ChangeNotifier {
     online.clear();
     lastSeen.clear();
     blocked = [];
+    autoAllowControlUserIds.clear();
     activeConversationId = null;
     ringing = null;
     notifyListeners();
@@ -2217,7 +2959,7 @@ class PrivetState extends ChangeNotifier {
 
   Future<void> openConversation(String id) async {
     activeConversationId = id;
-    typingUserId = null;
+    typingUserId = typingByChat[id];
     final idx = conversations.indexWhere((c) => c.id == id);
     if (idx >= 0) {
       final lr = conversations[idx].lastReadAt;
@@ -2397,6 +3139,87 @@ class PrivetState extends ChangeNotifier {
     final at = lastSeen[userId];
     if (at == null) return 'offline';
     return 'last seen ${_formatLastSeen(at)}';
+  }
+
+  /// Best-effort display name for a peer (DM peer, directory, recent messages).
+  String displayNameFor(String? userId) {
+    if (userId == null) return 'Someone';
+    for (final c in conversations) {
+      final peer = c.peer;
+      if (peer?.id == userId && peer!.displayName.trim().isNotEmpty) {
+        return peer.displayName.trim();
+      }
+    }
+    for (final u in directory) {
+      if (u.id == userId && u.displayName.trim().isNotEmpty) {
+        return u.displayName.trim();
+      }
+    }
+    for (final list in messagesByChat.values) {
+      for (var i = list.length - 1; i >= 0; i--) {
+        final s = list[i].sender;
+        if (s.id == userId && s.displayName.trim().isNotEmpty) {
+          return s.displayName.trim();
+        }
+      }
+    }
+    return 'Someone';
+  }
+
+  /// Header / bubble label: `"typing…"` in DMs, `"Alex is typing…"` in groups.
+  String typingLabel({String? conversationId, bool includeName = false}) {
+    final chatId = conversationId ?? activeConversationId;
+    if (chatId == null) return 'typing…';
+    final typerId = typingByChat[chatId];
+    if (typerId == null) return 'typing…';
+    if (!includeName) {
+      final idx = conversations.indexWhere((c) => c.id == chatId);
+      if (idx >= 0 && conversations[idx].isGroup) {
+        includeName = true;
+      }
+    }
+    if (!includeName) return 'typing…';
+    return '${displayNameFor(typerId)} is typing…';
+  }
+
+  bool isTypingIn(String conversationId) => typingByChat.containsKey(conversationId);
+
+  void _setPeerTyping(String conversationId, String typerId) {
+    typingByChat[conversationId] = typerId;
+    if (conversationId == activeConversationId) {
+      typingUserId = typerId;
+    }
+    _typingClearTimers.remove(conversationId)?.cancel();
+    // Client emits every ~800ms while composing; TTL covers a few missed
+    // pulses without leaving the indicator stuck after they stop.
+    _typingClearTimers[conversationId] = Timer(
+      const Duration(milliseconds: 2800),
+      () {
+        if (typingByChat[conversationId] != typerId) return;
+        typingByChat.remove(conversationId);
+        if (typingUserId == typerId &&
+            activeConversationId == conversationId) {
+          typingUserId = null;
+        }
+        notifyTypingOnly();
+        notifyInbox();
+      },
+    );
+    notifyTypingOnly();
+    notifyInbox();
+  }
+
+  void _clearPeerTyping(String conversationId, {String? onlyUserId}) {
+    final current = typingByChat[conversationId];
+    if (current == null) return;
+    if (onlyUserId != null && current != onlyUserId) return;
+    typingByChat.remove(conversationId);
+    _typingClearTimers.remove(conversationId)?.cancel();
+    if (activeConversationId == conversationId) {
+      typingUserId = null;
+    }
+    notifyTypingOnly();
+    notifyInbox();
   }
 
   static String _formatLastSeen(DateTime at) {
@@ -3039,6 +3862,11 @@ Examples:
   void notifyTyping() {
     final chatId = activeConversationId;
     if (chatId == null) return;
+    // Switching chats must not inherit the previous chat's throttle cool-down.
+    if (_typingThrottleChatId != chatId) {
+      _typingThrottleChatId = chatId;
+      _typingThrottle.reset();
+    }
     _typingThrottle(() => _rt.typing(chatId));
   }
 
@@ -3100,7 +3928,7 @@ Examples:
       phase: CallPhase.outgoing,
       peer: target,
       isCaller: true,
-      withVideo: mode != 'audio',
+      withVideo: mode == 'video',
     );
     callMinimized = false;
     playOutgoingCallSound();
@@ -3130,9 +3958,13 @@ Examples:
     }
     if (s == null) return;
     for (final t in s.getTracks()) {
-      await t.stop();
+      try {
+        await t.stop();
+      } catch (_) {}
     }
-    await s.dispose();
+    try {
+      await s.dispose();
+    } catch (_) {}
   }
 
   /// Take ownership of the click-time mic/camera stream (caller path).
@@ -3153,6 +3985,14 @@ Examples:
     // the incoming UI — never hang up a call that was never accepted.
     MediaStream? preparedLocal;
     final mode = incoming.call.mode;
+    if (mode == 'control') {
+      // Dedicated remote control uses [acceptRemoteControl] (picker + inject).
+      allowCallTones();
+      error =
+          'Use Allow control — remote control needs the desktop app and screen capture.';
+      notifyListeners();
+      return;
+    }
     if (mode != 'screen') {
       // Video invites can be answered with camera or audio-only (asymmetric).
       final withCam = mode == 'video' && withVideo;
@@ -3198,6 +4038,19 @@ Examples:
       wakeUiAfterMediaDialog();
     }
 
+    // Peer may have hung up while the permission dialog was open.
+    if (ringing?.call.id != incoming.call.id) {
+      if (preparedLocal != null) {
+        for (final t in preparedLocal.getTracks()) {
+          await t.stop();
+        }
+        await preparedLocal.dispose();
+      }
+      allowCallTones();
+      notifyListeners();
+      return;
+    }
+
     ringing = null;
     notifyListeners();
     wakeUiAfterMediaDialog();
@@ -3208,6 +4061,39 @@ Examples:
       isCaller: false,
       preparedLocal: preparedLocal,
       wantLocalVideo: mode == 'video' && withVideo,
+    );
+  }
+
+  /// Accept a dedicated remote-control invite after the host picked a display
+  /// and confirmed OS inject is available.
+  Future<void> acceptRemoteControl({required MediaStream displayStream}) async {
+    final incoming = ringing;
+    final me = user;
+    if (incoming == null || me == null) {
+      for (final t in displayStream.getTracks()) {
+        await t.stop();
+      }
+      await displayStream.dispose();
+      return;
+    }
+    if (incoming.call.mode != 'control') {
+      for (final t in displayStream.getTracks()) {
+        await t.stop();
+      }
+      await displayStream.dispose();
+      return;
+    }
+    suppressCallTones();
+    ringing = null;
+    notifyListeners();
+    wakeUiAfterMediaDialog();
+    _rt.acceptCall(incoming.call.id);
+    await _beginSession(
+      call: incoming.call,
+      peer: incoming.peer,
+      isCaller: false,
+      preparedDisplay: displayStream,
+      wantLocalVideo: false,
     );
   }
 
@@ -3227,10 +4113,10 @@ Examples:
     final ring = ringing;
     stopAllCallSounds();
     allowCallTones();
+    // Clear before await so a racing call.ended cannot touch a half-disposed session.
     if (session != null) {
-      _rt.hangupCall(session.call.id, toUserId: session.peerId);
-      await session.disposeSession();
       callSession = null;
+      _rt.hangupCall(session.call.id, toUserId: session.peerId);
     }
     if (ring != null && local) {
       if (ring.call.id == 'pending') {
@@ -3245,6 +4131,10 @@ Examples:
     resetMiniCallLayout();
     await _discardPendingLocal();
     await _discardPendingDisplay();
+    if (session != null) {
+      await session.disposeSession();
+    }
+    _clearPendingRemoteControl();
     notifyListeners();
   }
 
@@ -3253,6 +4143,7 @@ Examples:
     required PrivetUser peer,
     required bool isCaller,
     MediaStream? preparedLocal,
+    MediaStream? preparedDisplay,
     bool? wantLocalVideo,
   }) async {
     final me = user;
@@ -3265,12 +4156,25 @@ Examples:
         }
         await local.dispose();
       }
+      if (preparedDisplay != null) {
+        for (final t in preparedDisplay.getTracks()) {
+          await t.stop();
+        }
+        await preparedDisplay.dispose();
+      }
       return;
     }
     // Connected — never allow ring/ringback to restart for this call.
     suppressCallTones();
-    final prepared = isCaller ? _pendingDisplayStream : null;
-    if (isCaller) _pendingDisplayStream = null;
+    // Caller screen share uses the pending click-time stream; control host
+    // passes [preparedDisplay] explicitly as the callee.
+    final prepared = preparedDisplay ??
+        (isCaller ? _pendingDisplayStream : null);
+    if (preparedDisplay == null && isCaller) {
+      _pendingDisplayStream = null;
+    } else if (identical(prepared, _pendingDisplayStream)) {
+      _pendingDisplayStream = null;
+    }
     if (prepared != null) {
       await stripDisplayAudioTracks(prepared);
     }
@@ -3310,6 +4214,7 @@ Examples:
       if (!session.isSharingLocally) {
         playCallConnectedSound();
       }
+      _applyPendingRemoteControl(session);
       notifyListeners();
     } catch (e) {
       error = 'Could not start media: $e';
@@ -3321,6 +4226,44 @@ Examples:
       callMinimized = false;
       allowCallTones();
       notifyListeners();
+    }
+  }
+
+  /// Control grant/deny can race ahead of [CallSession] creation on the
+  /// controller — stash and apply once the session exists.
+  String? _pendingControlEventCallId;
+  String? _pendingControlEventType; // grant | deny
+  String? _pendingControlEventReason;
+
+  void _clearPendingRemoteControl() {
+    _pendingControlEventCallId = null;
+    _pendingControlEventType = null;
+    _pendingControlEventReason = null;
+  }
+
+  void _stashPendingRemoteControl({
+    required String? callId,
+    required String type,
+    String? reason,
+  }) {
+    _pendingControlEventCallId = callId;
+    _pendingControlEventType = type;
+    _pendingControlEventReason = reason;
+  }
+
+  void _applyPendingRemoteControl(CallSession session) {
+    if (_pendingControlEventCallId != null &&
+        _pendingControlEventCallId != session.call.id) {
+      return;
+    }
+    final type = _pendingControlEventType;
+    if (type == null) return;
+    final reason = _pendingControlEventReason;
+    _clearPendingRemoteControl();
+    if (type == 'grant') {
+      session.remoteControl?.onPeerGrant();
+    } else if (type == 'deny') {
+      session.remoteControl?.onPeerDeny(reason);
     }
   }
 
@@ -3399,6 +4342,9 @@ Examples:
         }
         final active = activeConversationId == chatId;
         final fromSelf = message.sender.id == user?.id;
+        if (!fromSelf) {
+          _clearPeerTyping(chatId, onlyUserId: message.sender.id);
+        }
         final viewingHere =
             active && chatSurfaceMounted && !documentHidden && documentHasFocus;
         if (!fromSelf) {
@@ -3516,17 +4462,14 @@ Examples:
           onClick: () => openConversation(chatId),
         );
       case 'typing':
-        if (event['conversationId'] == activeConversationId &&
-            event['userId'] != user?.id) {
-          typingUserId = event['userId'] as String;
-          notifyTypingOnly();
-          Future.delayed(const Duration(seconds: 2), () {
-            if (typingUserId == event['userId']) {
-              typingUserId = null;
-              notifyTypingOnly();
-            }
-          });
+        final chatId = event['conversationId'] as String?;
+        final typerId = event['userId'] as String?;
+        if (chatId == null ||
+            typerId == null ||
+            typerId == user?.id) {
+          return;
         }
+        _setPeerTyping(chatId, typerId);
       case 'auth.ok':
         online
           ..clear()
@@ -3654,14 +4597,24 @@ Examples:
       case 'call.control_grant':
         final callId = event['callId'] as String?;
         final session = callSession;
-        if (session == null) return;
+        if (session == null || session.remoteControl == null) {
+          _stashPendingRemoteControl(callId: callId, type: 'grant');
+          return;
+        }
         if (callId != null && callId != session.call.id) return;
         session.remoteControl?.onPeerGrant();
         notifyListeners();
       case 'call.control_deny':
         final callId = event['callId'] as String?;
         final session = callSession;
-        if (session == null) return;
+        if (session == null || session.remoteControl == null) {
+          _stashPendingRemoteControl(
+            callId: callId,
+            type: 'deny',
+            reason: event['reason'] as String?,
+          );
+          return;
+        }
         if (callId != null && callId != session.call.id) return;
         session.remoteControl?.onPeerDeny(event['reason'] as String?);
         notifyCall();
@@ -3676,15 +4629,18 @@ Examples:
         final callId = event['callId'] as String?;
         stopAllCallSounds();
         allowCallTones();
-        if (ringing?.call.id == callId) {
+        if (callId == null || ringing?.call.id == callId) {
           ringing = null;
-          unawaited(_discardPendingDisplay());
-          unawaited(_discardPendingLocal());
         }
-        if (callSession?.call.id == callId) {
-          callSession?.disposeSession();
+        final ended = callSession;
+        if (ended != null && (callId == null || ended.call.id == callId)) {
           callSession = null;
+          // Must release mic/camera tracks — fire-and-forget but always start.
+          unawaited(ended.disposeSession());
         }
+        // Pending preview streams can outlive ring UI if accept/hangup raced.
+        unawaited(_discardPendingDisplay());
+        unawaited(_discardPendingLocal());
         callMinimized = false;
         resetMiniCallLayout();
         notifyListeners();
@@ -3743,10 +4699,15 @@ Examples:
     _focusedReadTimer?.cancel();
     _inboxReconcileTimer?.cancel();
     _typingThrottle.cancel();
+    for (final t in _typingClearTimers.values) {
+      t.cancel();
+    }
+    _typingClearTimers.clear();
     _disposeVisibility?.call();
     _disposeVisibility = null;
     callSession?.disposeSession();
     _rt.disconnect();
+    LowResourceAutoDetect.cancel();
     sessionTick.dispose();
     shellTick.dispose();
     inboxTick.dispose();

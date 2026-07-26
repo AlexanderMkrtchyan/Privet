@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import 'util/low_resource.dart';
 import 'util/web_select_cursor.dart';
 
 /// A named accent the user can pick from the Appearance settings. [seed] is a
@@ -93,11 +94,11 @@ class PrivetTheme {
   static PrivetPalette _active = _buildDark(defaultAccent);
   static PrivetPalette get palette => _active;
 
-  /// Cached [ThemeData] keyed by brightness + accent — rebuilding Google Fonts
-  /// text themes on every root frame was a measurable low-end cost.
+  /// Cached [ThemeData] keyed by brightness + accent + low-resource.
   static ThemeData? _cachedTheme;
   static Brightness? _cachedBrightness;
   static int? _cachedAccent;
+  static bool? _cachedLowResource;
 
   // Runtime color getters (kept as the historical names used across the app).
   static Color get ink => _active.ink;
@@ -131,21 +132,19 @@ class PrivetTheme {
 
   /// Recompute the active palette. Call this before building [MaterialApp].
   static void apply({required Brightness brightness, required Color accent}) {
-    final next = brightness == Brightness.light
-        ? _buildLight(accent)
-        : _buildDark(accent);
     final accentKey = accent.toARGB32();
-    if (_cachedBrightness == brightness &&
-        _cachedAccent == accentKey &&
-        _active.signal == next.signal) {
-      _active = next;
-      syncPrivetAccentCursors(_active.signal);
+    // Called on every root rebuild — bail before allocating a fresh
+    // PrivetPalette / mutating cursors when nothing actually changed.
+    if (_cachedBrightness == brightness && _cachedAccent == accentKey) {
       return;
     }
-    _active = next;
+    _active = brightness == Brightness.light
+        ? _buildLight(accent)
+        : _buildDark(accent);
     _cachedTheme = null;
     _cachedBrightness = brightness;
     _cachedAccent = accentKey;
+    _cachedLowResource = null;
     // Keep web painted I-beam / move cursors on the live accent.
     syncPrivetAccentCursors(_active.signal);
   }
@@ -195,14 +194,16 @@ class PrivetTheme {
   }
 
   /// Builds the [ThemeData] for the currently active palette.
-  static ThemeData themeData() {
+  static ThemeData themeData({bool? lowResource}) {
+    final low = lowResource ?? privetLowResource;
     final cached = _cachedTheme;
-    if (cached != null) return cached;
+    if (cached != null && _cachedLowResource == low) return cached;
     final p = _active;
     final base = ThemeData(
       useMaterial3: true,
       brightness: p.brightness,
       scaffoldBackgroundColor: p.ink,
+      splashFactory: low ? NoSplash.splashFactory : InkSplash.splashFactory,
       colorScheme: ColorScheme(
         brightness: p.brightness,
         primary: p.signal,
@@ -298,8 +299,14 @@ class PrivetTheme {
         mouseCursor: WidgetStateMouseCursor.clickable,
       ),
       dividerColor: p.line,
+      pageTransitionsTheme: privetPageTransitionsTheme(lowResource: low),
+      dialogTheme: DialogThemeData(
+        elevation: privetElevation(6),
+        shadowColor: Colors.black54,
+      ),
     );
     _cachedTheme = theme;
+    _cachedLowResource = low;
     return theme;
   }
 

@@ -1,12 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import 'screens/login_screen.dart';
 import 'screens/messenger_shell.dart';
 import 'state.dart';
 import 'theme.dart';
+import 'util/low_resource.dart';
 import 'util/perf.dart';
 import 'util/web_bootstrap.dart';
 
@@ -18,6 +22,10 @@ Future<void> main() async {
   if (kIsWeb) {
     SemanticsBinding.instance.ensureSemantics();
   }
+  // Prefer bundled assets/google_fonts/<Family>-<Variant>.ttf (no network).
+  // Stale .deb installs still ship hashed cache filenames — fall back to
+  // runtime fetch there so Text paint does not throw unhandled exceptions.
+  GoogleFonts.config.allowRuntimeFetching = !await _hasApiNamedFontAssets();
   bootstrapWebPlatform();
   // Flutter web enables the browser menu by default (Inspect / Copy / etc.).
   // Must stay disabled or SelectableText right-click opens Chrome's menu.
@@ -28,6 +36,44 @@ Future<void> main() async {
     PerfDiagnostics.enable();
   }
   runApp(const PrivetApp());
+  // Warm faces after the first frame so the boot spinner stays fluid.
+  unawaited(_warmBundledFonts());
+}
+
+Future<bool> _hasApiNamedFontAssets() async {
+  try {
+    await rootBundle.load('assets/google_fonts/DMSans-Regular.ttf');
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<void> _warmBundledFonts() async {
+  // Load each face independently so one missing file cannot take down the
+  // whole warm pass on a partial / stale install.
+  final styles = <TextStyle>[
+    GoogleFonts.syne(),
+    GoogleFonts.syne(fontWeight: FontWeight.w600),
+    GoogleFonts.syne(fontWeight: FontWeight.w700),
+    GoogleFonts.syne(fontWeight: FontWeight.w800),
+    GoogleFonts.ibmPlexSans(),
+    GoogleFonts.ibmPlexSans(fontWeight: FontWeight.w600),
+    GoogleFonts.ibmPlexSans(fontWeight: FontWeight.w700),
+    GoogleFonts.ibmPlexSans(fontStyle: FontStyle.italic),
+    GoogleFonts.dmSans(),
+    GoogleFonts.dmSans(fontWeight: FontWeight.w600),
+    GoogleFonts.dmSans(fontWeight: FontWeight.w700),
+  ];
+  try {
+    await Future.wait(
+      styles.map(
+        (s) => GoogleFonts.pendingFonts([s]).catchError((Object _) {}),
+      ),
+    ).timeout(const Duration(milliseconds: 2500));
+  } catch (_) {
+    // Families still resolve on first Text paint when assets (or fetch) work.
+  }
 }
 
 class PrivetApp extends StatefulWidget {
@@ -112,12 +158,37 @@ class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
       brightness: _effectiveBrightness(),
       accent: _state.accent,
     );
+    final low = _state.lowResourceMode;
     return MaterialApp(
       title: 'Privet',
       debugShowCheckedModeBanner: false,
-      theme: PrivetTheme.themeData(),
+      theme: PrivetTheme.themeData(lowResource: low),
+      // Keep Material ink / theme animations from fighting software rasterizers.
+      themeAnimationDuration: privetAnim(kThemeAnimationDuration),
+      // Collapse *all* Material/implicit motion when Low RAM & CPU is on (and
+      // honor OS reduce-motion). Partial privetAnim() coverage was flaky.
+      builder: (context, child) {
+        final mq = MediaQuery.of(context);
+        final disable = low || mq.disableAnimations;
+        Widget body = child ?? const SizedBox.shrink();
+        if (disable != mq.disableAnimations) {
+          body = MediaQuery(
+            data: mq.copyWith(disableAnimations: disable),
+            child: body,
+          );
+        }
+        return body;
+      },
       home: _state.booting
-          ? const Scaffold(body: Center(child: CircularProgressIndicator()))
+          ? const Scaffold(
+              body: Center(
+                child: SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: CircularProgressIndicator(strokeWidth: 2.5),
+                ),
+              ),
+            )
           : _state.user == null
           ? LoginScreen(state: _state)
           : MessengerShell(state: _state),

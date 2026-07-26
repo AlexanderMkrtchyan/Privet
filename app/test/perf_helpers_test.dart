@@ -15,6 +15,18 @@ void main() {
       expect(count, 2);
       throttle.cancel();
     });
+
+    test('reset allows an immediate leading call again', () {
+      var count = 0;
+      final throttle = Throttle(const Duration(seconds: 5));
+      throttle(() => count++);
+      throttle(() => count++);
+      expect(count, 1);
+      throttle.reset();
+      throttle(() => count++);
+      expect(count, 2);
+      throttle.cancel();
+    });
   });
 
   group('Debouncer', () {

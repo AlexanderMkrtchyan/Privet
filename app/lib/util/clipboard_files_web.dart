@@ -6,7 +6,6 @@ import 'dart:html' as html;
 import 'dart:typed_data';
 
 import 'clipboard_files.dart';
-import 'clipboard_read_web.dart';
 
 html.EventListener? _pasteListener;
 void Function(PickedBytes file)? _onImage;
@@ -280,17 +279,6 @@ String _mimeFromName(String name) {
   return (handled: false, tryClipboardApi: false);
 }
 
-Future<void> _readClipboardApi() async {
-  final blobs = await readClipboardImageBlobs();
-  for (final entry in blobs) {
-    final picked = await _fromBlob(entry.blob, entry.mimeType);
-    if (picked != null) {
-      _onImage?.call(picked);
-      return;
-    }
-  }
-}
-
 int bindImagePaste(void Function(PickedBytes file) onImage) {
   final id = ++_pasteBindId;
   _detachPasteListener();
@@ -298,10 +286,9 @@ int bindImagePaste(void Function(PickedBytes file) onImage) {
 
   _pasteListener = (html.Event event) {
     if (id != _pasteBindId) return;
-    final result = _tryClipboardEvent(event as html.ClipboardEvent);
-    if (result.tryClipboardApi) {
-      unawaited(_readClipboardApi());
-    }
+    // Use only ClipboardEvent data — never navigator.clipboard.read()
+    // (Chrome Paste permission bubble steals left-clicks).
+    _tryClipboardEvent(event as html.ClipboardEvent);
   };
 
   html.document.addEventListener('paste', _pasteListener, true);

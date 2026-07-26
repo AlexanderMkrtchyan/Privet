@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -6,6 +8,8 @@ import 'package:google_fonts/google_fonts.dart';
 import '../remote_control/protocol.dart';
 import '../state.dart';
 import '../theme.dart';
+import '../util/app_clipboard.dart';
+import '../util/fullscreen.dart';
 
 /// Host consent dialog + banner; controller input capture over the stage.
 class RemoteControlLayer extends StatefulWidget {
@@ -13,10 +17,18 @@ class RemoteControlLayer extends StatefulWidget {
     super.key,
     required this.session,
     required this.child,
+    this.state,
+    this.immersive = false,
   });
 
   final CallSession session;
   final Widget child;
+
+  /// Needed for auto-allow preference storage.
+  final PrivetState? state;
+
+  /// When true, hide the floating banner (immersive chrome owns status).
+  final bool immersive;
 
   @override
   State<RemoteControlLayer> createState() => _RemoteControlLayerState();
@@ -37,6 +49,7 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
   void initState() {
     super.initState();
     session.addListener(_onSession);
+    HardwareKeyboard.instance.addHandler(_onHardwareKey);
     _syncFlags();
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybePrompt());
   }
@@ -55,6 +68,7 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
   @override
   void dispose() {
     session.removeListener(_onSession);
+    HardwareKeyboard.instance.removeHandler(_onHardwareKey);
     _focus.dispose();
     super.dispose();
   }
@@ -79,6 +93,10 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
         nextHosting != _hosting ||
         nextRequested != _requested ||
         nextError != _error;
+    // Hosting paints into the shared desktop — collapse the big call UI.
+    if (nextHosting && !_hosting) {
+      widget.state?.setCallMinimized(true);
+    }
     if (changed) {
       setState(() {
         _controlling = nextControlling;
@@ -95,6 +113,22 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
   Future<void> _maybePrompt() async {
     if (!mounted || _dialogShown) return;
     if (!session.remoteControlIncomingRequest) return;
+    // Dedicated control invite already had Allow at ring time — grant silently.
+    if (session.isControlCall) {
+      _dialogShown = true;
+      await session.grantRemoteControl();
+      _dialogShown = false;
+      return;
+    }
+
+    final state = widget.state;
+    if (state != null && state.shouldAutoAllowControl(session.peer.id)) {
+      _dialogShown = true;
+      await session.grantRemoteControl();
+      _dialogShown = false;
+      return;
+    }
+
     _dialogShown = true;
     final peer = session.peer.displayName;
     await session.remoteControl?.refreshCapability();
@@ -104,45 +138,89 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
     }
     final cap = session.remoteInputCapability;
     final canInject = cap?.canInject == true;
+    var alwaysAllow = false;
     final accepted = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: PrivetTheme.panel,
-        title: Text(
-          canInject ? 'Allow remote control?' : 'Cannot grant remote control',
-          style: GoogleFonts.syne(color: Colors.white, fontWeight: FontWeight.w700),
-        ),
-        content: Text(
-          canInject
-              ? '$peer is asking to control your shared screen — mouse and keyboard. '
-                  'You can revoke access at any time.'
-              : remoteControlHostCannotInjectMessage(
-                  platform: cap?.platform ?? '',
-                  detail: cap?.detail ?? '',
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setLocal) => AlertDialog(
+            backgroundColor: PrivetTheme.panel,
+            title: Text(
+              canInject
+                  ? 'Allow remote control?'
+                  : 'Cannot grant remote control',
+              style: GoogleFonts.syne(
+                color: Colors.white,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  canInject
+                      ? '$peer is asking to control your shared screen — mouse and keyboard. '
+                          'You can revoke access at any time.'
+                      : remoteControlHostCannotInjectMessage(
+                          platform: cap?.platform ?? '',
+                          detail: cap?.detail ?? '',
+                        ),
+                  style: GoogleFonts.dmSans(
+                    color: PrivetTheme.mist,
+                    height: 1.35,
+                  ),
                 ),
-          style: GoogleFonts.dmSans(color: PrivetTheme.mist, height: 1.35),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: Text(
-              canInject ? 'Deny' : 'OK',
-              style: GoogleFonts.dmSans(color: PrivetTheme.mist),
+                if (canInject) ...[
+                  const SizedBox(height: 14),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: alwaysAllow,
+                    onChanged: (v) => setLocal(() => alwaysAllow = v == true),
+                    title: Text(
+                      'Always allow from $peer while Privet is open',
+                      style: GoogleFonts.dmSans(
+                        color: PrivetTheme.paper,
+                        fontSize: 13,
+                      ),
+                    ),
+                    controlAffinity: ListTileControlAffinity.leading,
+                    activeColor: PrivetTheme.signal,
+                  ),
+                ],
+              ],
             ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: Text(
+                  canInject ? 'Deny' : 'OK',
+                  style: GoogleFonts.dmSans(color: PrivetTheme.mist),
+                ),
+              ),
+              if (canInject)
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: PrivetTheme.signal,
+                  ),
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: Text(
+                    'Allow',
+                    style: GoogleFonts.dmSans(fontWeight: FontWeight.w600),
+                  ),
+                ),
+            ],
           ),
-          if (canInject)
-            FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: PrivetTheme.signal),
-              onPressed: () => Navigator.pop(ctx, true),
-              child: Text('Allow', style: GoogleFonts.dmSans(fontWeight: FontWeight.w600)),
-            ),
-        ],
-      ),
+        );
+      },
     );
     _dialogShown = false;
     if (!mounted) return;
     if (accepted == true) {
+      if (alwaysAllow) {
+        widget.state?.rememberAutoAllowControl(session.peer.id);
+      }
       await session.grantRemoteControl();
     } else if (canInject) {
       session.denyRemoteControl();
@@ -170,21 +248,68 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
     );
   }
 
+  bool _onHardwareKey(KeyEvent event) {
+    if (!session.isRemoteHost) return false;
+    if (event is! KeyDownEvent) return false;
+    if (event.logicalKey != LogicalKeyboardKey.escape) return false;
+    final keys = HardwareKeyboard.instance.logicalKeysPressed;
+    final ctrl = keys.contains(LogicalKeyboardKey.controlLeft) ||
+        keys.contains(LogicalKeyboardKey.controlRight);
+    final shift = keys.contains(LogicalKeyboardKey.shiftLeft) ||
+        keys.contains(LogicalKeyboardKey.shiftRight);
+    if (!ctrl || !shift) return false;
+    session.revokeRemoteControl();
+    return true;
+  }
+
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (!session.isRemoteController) return KeyEventResult.ignored;
-    final code = event.logicalKey.keyLabel.isEmpty
-        ? event.physicalKey.debugName ?? event.logicalKey.debugName ?? ''
-        : _webCode(event);
+    // OS auto-repeat floods the channel; dropped KeyUps leave stuck keys
+    // (endless "p"). Host sees a held key from the initial KeyDown alone.
+    if (event is KeyRepeatEvent) return KeyEventResult.handled;
+
+    // Always normalize: Flutter web often yields "Alt Left" (space) which
+    // native KeyvalFromCode only knows as "AltLeft" — Alt/Super were no-ops.
+    final code = _webCode(event);
     if (code.isEmpty) return KeyEventResult.ignored;
     final mods = _mods();
-    final down = event is KeyDownEvent || event is KeyRepeatEvent;
-    // Escape stops control when not combined with modifiers.
-    if (event is KeyDownEvent &&
+    final down = event is KeyDownEvent;
+
+    // Esc exits fullscreen / does not revoke control.
+    if (down &&
         event.logicalKey == LogicalKeyboardKey.escape &&
         mods == 0) {
-      session.revokeRemoteControl();
-      return KeyEventResult.handled;
+      if (PrivetFullscreen.isFullscreen) {
+        PrivetFullscreen.exit();
+        return KeyEventResult.handled;
+      }
+      // Still forward Escape to the remote desktop.
     }
+
+    // Alt / Super: only when the controller tab is fullscreen — otherwise
+    // leave them for the laptop (browser chrome, local dash, etc.).
+    final isAltOrSuper = code == 'AltLeft' ||
+        code == 'AltRight' ||
+        code == 'MetaLeft' ||
+        code == 'MetaRight' ||
+        code == 'OSLeft' ||
+        code == 'OSRight' ||
+        code == 'SuperLeft' ||
+        code == 'SuperRight';
+    if (isAltOrSuper && !PrivetFullscreen.isFullscreen) {
+      return KeyEventResult.ignored;
+    }
+
+    // Push local clipboard to the host before Ctrl/Cmd+V so paste works
+    // from the controller browser (never call clipboard.read — that popup).
+    if (down && _isPasteChord(code: code, mods: mods)) {
+      final text = AppClipboard.peek();
+      if (text != null && text.isNotEmpty) {
+        unawaited(_pasteRemote(code: code, mods: mods, key: event.character));
+        return KeyEventResult.handled;
+      }
+    }
+
     session.remoteControl?.sendKey(
       code: code,
       down: down,
@@ -192,6 +317,30 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
       key: event.character,
     );
     return KeyEventResult.handled;
+  }
+
+  Future<void> _pasteRemote({
+    required String code,
+    required int mods,
+    String? key,
+  }) async {
+    final rc = session.remoteControl;
+    if (rc == null) return;
+    final text = AppClipboard.peek();
+    if (text != null && text.isNotEmpty) {
+      await rc.sendClipboardText(text);
+      // Give the host a beat to apply OS clipboard before Ctrl+V lands.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    await rc.sendKey(code: code, down: true, mods: mods, key: key);
+    await rc.sendKey(code: code, down: false, mods: mods, key: key);
+  }
+
+  bool _isPasteChord({required String code, required int mods}) {
+    final ctrl = (mods & RemoteKeyMods.ctrl) != 0;
+    final meta = (mods & RemoteKeyMods.meta) != 0;
+    if (!ctrl && !meta) return false;
+    return code == 'KeyV' || code == 'Key V' || code.toLowerCase() == 'v';
   }
 
   String _webCode(KeyEvent event) {
@@ -204,7 +353,7 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
     if (logical != null && logical.isNotEmpty) {
       return logical.replaceAll(' ', '');
     }
-    return event.logicalKey.keyLabel;
+    return event.logicalKey.keyLabel.replaceAll(' ', '');
   }
 
   int _mods() {
@@ -242,6 +391,10 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
     final controlling = _controlling;
     final hosting = _hosting;
     final requested = _requested;
+    // Host banners paint into the shared desktop — never show them.
+    final showBanner = !widget.immersive &&
+        !hosting &&
+        (controlling || requested);
 
     return Stack(
       fit: StackFit.expand,
@@ -253,6 +406,12 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
               focusNode: _focus,
               autofocus: true,
               onKeyEvent: _onKey,
+              onFocusChange: (hasFocus) {
+                if (!hasFocus) {
+                  session.remoteControl?.sendFocusLost();
+                  _buttons = 0;
+                }
+              },
               child: Listener(
                 behavior: HitTestBehavior.opaque,
                 onPointerHover: (e) {
@@ -285,8 +444,8 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
                   if (box == null) return;
                   final local = box.globalToLocal(e.position);
                   final mapped = _map(local, box.size);
-                  if (mapped == null) return;
                   final btn = _btnMask(e.buttons);
+                  if (mapped == null) return;
                   _buttons = btn;
                   session.remoteControl?.sendPointerButton(
                     x: mapped.x,
@@ -327,7 +486,7 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
                   );
                 },
                 child: MouseRegion(
-                  cursor: SystemMouseCursors.precise,
+                  cursor: SystemMouseCursors.basic,
                   onExit: (_) {
                     session.remoteControl?.sendFocusLost();
                     _buttons = 0;
@@ -337,7 +496,7 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
               ),
             ),
           ),
-        if (controlling || hosting || requested)
+        if (showBanner)
           Positioned(
             left: 16,
             right: 16,
@@ -345,8 +504,8 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
             child: _RemoteControlBanner(
               session: session,
               controlling: controlling,
-              hosting: hosting,
-              requested: requested && !hosting && !controlling,
+              hosting: false,
+              requested: requested && !controlling,
             ),
           ),
       ],
@@ -372,10 +531,11 @@ class _RemoteControlBanner extends StatelessWidget {
     late final String text;
     late final Color color;
     if (hosting) {
-      text = '${session.peer.displayName} is controlling your screen';
+      text =
+          '${session.peer.displayName} is controlling your screen — Ctrl+Shift+Esc to stop';
       color = const Color(0xFFFFA726);
     } else if (controlling) {
-      text = 'Controlling ${session.peer.displayName} — Esc to stop';
+      text = 'Controlling ${session.peer.displayName}';
       color = PrivetTheme.signal;
     } else {
       text = 'Waiting for ${session.peer.displayName} to allow control…';

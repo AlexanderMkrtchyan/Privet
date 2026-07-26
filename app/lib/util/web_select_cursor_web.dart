@@ -6,6 +6,7 @@ import 'dart:ui' show Color;
 /// Current accent used for painted text/move cursors (defaults to signal lime).
 Color _accent = const Color(0xFFB6F24A);
 bool _messageSelectHovering = false;
+bool _linkHovering = false;
 bool _dragHovering = false;
 bool _stylesInstalled = false;
 
@@ -31,11 +32,7 @@ String _moveCursor(Color c) {
 void syncPrivetAccentCursors(Color accent) {
   _accent = accent;
   _rewriteStyles();
-  if (_messageSelectHovering) {
-    _setBodyCursor(_ibeamCursor(_accent));
-  } else if (_dragHovering) {
-    _setBodyCursor(_moveCursor(_accent));
-  }
+  _applyBodyCursor();
 }
 
 /// CSS so Flutter's own `cursor: move|text` on the glass pane uses the accent
@@ -79,10 +76,19 @@ void setPrivetMessageSelectHover(bool hovering) {
   _messageSelectHovering = hovering;
   if (hovering) {
     _dragHovering = false;
-    _setBodyCursor(_ibeamCursor(_accent));
-  } else if (!_dragHovering) {
-    _setBodyCursor(null);
+  } else {
+    _linkHovering = false;
   }
+  _applyBodyCursor();
+}
+
+/// Pointer over an in-message URL — body CSS must be pointer, not the I-beam
+/// (body `cursor !important` otherwise wins over Flutter's MouseRegion).
+void setPrivetMessageLinkHover(bool hovering) {
+  installPrivetPaintedCursors();
+  if (_linkHovering == hovering) return;
+  _linkHovering = hovering;
+  _applyBodyCursor();
 }
 
 void setPrivetDragHover(bool hovering) {
@@ -90,8 +96,19 @@ void setPrivetDragHover(bool hovering) {
   _dragHovering = hovering;
   if (hovering) {
     _messageSelectHovering = false;
+    _linkHovering = false;
+  }
+  _applyBodyCursor();
+}
+
+void _applyBodyCursor() {
+  if (_dragHovering) {
     _setBodyCursor(_moveCursor(_accent));
-  } else if (!_messageSelectHovering) {
+  } else if (_linkHovering) {
+    _setBodyCursor('pointer');
+  } else if (_messageSelectHovering) {
+    _setBodyCursor(_ibeamCursor(_accent));
+  } else {
     _setBodyCursor(null);
   }
 }

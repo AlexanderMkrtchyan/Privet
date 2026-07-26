@@ -109,3 +109,29 @@ Future<void> keyEvent({
 Future<void> releaseAll() async {
   await _channel.invokeMethod('releaseAll');
 }
+
+Future<String?> getClipboardText() async {
+  try {
+    final text = await _channel.invokeMethod<String>('getClipboardText');
+    return text;
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<void> setClipboardText(String text) async {
+  try {
+    await _channel.invokeMethod('setClipboardText', {'text': text});
+  } catch (_) {}
+}
+
+Future<bool> setInputLock(bool locked) async {
+  try {
+    final ok = await _channel.invokeMethod<bool>('setInputLock', {
+      'locked': locked,
+    });
+    return ok == true;
+  } catch (_) {
+    return false;
+  }
+}

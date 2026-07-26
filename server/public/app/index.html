@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html oncontextmenu="return false;">
+<html oncontextmenu="return false;" style="background:#0E1114;color-scheme:dark">
 <head>
   <base href="/">
 
@@ -7,12 +7,15 @@
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
   <meta name="description" content="Privet messenger">
-  <meta http-equiv="Permissions-Policy" content="camera=*, microphone=*, display-capture=*, autoplay=*, clipboard-read=*, clipboard-write=*">
+  <!-- clipboard-read is intentionally omitted: allowing it lets Chromium show a
+       "Paste" permission bubble that steals left-clicks during remote control. -->
+  <meta http-equiv="Permissions-Policy" content="camera=*, microphone=*, display-capture=*, autoplay=*, clipboard-write=*">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
 
   <meta name="theme-color" content="#0E1114">
+  <meta name="color-scheme" content="dark">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
@@ -22,8 +25,11 @@
 
   <title>Privet</title>
   <link rel="manifest" href="/manifest.json">
+  <!-- Paint theme + spinner before any JS; hide on Flutter first frame. -->
   <style>
     html, body {
+      background: #0E1114 !important;
+      color-scheme: dark;
       -webkit-touch-callout: none;
       -webkit-user-select: none;
       user-select: none;
@@ -41,6 +47,33 @@
       padding: env(safe-area-inset-top) env(safe-area-inset-right)
         env(safe-area-inset-bottom) env(safe-area-inset-left);
     }
+    #privet-boot {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483646;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0E1114;
+      pointer-events: none;
+    }
+    #privet-boot[hidden] { display: none !important; }
+    #privet-boot .spin {
+      box-sizing: border-box;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      border: 2.5px solid rgba(182, 242, 74, 0.22);
+      border-top-color: #B6F24A;
+      animation: privet-boot-spin 0.75s linear infinite;
+    }
+    @keyframes privet-boot-spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+  <!-- Start Flutter download while the rest of the shell parses. -->
+  <link rel="preload" href="flutter_bootstrap.js?v=20260726-134232" as="script">
+  <style>
     flutter-view, flt-glass-pane {
       width: 100% !important;
       height: 100% !important;
@@ -128,7 +161,10 @@
     }
   </style>
 </head>
-<body oncontextmenu="return false;">
+<body oncontextmenu="return false;" style="background:#0E1114">
+  <div id="privet-boot" aria-busy="true" aria-label="Loading Privet">
+    <div class="spin" role="progressbar" aria-valuetext="Loading"></div>
+  </div>
   <div id="pwa-install-bar" hidden>
     <div class="pwa-card" role="dialog" aria-label="Install Privet">
       <img src="/icons/Icon-192.png" alt="" width="40" height="40" />
@@ -206,9 +242,22 @@
       });
       obs.observe(document.documentElement, { childList: true, subtree: true });
     })();
+    (function bootSplash() {
+      var el = document.getElementById('privet-boot');
+      if (!el) return;
+      function hide() {
+        if (!el || el.hidden) return;
+        el.hidden = true;
+        el.remove();
+        el = null;
+      }
+      window.addEventListener('flutter-first-frame', hide, { once: true });
+      // Fallback if the engine never emits the event.
+      setTimeout(hide, 15000);
+    })();
     (function bootFlutter() {
       var s = document.createElement('script');
-      s.src = 'flutter_bootstrap.js?v=20260726-034951';
+      s.src = 'flutter_bootstrap.js?v=BUILD_STAMP';
       s.async = true;
       document.body.appendChild(s);
     })();

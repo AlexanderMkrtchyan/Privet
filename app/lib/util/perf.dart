@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 
+import 'low_resource.dart';
+
 /// Lightweight frame / rebuild diagnostics for profile and debug builds.
 ///
 /// Enable with `--dart-define=PRIVET_PERF=1` or call [PerfDiagnostics.enable].
@@ -61,14 +63,16 @@ abstract final class PerfDiagnostics {
 
 /// Decode caps for chat thumbnails — avoids full-resolution RAM spikes.
 abstract final class ImageDecodeCaps {
+  static int get _maxPx => privetLowResource ? 640 : 1280;
+
   /// Pixel width to ask Flutter to decode into for a displayed [logicalWidth].
   static int cacheWidth(double logicalWidth, {double dpr = 1.0}) {
     final w = (logicalWidth * dpr).round();
-    return w.clamp(32, 1280);
+    return w.clamp(32, _maxPx);
   }
 
   static int cacheHeight(double logicalHeight, {double dpr = 1.0}) {
     final h = (logicalHeight * dpr).round();
-    return h.clamp(32, 1280);
+    return h.clamp(32, _maxPx);
   }
 }

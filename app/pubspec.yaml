@@ -1,7 +1,7 @@
 name: privet
 description: Privet messenger — Android, Web, Windows, Linux
 publish_to: 'none'
-version: 0.1.8+5
+version: 0.1.9+6
 
 environment:
   sdk: ^3.12.2
@@ -45,3 +45,8 @@ flutter:
     - assets/sounds/incoming_call.mp3
     - assets/sounds/incoming_call.wav
     - assets/sounds/outgoing/
+    # google_fonts matches assets by API filename prefix, e.g.
+    # assets/google_fonts/DMSans-Regular.ttf (not the cache hash form).
+    # Bundling these lets us disable runtime fetching (big Linux desktop
+    # win: no per-font HTTP / path_provider I/O on hot paint paths).
+    - assets/google_fonts/

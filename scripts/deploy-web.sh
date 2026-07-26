@@ -85,9 +85,10 @@ stamp = "$STAMP"
 main_named = "$MAIN_NAMED"
 root = Path("$ROOT/server/public")
 
-# Cache-bust the freshly built Flutter shell, then relocate it to /app/ so the
-# marketing landing page can own the site root.
-it = (root / "index.html").read_text()
+# Cache-bust the Flutter shell from the build output (never from public/
+# index.html — that may already be the marketing landing page).
+flutter_index = Path("$ROOT/app/build/web/index.html")
+it = flutter_index.read_text()
 it = re.sub(
     r"flutter_bootstrap\.js\?v=[^'\"]+",
     f"flutter_bootstrap.js?v={stamp}",

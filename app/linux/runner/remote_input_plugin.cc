@@ -10,6 +10,7 @@
 #include <gdk/gdkx.h>
 #endif
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <unordered_set>
@@ -28,6 +29,28 @@ std::string g_session_path;
 bool g_portal_ready = false;
 
 std::unordered_set<guint> g_down_keys;
+
+bool g_input_locked = false;
+
+#ifdef GDK_WINDOWING_X11
+Display* XDisplayOrNull();
+#endif
+
+bool SetInputLock(bool locked) {
+  // Never grab the pointer. XGrabPointer(root) made remote XTest clicks land
+  // on Privet instead of the window under the cursor (move OK, click dead),
+  // and blocked the host's own mouse. Always force-ungrab; ignore lock=true.
+  (void)locked;
+#ifdef GDK_WINDOWING_X11
+  Display* dpy = XDisplayOrNull();
+  if (dpy) {
+    XUngrabPointer(dpy, CurrentTime);
+    XFlush(dpy);
+  }
+#endif
+  g_input_locked = false;
+  return false;
+}
 
 struct PortalWait {
   bool done = false;
@@ -68,7 +91,13 @@ Display* XDisplayOrNull() {
 }
 #endif
 
-guint KeyvalFromCode(const std::string& code) {
+std::string NormalizeKeyCode(std::string code) {
+  code.erase(std::remove(code.begin(), code.end(), ' '), code.end());
+  return code;
+}
+
+guint KeyvalFromCode(const std::string& raw_code) {
+  const std::string code = NormalizeKeyCode(raw_code);
   static const struct {
     const char* code;
     const char* name;
@@ -92,6 +121,8 @@ guint KeyvalFromCode(const std::string& code) {
       {"ShiftLeft", "Shift_L"}, {"ShiftRight", "Shift_R"},
       {"ControlLeft", "Control_L"}, {"ControlRight", "Control_R"},
       {"AltLeft", "Alt_L"}, {"AltRight", "Alt_R"},
+      {"MetaLeft", "Super_L"}, {"MetaRight", "Super_R"},
+      {"OSLeft", "Super_L"}, {"OSRight", "Super_R"},
       {"F1", "F1"}, {"F2", "F2"}, {"F3", "F3"}, {"F4", "F4"},
       {"F5", "F5"}, {"F6", "F6"}, {"F7", "F7"}, {"F8", "F8"},
       {"F9", "F9"}, {"F10", "F10"}, {"F11", "F11"}, {"F12", "F12"},
@@ -599,10 +630,6 @@ FlMethodResponse* OnMethod(FlMethodCall* method_call) {
 
   if (strcmp(name, "keyEvent") == 0) {
     const std::string code = ArgString(args, "code");
-    if (code == "MetaLeft" || code == "MetaRight" || code == "OSLeft" ||
-        code == "OSRight" || code == "Super_L" || code == "Super_R") {
-      return FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
-    }
     const bool down = ArgBool(args, "down", false);
     guint keyval = KeyvalFromCode(code);
     if (g_backend == Backend::X11)
@@ -617,7 +644,35 @@ FlMethodResponse* OnMethod(FlMethodCall* method_call) {
       X11ReleaseAll();
     else
       PortalReleaseAll();
+    // Do not clear input lock here — controller focus-lost also calls
+    // releaseAll, and unlocking would fight the host's Ctrl+Shift+Esc lock.
     return FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+  }
+
+  if (strcmp(name, "getClipboardText") == 0) {
+    GtkClipboard* clip = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+    g_autofree gchar* text =
+        clip ? gtk_clipboard_wait_for_text(clip) : nullptr;
+    g_autoptr(FlValue) result =
+        fl_value_new_string(text != nullptr ? text : "");
+    return FL_METHOD_RESPONSE(fl_method_success_response_new(result));
+  }
+
+  if (strcmp(name, "setClipboardText") == 0) {
+    const std::string text = ArgString(args, "text");
+    GtkClipboard* clip = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+    if (clip) {
+      gtk_clipboard_set_text(clip, text.c_str(), -1);
+      gtk_clipboard_store(clip);
+    }
+    return FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+  }
+
+  if (strcmp(name, "setInputLock") == 0) {
+    const bool locked = ArgBool(args, "locked", false);
+    const bool ok = SetInputLock(locked);
+    g_autoptr(FlValue) result = fl_value_new_bool(ok);
+    return FL_METHOD_RESPONSE(fl_method_success_response_new(result));
   }
 
   return FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());

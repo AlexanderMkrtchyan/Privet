@@ -6,6 +6,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -85,7 +86,8 @@ DWORD ButtonUpFlag(int button) {
   }
 }
 
-WORD VkFromCode(const std::string& code) {
+WORD VkFromCode(std::string code) {
+  code.erase(std::remove(code.begin(), code.end(), ' '), code.end());
   static const struct {
     const char* code;
     WORD vk;
@@ -110,6 +112,8 @@ WORD VkFromCode(const std::string& code) {
       {"ShiftLeft", VK_LSHIFT}, {"ShiftRight", VK_RSHIFT},
       {"ControlLeft", VK_LCONTROL}, {"ControlRight", VK_RCONTROL},
       {"AltLeft", VK_LMENU}, {"AltRight", VK_RMENU},
+      {"MetaLeft", VK_LWIN}, {"MetaRight", VK_RWIN},
+      {"OSLeft", VK_LWIN}, {"OSRight", VK_RWIN},
       {"F1", VK_F1}, {"F2", VK_F2}, {"F3", VK_F3}, {"F4", VK_F4},
       {"F5", VK_F5}, {"F6", VK_F6}, {"F7", VK_F7}, {"F8", VK_F8},
       {"F9", VK_F9}, {"F10", VK_F10}, {"F11", VK_F11}, {"F12", VK_F12},
@@ -271,12 +275,6 @@ void HandleMethod(
   if (call.method_name() == "keyEvent") {
     const std::string code = str("code");
     const bool down = boolean("down", false);
-    // Block Win key and Ctrl+Alt+Del style combos at the native layer too.
-    if (code == "MetaLeft" || code == "MetaRight" || code == "OSLeft" ||
-        code == "OSRight") {
-      result->Success();
-      return;
-    }
     WORD vk = VkFromCode(code);
     if (!vk && code.size() == 1) {
       SHORT mapped = VkKeyScanA(code[0]);
@@ -290,6 +288,59 @@ void HandleMethod(
   if (call.method_name() == "releaseAll") {
     ReleaseAllKeys();
     result->Success();
+    return;
+  }
+
+  if (call.method_name() == "getClipboardText") {
+    std::string text;
+    if (OpenClipboard(nullptr)) {
+      HANDLE data = GetClipboardData(CF_UNICODETEXT);
+      if (data) {
+        auto* locked = static_cast<wchar_t*>(GlobalLock(data));
+        if (locked) {
+          int bytes = WideCharToMultiByte(CP_UTF8, 0, locked, -1, nullptr, 0,
+                                          nullptr, nullptr);
+          if (bytes > 1) {
+            text.resize(bytes - 1);
+            WideCharToMultiByte(CP_UTF8, 0, locked, -1, text.data(), bytes,
+                                nullptr, nullptr);
+          }
+          GlobalUnlock(data);
+        }
+      }
+      CloseClipboard();
+    }
+    result->Success(flutter::EncodableValue(text));
+    return;
+  }
+
+  if (call.method_name() == "setClipboardText") {
+    const std::string text = str("text");
+    if (OpenClipboard(nullptr)) {
+      EmptyClipboard();
+      int wlen = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+      if (wlen > 0) {
+        HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, wlen * sizeof(wchar_t));
+        if (mem) {
+          auto* locked = static_cast<wchar_t*>(GlobalLock(mem));
+          if (locked) {
+            MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, locked, wlen);
+            GlobalUnlock(mem);
+            SetClipboardData(CF_UNICODETEXT, mem);
+          }
+        }
+      }
+      CloseClipboard();
+    }
+    result->Success();
+    return;
+  }
+
+  if (call.method_name() == "setInputLock") {
+    // BlockInput() would also block Privet's Ctrl+Shift+Esc escape hatch.
+    // Report unlocked; UI still shows "take back" and revoke still works.
+    (void)boolean("locked", false);
+    result->Success(flutter::EncodableValue(false));
     return;
   }
 

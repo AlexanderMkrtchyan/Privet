@@ -1,6 +1,5 @@
 import 'dart:ui' show Offset, Size;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:privet/state.dart';
 
@@ -57,13 +56,9 @@ void main() {
     expect(state.miniCallOffset, const Offset(12, 24));
   });
 
-  test('low-resource defaults on for Linux when unset', () async {
-    // bootstrap reads prefs; without a token it still applies the default.
+  test('low-resource defaults off until user enables it', () async {
     final state = PrivetState();
     addTearDown(state.dispose);
-    // Directly exercise the default expression used in bootstrap.
-    final defaultLow =
-        !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
-    expect(defaultLow || !defaultLow, isTrue); // platform-dependent smoke
+    expect(state.lowResourceMode, isFalse);
   });
 }

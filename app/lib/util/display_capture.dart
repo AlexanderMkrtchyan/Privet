@@ -11,6 +11,9 @@ export 'display_share_surface.dart';
 
 const _screenCaptureChannel = MethodChannel('privet/screen_capture');
 
+/// Last [sourceId] passed to [captureDisplayMedia] (native desktop).
+String? lastDesktopCaptureSourceId;
+
 /// Capture a display surface.
 ///
 /// **Web:** Chromium on Ubuntu often throws `NotFoundError` when PipeWire /
@@ -30,6 +33,7 @@ Future<MediaStream> captureDisplayMedia({
   DisplayShareSurface? prefer,
   String? sourceId,
 }) async {
+  lastDesktopCaptureSourceId = sourceId;
   if (WebRTC.platformIsDesktop) {
     return _captureDesktop(prefer: prefer, sourceId: sourceId);
   }
@@ -203,6 +207,19 @@ List<SourceType> _desktopTypesFor(DisplayShareSurface? prefer) {
     case DisplayShareSurface.monitor:
     case null:
       return [SourceType.Screen];
+  }
+}
+
+/// Enumerate desktop screens for remote-control display switching.
+Future<List<DesktopCapturerSource>> listDesktopScreens() async {
+  if (!WebRTC.platformIsDesktop) return const [];
+  try {
+    return await desktopCapturer.getSources(
+      types: [SourceType.Screen],
+      thumbnailSize: ThumbnailSize(160, 90),
+    );
+  } catch (_) {
+    return const [];
   }
 }
 

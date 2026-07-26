@@ -19,7 +19,7 @@ void main() {
     });
 
     test('rejects oversized payloads', () {
-      final huge = '{"v":1,"t":"key","code":"${'A' * 3000}"}';
+      final huge = '{"v":1,"t":"key","code":"${'A' * 70000}"}';
       expect(RemoteControlProtocol.decode(huge), isNull);
     });
 
@@ -43,7 +43,7 @@ void main() {
       expect(p.y, closeTo(0.5, 0.01));
     });
 
-    test('returns null in letterbox gutters', () {
+    test('clamps letterbox gutters to content edges (dock / top bar)', () {
       final p = RemoteControlProtocol.mapLetterboxedPoint(
         localX: 10,
         localY: 10,
@@ -51,7 +51,9 @@ void main() {
         viewportHeight: 800,
         contentAspect: 16 / 9,
       );
-      expect(p, isNull);
+      expect(p, isNotNull);
+      expect(p!.x, closeTo(0.0, 0.02));
+      expect(p.y, closeTo(0.0, 0.02));
     });
   });
 
@@ -71,6 +73,16 @@ void main() {
         if (s.acceptHostEvent(now)) accepted++;
       }
       expect(accepted, kRemoteControlMaxEventsPerSecond);
+    });
+
+    test('force accepts bypass rate limit (key/button ups)', () {
+      final s = RemoteControlSessionState()..markGranted(asController: false);
+      final now = DateTime.now();
+      for (var i = 0; i < kRemoteControlMaxEventsPerSecond; i++) {
+        expect(s.acceptHostEvent(now), isTrue);
+      }
+      expect(s.acceptHostEvent(now), isFalse);
+      expect(s.acceptHostEvent(now, force: true), isTrue);
     });
 
     test('revoke clears grant', () {

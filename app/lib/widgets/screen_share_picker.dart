@@ -19,12 +19,15 @@ import '../util/display_capture.dart';
 ///
 /// **Native desktop:** lists real screens/windows via [desktopCapturer]
 /// (required — bare getDisplayMedia fails with "source not found!").
-Future<MediaStream?> showScreenSharePicker(BuildContext context) {
+Future<MediaStream?> showScreenSharePicker(
+  BuildContext context, {
+  bool screensOnly = false,
+}) {
   if (WebRTC.platformIsDesktop) {
     return showDialog<MediaStream>(
       context: context,
       barrierColor: PrivetTheme.ink.withValues(alpha: 0.72),
-      builder: (ctx) => const _DesktopScreenShareDialog(),
+      builder: (ctx) => _DesktopScreenShareDialog(screensOnly: screensOnly),
     );
   }
 
@@ -137,7 +140,9 @@ Future<MediaStream?> showScreenSharePicker(BuildContext context) {
 
 /// Native Linux/Windows/macOS: pick a concrete DesktopCapturer source.
 class _DesktopScreenShareDialog extends StatefulWidget {
-  const _DesktopScreenShareDialog();
+  const _DesktopScreenShareDialog({this.screensOnly = false});
+
+  final bool screensOnly;
 
   @override
   State<_DesktopScreenShareDialog> createState() =>
@@ -145,7 +150,8 @@ class _DesktopScreenShareDialog extends StatefulWidget {
 }
 
 class _DesktopScreenShareDialogState extends State<_DesktopScreenShareDialog> {
-  SourceType _type = SourceType.Screen;
+  late SourceType _type =
+      widget.screensOnly ? SourceType.Screen : SourceType.Screen;
   final Map<String, DesktopCapturerSource> _sources = {};
   final List<StreamSubscription> _subs = [];
   Timer? _refresh;
@@ -297,7 +303,9 @@ class _DesktopScreenShareDialogState extends State<_DesktopScreenShareDialog> {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          'Pick a display or window to share with this call.',
+                          widget.screensOnly
+                              ? 'Pick a full screen to share for remote control.'
+                              : 'Pick a display or window to share with this call.',
                           style: GoogleFonts.ibmPlexSans(
                             fontSize: 13,
                             color: PrivetTheme.mist,
@@ -314,31 +322,41 @@ class _DesktopScreenShareDialogState extends State<_DesktopScreenShareDialog> {
                 ],
               ),
               const SizedBox(height: 16),
-              Row(
-                children: [
-                  _TypeChip(
+              if (!widget.screensOnly)
+                Row(
+                  children: [
+                    _TypeChip(
+                      label: 'Entire screen',
+                      selected: _type == SourceType.Screen,
+                      onTap: _busyId != null
+                          ? null
+                          : () {
+                              setState(() => _type = SourceType.Screen);
+                              unawaited(_loadSources());
+                            },
+                    ),
+                    const SizedBox(width: 8),
+                    _TypeChip(
+                      label: 'Window',
+                      selected: _type == SourceType.Window,
+                      onTap: _busyId != null
+                          ? null
+                          : () {
+                              setState(() => _type = SourceType.Window);
+                              unawaited(_loadSources());
+                            },
+                    ),
+                  ],
+                )
+              else
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: _TypeChip(
                     label: 'Entire screen',
-                    selected: _type == SourceType.Screen,
-                    onTap: _busyId != null
-                        ? null
-                        : () {
-                            setState(() => _type = SourceType.Screen);
-                            unawaited(_loadSources());
-                          },
+                    selected: true,
+                    onTap: null,
                   ),
-                  const SizedBox(width: 8),
-                  _TypeChip(
-                    label: 'Window',
-                    selected: _type == SourceType.Window,
-                    onTap: _busyId != null
-                        ? null
-                        : () {
-                            setState(() => _type = SourceType.Window);
-                            unawaited(_loadSources());
-                          },
-                  ),
-                ],
-              ),
+                ),
               const SizedBox(height: 14),
               Expanded(
                 child: _loading

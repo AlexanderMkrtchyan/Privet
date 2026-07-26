@@ -1,0 +1,6 @@
+# Safer Linux fix for mid-call camera bind:
+# 1) Cache receiver tracks during GetTransceivers / OnTrack into local_tracks_
+# 2) Register OnTrack streams into remote_streams_
+# 3) Do NOT call receivers() from MediaTrackForId (crashed the app)
+#
+# Applied by scripts/build-linux.sh via Python rewrite (not patch(1)).
