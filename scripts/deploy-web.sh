@@ -4,10 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="${HOME}/development/flutter/bin:${PATH}"
 
-# Keep install/ + downloads/ across --delete (not produced by Flutter).
+# Keep install/ + downloads/ + version.json across --delete (not produced by Flutter).
 STAGE="$(mktemp -d)"
 [[ -d "$ROOT/server/public/install" ]] && cp -a "$ROOT/server/public/install" "$STAGE/install"
 [[ -d "$ROOT/server/public/downloads" ]] && cp -a "$ROOT/server/public/downloads" "$STAGE/downloads"
+[[ -f "$ROOT/server/public/version.json" ]] && cp -a "$ROOT/server/public/version.json" "$STAGE/version.json"
 
 # Stamp before build so the UI badge matches the cache-bust query.
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
@@ -52,6 +53,7 @@ rsync -a --delete "$ROOT/app/build/web/" "$ROOT/server/public/"
 rm -f "$ROOT/server/public/flutter_service_worker.js"
 [[ -d "$STAGE/install" ]] && { rm -rf "$ROOT/server/public/install"; cp -a "$STAGE/install" "$ROOT/server/public/install"; }
 [[ -d "$STAGE/downloads" ]] && { rm -rf "$ROOT/server/public/downloads"; cp -a "$STAGE/downloads" "$ROOT/server/public/downloads"; }
+[[ -f "$STAGE/version.json" ]] && cp -a "$STAGE/version.json" "$ROOT/server/public/version.json"
 rm -rf "$STAGE"
 
 # Stamp PWA service worker cache version (source lives in app/web/sw.js).

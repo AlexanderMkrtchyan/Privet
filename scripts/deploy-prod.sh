@@ -17,6 +17,9 @@ preserve_static_extras() {
   if [[ -d "$ROOT/server/public/downloads" ]]; then
     cp -a "$ROOT/server/public/downloads" "$stage/downloads"
   fi
+  if [[ -f "$ROOT/server/public/version.json" ]]; then
+    cp -a "$ROOT/server/public/version.json" "$stage/version.json"
+  fi
 }
 
 restore_static_extras() {
@@ -28,6 +31,9 @@ restore_static_extras() {
   if [[ -d "$stage/downloads" ]]; then
     rm -rf "$ROOT/server/public/downloads"
     cp -a "$stage/downloads" "$ROOT/server/public/downloads"
+  fi
+  if [[ -f "$stage/version.json" ]]; then
+    cp -a "$stage/version.json" "$ROOT/server/public/version.json"
   fi
   rm -rf "$stage"
 }
@@ -135,9 +141,12 @@ rsync -az --delete \
   --exclude 'install/' \
   "$ROOT/server/public/" "${REMOTE_HOST}:${REMOTE_DIR}/public/"
 
-# Always ship install + downloads explicitly (may be newer than remote).
+# Always ship install + downloads + version.json explicitly (may be newer than remote).
 rsync -az "$ROOT/server/public/install/" "${REMOTE_HOST}:${REMOTE_DIR}/public/install/"
 rsync -az "$ROOT/server/public/downloads/" "${REMOTE_HOST}:${REMOTE_DIR}/public/downloads/"
+if [[ -f "$ROOT/server/public/version.json" ]]; then
+  rsync -az "$ROOT/server/public/version.json" "${REMOTE_HOST}:${REMOTE_DIR}/public/version.json"
+fi
 
 ssh -o BatchMode=yes "$REMOTE_HOST" bash -s <<REMOTE
 set -euo pipefail
