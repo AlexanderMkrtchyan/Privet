@@ -9,6 +9,7 @@ project(runner LANGUAGES CXX)
 add_executable(${BINARY_NAME}
   "main.cc"
   "my_application.cc"
+  "remote_input_plugin.cc"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
 )
 
@@ -22,5 +23,13 @@ add_definitions(-DAPPLICATION_ID="${APPLICATION_ID}")
 # Add dependency libraries. Add any application-specific dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter)
 target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::GTK)
+
+# X11 + XTest for remote input on X11 sessions.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(X11 IMPORTED_TARGET x11)
+pkg_check_modules(XTST IMPORTED_TARGET xtst)
+if(X11_FOUND AND XTST_FOUND)
+  target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::X11 PkgConfig::XTST)
+endif()
 
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")

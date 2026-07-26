@@ -1,10 +1,27 @@
-// ignore_for_file: avoid_web_libraries_in_flutter, deprecated_member_use
+// ignore_for_file: avoid_web_libraries_in_flutter
 
-import 'dart:js_util' as js_util;
+import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:web/web.dart' as web;
 
 import 'display_share_surface.dart';
+
+/// Whether this browser exposes the real Screen Capture API.
+///
+/// flutter_webrtc falls back to getUserMedia when getDisplayMedia is absent.
+/// Mobile browsers can ignore that fallback's `mediaSource: screen` hint and
+/// return the selfie camera, so callers must gate capture on this check.
+bool get browserSupportsDisplayCapture {
+  try {
+    return web.window.navigator.mediaDevices
+        .getProperty('getDisplayMedia'.toJS)
+        .isDefinedAndNotNull;
+  } catch (_) {
+    return false;
+  }
+}
 
 /// Chrome/Edge: share without bringing the picked window/tab to the front.
 /// Full-monitor shares still show the browser "sharing" chip (platform limit).
@@ -14,55 +31,8 @@ import 'display_share_surface.dart';
 /// open a second native picker after the user already dismissed one.
 Future<MediaStream?> tryCaptureDisplayNoFocusChange({
   DisplayShareSurface? prefer,
-}) async {
-  try {
-    final ctor = js_util.getProperty(js_util.globalThis, 'CaptureController');
-    if (ctor == null) return null;
-    final controller = js_util.callConstructor(ctor, []);
-    js_util.callMethod(controller, 'setFocusBehavior', ['no-focus-change']);
-
-    final constraints = <String, dynamic>{
-      'controller': controller,
-      'audio': false,
-    };
-    switch (prefer) {
-      case DisplayShareSurface.monitor:
-        constraints['video'] = {
-          'displaySurface': 'monitor',
-          'cursor': 'always',
-        };
-      case DisplayShareSurface.window:
-        constraints['video'] = {
-          'displaySurface': 'window',
-          'cursor': 'always',
-        };
-      case DisplayShareSurface.browser:
-        constraints['video'] = {
-          'displaySurface': 'browser',
-          'cursor': 'always',
-        };
-        // Let the user pick any tab (not only this one).
-        constraints['selfBrowserSurface'] = 'include';
-      case null:
-        constraints['video'] = true;
-    }
-
-    return await navigator.mediaDevices.getDisplayMedia(constraints);
-  } catch (e) {
-    if (_isUserCancel(e)) {
-      // Do not fall back — that would show the native picker a second time.
-      throw StateError('Screen share cancelled.');
-    }
-    return null;
-  }
-}
-
-bool _isUserCancel(Object e) {
-  final s = '$e'.toLowerCase();
-  return s.contains('notallowed') ||
-      s.contains('not allowed') ||
-      s.contains('permission denied') ||
-      s.contains('abort') ||
-      s.contains('cancelled') ||
-      s.contains('canceled');
-}
+}) async =>
+    // CaptureController is not exposed by package:web yet. The caller's
+    // capability-gated getDisplayMedia path remains safe and never falls back
+    // to a mobile camera.
+    null;

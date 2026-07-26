@@ -23,7 +23,9 @@ import {
   lastSeenMap,
   noteLastSeen,
   onlineUserIds,
+  sendToSocket,
   sendToUser,
+  sendToUserPreferred,
   touchSocket,
 } from './hub.js';
 import {
@@ -32,8 +34,18 @@ import {
 } from '../media/linkPreview.js';
 import { noteConversationMessage, shouldAcceptMarkRead } from '../readGate.js';
 import { pushToUser } from '../push/fcm.js';
+import {
+  buildControlSignalOutbound,
+  canGrantControl,
+  canRelayCallSignal,
+  canRequestControl,
+} from './call_auth.js';
 
 const MEDIA_KINDS = new Set(['image', 'video', 'audio', 'voice', 'file', 'album']);
+
+/** @type {Map<string, number>} */
+const typingLastSent = new Map();
+let presenceTimer = null;
 
 function notifyMessage(message, { excludeUserId } = {}) {
   const title = message.sender.displayName || message.sender.handle || 'Privet';
@@ -106,7 +118,18 @@ async function maybeAttachLinkPreview(message) {
   });
 }
 
-/** @type {Map<string, { id: string, conversationId: string, mode: string, fromUserId: string, toUserId: string, createdAt: number, status: 'ringing' | 'active' }>} */
+/** @type {Map<string, {
+ *   id: string,
+ *   conversationId: string,
+ *   mode: string,
+ *   fromUserId: string,
+ *   toUserId: string,
+ *   createdAt: number,
+ *   status: 'ringing' | 'active',
+ *   fromSocket?: import('ws').WebSocket,
+ *   toSocket?: import('ws').WebSocket,
+ *   controlGrantedTo?: string | null,
+ * }>} */
 const calls = new Map();
 
 /** @type {Map<string, ReturnType<typeof setTimeout>>} */
@@ -120,7 +143,7 @@ function clearRingTimer(callId) {
   }
 }
 
-/** Wire-safe call payload (never include timers). */
+/** Wire-safe call payload (never include timers or sockets). */
 function publicCall(call) {
   return {
     id: call.id,
@@ -130,6 +153,27 @@ function publicCall(call) {
     toUserId: call.toUserId,
     createdAt: call.createdAt,
   };
+}
+
+function peerSocket(call, userId) {
+  if (!call) return null;
+  if (userId === call.fromUserId) return call.toSocket || null;
+  if (userId === call.toUserId) return call.fromSocket || null;
+  return null;
+}
+
+function clearControl(call) {
+  if (call) call.controlGrantedTo = null;
+}
+
+function endCallForBoth(call, reason) {
+  if (!call) return;
+  clearRingTimer(call.id);
+  clearControl(call);
+  calls.delete(call.id);
+  const ended = { type: 'call.ended', callId: call.id, reason };
+  sendToUserPreferred(call.fromUserId, call.fromSocket, ended);
+  sendToUserPreferred(call.toUserId, call.toSocket, ended);
 }
 
 export function registerWebsocket(app) {
@@ -176,6 +220,11 @@ export function registerWebsocket(app) {
         if (msg.type === 'typing') {
           const { conversationId } = msg;
           if (!conversationId || !userInConversation(conversationId, userId)) return;
+          const key = `${userId}:${conversationId}`;
+          const now = Date.now();
+          const last = typingLastSent.get(key) || 0;
+          if (now - last < 2000) return;
+          typingLastSent.set(key, now);
           broadcastToUsers(
             memberIds(conversationId),
             { type: 'typing', conversationId, userId },
@@ -438,6 +487,9 @@ export function registerWebsocket(app) {
             toUserId,
             createdAt: Date.now(),
             status: 'ringing',
+            fromSocket: socket,
+            toSocket: undefined,
+            controlGrantedTo: null,
           };
           // Auto-expire unanswered invites only — never kill an accepted call.
           // Timer kept in a separate map so JSON.stringify(call) never sees it
@@ -447,21 +499,19 @@ export function registerWebsocket(app) {
             setTimeout(() => {
               const c = calls.get(callId);
               if (!c || c.status !== 'ringing') return;
-              clearRingTimer(callId);
-              calls.delete(callId);
-              sendToUser(c.fromUserId, { type: 'call.ended', callId, reason: 'timeout' });
-              sendToUser(c.toUserId, { type: 'call.ended', callId, reason: 'timeout' });
+              endCallForBoth(c, 'timeout');
             }, 60000),
           );
           calls.set(callId, call);
           const from = publicUser(getUserById(userId));
           const payload = publicCall(call);
+          // Ring all of callee's devices; media will bind the accepting socket.
           sendToUser(toUserId, {
             type: 'call.incoming',
             call: payload,
             from,
           });
-          socket.send(JSON.stringify({ type: 'call.ringing', call: payload }));
+          sendToSocket(socket, { type: 'call.ringing', call: payload });
           return;
         }
 
@@ -470,15 +520,15 @@ export function registerWebsocket(app) {
           if (!call || call.toUserId !== userId) return;
           if (call.status !== 'ringing') return;
           call.status = 'active';
+          call.toSocket = socket;
           clearRingTimer(call.id);
-          // Notify both sides so each client can hard-stop ring tones.
           const accepted = {
             type: 'call.accepted',
             callId: call.id,
             byUserId: userId,
           };
-          sendToUser(call.fromUserId, accepted);
-          sendToUser(call.toUserId, accepted);
+          sendToUserPreferred(call.fromUserId, call.fromSocket, accepted);
+          sendToSocket(socket, accepted);
           return;
         }
 
@@ -486,25 +536,13 @@ export function registerWebsocket(app) {
           const call = calls.get(msg.callId);
           if (!call) return;
           if (userId !== call.toUserId && userId !== call.fromUserId) return;
-          clearRingTimer(call.id);
-          calls.delete(call.id);
-          sendToUser(call.fromUserId, {
-            type: 'call.ended',
-            callId: call.id,
-            reason: 'rejected',
-          });
-          sendToUser(call.toUserId, {
-            type: 'call.ended',
-            callId: call.id,
-            reason: 'rejected',
-          });
+          endCallForBoth(call, 'rejected');
           return;
         }
 
         if (msg.type === 'call.hangup') {
           const call = calls.get(msg.callId);
           if (!call) {
-            // Still notify peer if client knows peer id
             if (msg.toUserId) {
               sendToUser(msg.toUserId, {
                 type: 'call.ended',
@@ -515,18 +553,7 @@ export function registerWebsocket(app) {
             return;
           }
           if (userId !== call.toUserId && userId !== call.fromUserId) return;
-          clearRingTimer(call.id);
-          calls.delete(call.id);
-          sendToUser(call.fromUserId, {
-            type: 'call.ended',
-            callId: call.id,
-            reason: 'hangup',
-          });
-          sendToUser(call.toUserId, {
-            type: 'call.ended',
-            callId: call.id,
-            reason: 'hangup',
-          });
+          endCallForBoth(call, 'hangup');
           return;
         }
 
@@ -538,12 +565,59 @@ export function registerWebsocket(app) {
           msg.type === 'call.share_started'
         ) {
           const { toUserId, callId } = msg;
-          if (!toUserId) return;
-          sendToUser(toUserId, {
+          if (!toUserId || !callId) return;
+          const call = calls.get(callId);
+          if (!canRelayCallSignal(call, userId, toUserId)) return;
+          // Refresh the sender's bound socket so mid-call reconnects stick.
+          if (userId === call.fromUserId) call.fromSocket = socket;
+          if (userId === call.toUserId) call.toSocket = socket;
+          if (msg.type === 'call.share_stopped') {
+            clearControl(call);
+          }
+          const preferred = peerSocket(call, userId);
+          sendToUserPreferred(toUserId, preferred, {
             ...msg,
             fromUserId: userId,
             callId,
           });
+          return;
+        }
+
+        if (
+          msg.type === 'call.control_request' ||
+          msg.type === 'call.control_grant' ||
+          msg.type === 'call.control_deny' ||
+          msg.type === 'call.control_revoke'
+        ) {
+          const { toUserId, callId } = msg;
+          if (!toUserId || !callId) return;
+          const call = calls.get(callId);
+          if (!canRelayCallSignal(call, userId, toUserId)) return;
+          if (userId === call.fromUserId) call.fromSocket = socket;
+          if (userId === call.toUserId) call.toSocket = socket;
+
+          if (msg.type === 'call.control_request') {
+            if (!canRequestControl(call, userId, toUserId)) return;
+          }
+          if (msg.type === 'call.control_grant') {
+            if (!canGrantControl(call, userId, toUserId)) return;
+            // Granting user is the host; controller is the peer.
+            call.controlGrantedTo = toUserId;
+          }
+          if (msg.type === 'call.control_deny' || msg.type === 'call.control_revoke') {
+            clearControl(call);
+          }
+
+          const preferred = peerSocket(call, userId);
+          sendToUserPreferred(
+            toUserId,
+            preferred,
+            buildControlSignalOutbound(msg, {
+              callId,
+              fromUserId: userId,
+              toUserId,
+            }),
+          );
           return;
         }
 
@@ -576,6 +650,15 @@ export function registerWebsocket(app) {
 }
 
 function broadcastPresence() {
+  // Debounce fan-out: multi-tab connect/disconnect otherwise storms every client.
+  if (presenceTimer) return;
+  presenceTimer = setTimeout(() => {
+    presenceTimer = null;
+    broadcastPresenceNow();
+  }, 250);
+}
+
+function broadcastPresenceNow() {
   const online = onlineUserIds();
   const allIds = db.prepare('SELECT id, last_seen_at FROM users').all();
   for (const row of allIds) {

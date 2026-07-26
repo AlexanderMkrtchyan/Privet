@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -20,11 +21,12 @@ import '../theme.dart';
 import '../util/app_clipboard.dart';
 import '../util/clipboard_files.dart';
 import '../util/ai_turn.dart';
-import '../util/display_capture.dart';
 import '../util/media_permissions.dart';
 import '../util/media_ui_wake.dart';
 import '../util/recording_bytes.dart';
 import '../util/sounds.dart';
+import '../util/throttle.dart';
+import '../util/web_bootstrap.dart';
 import '../widgets/avatar.dart';
 import '../widgets/chat_media_folder.dart';
 import '../widgets/chat_task_pane.dart';
@@ -133,8 +135,6 @@ class _MessengerShellState extends State<MessengerShell> {
   Widget build(BuildContext context) {
     final state = widget.state;
     final wide = PrivetTheme.isWide(context);
-    final hasChat = state.activeConversationId != null;
-    final inCall = state.callSession != null || state.ringing != null;
 
     return Listener(
       behavior: HitTestBehavior.translucent,
@@ -142,34 +142,70 @@ class _MessengerShellState extends State<MessengerShell> {
       onPointerSignal: (_) => state.noteUserPresence(),
       child: Stack(
         children: [
-          if (wide)
-            Scaffold(
-              body: Row(
-                children: [
-                  SizedBox(width: 360, child: InboxPane(state: state)),
-                  Container(width: 1, color: PrivetTheme.line),
-                  Expanded(
-                    child: hasChat
-                        ? ConversationPane(
-                            key: ValueKey(state.activeConversationId),
-                            state: state,
-                          )
-                        : const _EmptyChat(),
+          // Structure (inbox vs chat) only when the open conversation changes.
+          ListenableBuilder(
+            listenable: state.shellTick,
+            builder: (context, _) {
+              final hasChat = state.activeConversationId != null;
+              if (wide) {
+                return Scaffold(
+                  body: Row(
+                    children: [
+                      SizedBox(
+                        width: 360,
+                        child: ListenableBuilder(
+                          listenable: state.inboxTick,
+                          builder: (context, _) => InboxPane(state: state),
+                        ),
+                      ),
+                      Container(width: 1, color: PrivetTheme.line),
+                      Expanded(
+                        child: hasChat
+                            ? ListenableBuilder(
+                                listenable: Listenable.merge([
+                                  state.chatTick,
+                                  state.typingTick,
+                                ]),
+                                builder: (context, _) => ConversationPane(
+                                  key: ValueKey(state.activeConversationId),
+                                  state: state,
+                                ),
+                              )
+                            : const _EmptyChat(),
+                      ),
+                    ],
                   ),
-                ],
-              ),
-            )
-          else
-            Scaffold(
-              body: hasChat
-                  ? ConversationPane(
-                      key: ValueKey(state.activeConversationId),
-                      state: state,
-                      showBack: true,
-                    )
-                  : InboxPane(state: state),
-            ),
-          if (inCall) Positioned.fill(child: CallOverlay(state: state)),
+                );
+              }
+              return Scaffold(
+                body: hasChat
+                    ? ListenableBuilder(
+                        listenable: Listenable.merge([
+                          state.chatTick,
+                          state.typingTick,
+                        ]),
+                        builder: (context, _) => ConversationPane(
+                          key: ValueKey(state.activeConversationId),
+                          state: state,
+                          showBack: true,
+                        ),
+                      )
+                    : ListenableBuilder(
+                        listenable: state.inboxTick,
+                        builder: (context, _) => InboxPane(state: state),
+                      ),
+              );
+            },
+          ),
+          ListenableBuilder(
+            listenable: state.callTick,
+            builder: (context, _) {
+              final inCall =
+                  state.callSession != null || state.ringing != null;
+              if (!inCall) return const SizedBox.shrink();
+              return Positioned.fill(child: CallOverlay(state: state));
+            },
+          ),
         ],
       ),
     );
@@ -191,7 +227,12 @@ class InboxPane extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Padding(
-              padding: EdgeInsets.fromLTRB(compact ? 16 : 20, compact ? 12 : 16, 12, 4),
+              padding: EdgeInsets.fromLTRB(
+                compact ? 16 : 20,
+                compact ? 12 : 16,
+                12,
+                4,
+              ),
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: Text.rich(
@@ -276,25 +317,33 @@ class InboxPane extends StatelessWidget {
                   IconButton(
                     tooltip: 'People',
                     onPressed: () => _showPeople(context),
-                    visualDensity: compact ? VisualDensity.standard : VisualDensity.compact,
+                    visualDensity: compact
+                        ? VisualDensity.standard
+                        : VisualDensity.compact,
                     icon: const Icon(Icons.person_add_alt_1_rounded),
                   ),
                   IconButton(
                     tooltip: 'New group',
                     onPressed: () => _showNewGroup(context),
-                    visualDensity: compact ? VisualDensity.standard : VisualDensity.compact,
+                    visualDensity: compact
+                        ? VisualDensity.standard
+                        : VisualDensity.compact,
                     icon: const Icon(Icons.group_add_rounded),
                   ),
                   IconButton(
                     tooltip: 'Invite someone',
                     onPressed: () => _showInvite(context),
-                    visualDensity: compact ? VisualDensity.standard : VisualDensity.compact,
+                    visualDensity: compact
+                        ? VisualDensity.standard
+                        : VisualDensity.compact,
                     icon: const Icon(Icons.link_rounded),
                   ),
                   IconButton(
                     tooltip: 'Search',
                     onPressed: () => _showSearch(context),
-                    visualDensity: compact ? VisualDensity.standard : VisualDensity.compact,
+                    visualDensity: compact
+                        ? VisualDensity.standard
+                        : VisualDensity.compact,
                     icon: const Icon(Icons.search_rounded),
                   ),
                 ],
@@ -444,8 +493,9 @@ class InboxPane extends StatelessWidget {
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
-                                        color: PrivetTheme.mist
-                                            .withValues(alpha: 0.7),
+                                        color: PrivetTheme.mist.withValues(
+                                          alpha: 0.7,
+                                        ),
                                         fontSize: 12,
                                         fontStyle: FontStyle.italic,
                                       ),
@@ -458,8 +508,9 @@ class InboxPane extends StatelessWidget {
                               children: [
                                 if (c.lastMessage != null)
                                   Text(
-                                    DateFormat.Hm()
-                                        .format(c.lastMessage!.createdAt),
+                                    DateFormat.Hm().format(
+                                      c.lastMessage!.createdAt,
+                                    ),
                                     style: TextStyle(
                                       color: PrivetTheme.mist,
                                       fontSize: 11,
@@ -485,8 +536,9 @@ class InboxPane extends StatelessWidget {
                                     ),
                                     decoration: BoxDecoration(
                                       color: c.muted
-                                          ? PrivetTheme.mist
-                                              .withValues(alpha: 0.45)
+                                          ? PrivetTheme.mist.withValues(
+                                              alpha: 0.45,
+                                            )
                                           : PrivetTheme.signal,
                                       borderRadius: BorderRadius.circular(10),
                                     ),
@@ -502,7 +554,8 @@ class InboxPane extends StatelessWidget {
                                       ),
                                     ),
                                   ),
-                                ] else if (c.pinned && c.lastMessage != null) ...[
+                                ] else if (c.pinned &&
+                                    c.lastMessage != null) ...[
                                   const SizedBox(height: 6),
                                   Icon(
                                     Icons.push_pin_rounded,
@@ -636,10 +689,7 @@ class InboxPane extends StatelessWidget {
                   color: PrivetTheme.danger,
                 ),
                 const SizedBox(width: 12),
-                Text(
-                  deleteLabel,
-                  style: TextStyle(color: PrivetTheme.danger),
-                ),
+                Text(deleteLabel, style: TextStyle(color: PrivetTheme.danger)),
               ],
             ),
           ),
@@ -753,11 +803,12 @@ class InboxPane extends StatelessWidget {
           : 'Delete conversation?';
       final confirmBody = chat.isGroup
           ? (canDeleteGroup
-              ? '“${chat.title}” will be deleted for everyone. This cannot be undone.'
-              : 'You will leave “${chat.title}”.')
+                ? '“${chat.title}” will be deleted for everyone. This cannot be undone.'
+                : 'You will leave “${chat.title}”.')
           : '“${chat.title}” will be deleted for both of you.';
-      final confirmAction =
-          chat.isGroup && !canDeleteGroup ? 'Leave' : 'Delete';
+      final confirmAction = chat.isGroup && !canDeleteGroup
+          ? 'Leave'
+          : 'Delete';
 
       final ok = await showDialog<bool>(
         context: context,
@@ -767,10 +818,7 @@ class InboxPane extends StatelessWidget {
             confirmTitle,
             style: GoogleFonts.syne(fontWeight: FontWeight.w700),
           ),
-          content: Text(
-            confirmBody,
-            style: TextStyle(color: PrivetTheme.mist),
-          ),
+          content: Text(confirmBody, style: TextStyle(color: PrivetTheme.mist)),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -818,7 +866,9 @@ class InboxPane extends StatelessWidget {
       ..showSnackBar(
         SnackBar(
           content: Text(message),
-          backgroundColor: error ? PrivetTheme.danger : PrivetTheme.panelElevated,
+          backgroundColor: error
+              ? PrivetTheme.danger
+              : PrivetTheme.panelElevated,
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -989,8 +1039,9 @@ class InboxPane extends StatelessWidget {
                 if (!sheetContext.mounted) return;
                 setModal(() {
                   resolved = null;
-                  resolveError =
-                      e is ApiException ? e.message : 'Invite not found';
+                  resolveError = e is ApiException
+                      ? e.message
+                      : 'Invite not found';
                   lookingUp = false;
                 });
               }
@@ -1023,9 +1074,7 @@ class InboxPane extends StatelessWidget {
 
             final filtering = filterHandle != null;
             final matches = filtering
-                ? <PrivetUser>[
-                    if (resolved != null) resolved!,
-                  ]
+                ? <PrivetUser>[if (resolved != null) resolved!]
                 : state.directory;
 
             return Padding(
@@ -1066,23 +1115,24 @@ class InboxPane extends StatelessWidget {
                                 ),
                               )
                             : (pasteCtrl.text.isNotEmpty
-                                ? IconButton(
-                                    tooltip: 'Clear',
-                                    onPressed: () {
-                                      pasteCtrl.clear();
-                                      onPasteChanged('');
-                                    },
-                                    icon: const Icon(Icons.close_rounded),
-                                  )
-                                : null),
+                                  ? IconButton(
+                                      tooltip: 'Clear',
+                                      onPressed: () {
+                                        pasteCtrl.clear();
+                                        onPasteChanged('');
+                                      },
+                                      icon: const Icon(Icons.close_rounded),
+                                    )
+                                  : null),
                       ),
                     ),
                   ),
                   if (!filtering)
                     ListTile(
                       leading: CircleAvatar(
-                        backgroundColor:
-                            PrivetTheme.signal.withValues(alpha: 0.15),
+                        backgroundColor: PrivetTheme.signal.withValues(
+                          alpha: 0.15,
+                        ),
                         child: Icon(
                           Icons.ios_share_rounded,
                           color: PrivetTheme.signal,
@@ -1190,6 +1240,11 @@ class InboxPane extends StatelessWidget {
     final me = state.user;
     if (me == null) return;
     await state.refreshAiStatus();
+    final packageInfo = await PackageInfo.fromPlatform();
+    if (!context.mounted) return;
+    final versionLabel = packageInfo.buildNumber.isEmpty
+        ? packageInfo.version
+        : '${packageInfo.version} (${packageInfo.buildNumber})';
     final nameCtrl = TextEditingController(text: me.displayName);
     var enabled = state.aiEnabled && state.aiActive;
     Uint8List? pendingAvatarBytes;
@@ -1214,9 +1269,11 @@ class InboxPane extends StatelessWidget {
                 final previewName = nameCtrl.text.trim().isEmpty
                     ? me.displayName
                     : nameCtrl.text.trim();
-                final showRemove = !pendingClearAvatar &&
+                final showRemove =
+                    !pendingClearAvatar &&
                     (pendingAvatarBytes != null || me.avatarUrl != null);
-                final previewUrl = pendingClearAvatar ||
+                final previewUrl =
+                    pendingClearAvatar ||
                         pendingAvatarBytes != null ||
                         me.avatarUrl == null
                     ? null
@@ -1273,20 +1330,19 @@ class InboxPane extends StatelessWidget {
                             Expanded(
                               child: OutlinedButton.icon(
                                 onPressed: () async {
-                                  final result =
-                                      await FilePicker.platform.pickFiles(
-                                    type: FileType.image,
-                                    withData: true,
-                                  );
+                                  final result = await FilePicker.platform
+                                      .pickFiles(
+                                        type: FileType.image,
+                                        withData: true,
+                                      );
                                   final file = result?.files.single;
                                   if (file?.bytes == null) return;
                                   setSheet(() {
                                     pendingAvatarBytes = file!.bytes;
                                     pendingAvatarFilename = file.name;
-                                    pendingAvatarMime =
-                                        file.extension == 'png'
-                                            ? 'image/png'
-                                            : 'image/jpeg';
+                                    pendingAvatarMime = file.extension == 'png'
+                                        ? 'image/png'
+                                        : 'image/jpeg';
                                     pendingClearAvatar = false;
                                   });
                                 },
@@ -1331,13 +1387,12 @@ class InboxPane extends StatelessWidget {
                               Row(
                                 children: [
                                   Icon(
-                                    enabled &&
-                                            active != null &&
-                                            active.isReady
+                                    enabled && active != null && active.isReady
                                         ? Icons.check_circle_outline_rounded
                                         : Icons.key_off_rounded,
                                     size: 18,
-                                    color: enabled &&
+                                    color:
+                                        enabled &&
                                             active != null &&
                                             active.isReady
                                         ? PrivetTheme.signal
@@ -1348,7 +1403,8 @@ class InboxPane extends StatelessWidget {
                                     child: Text(
                                       inUseLabel,
                                       style: TextStyle(
-                                        color: enabled &&
+                                        color:
+                                            enabled &&
                                                 active != null &&
                                                 active.isReady
                                             ? PrivetTheme.paper
@@ -1400,7 +1456,8 @@ class InboxPane extends StatelessWidget {
                                   contentPadding: EdgeInsets.zero,
                                   dense: true,
                                   value: p.id,
-                                  groupValue: state.activeAiProfileId ??
+                                  groupValue:
+                                      state.activeAiProfileId ??
                                       state.aiProfiles.first.id,
                                   activeColor: PrivetTheme.signal,
                                   title: Text(
@@ -1431,10 +1488,7 @@ class InboxPane extends StatelessWidget {
                                 tooltip: 'Edit',
                                 visualDensity: VisualDensity.compact,
                                 onPressed: () async {
-                                  await _editAiProfileDialog(
-                                    ctx,
-                                    existing: p,
-                                  );
+                                  await _editAiProfileDialog(ctx, existing: p);
                                   setSheet(() {});
                                 },
                                 icon: const Icon(Icons.edit_outlined, size: 20),
@@ -1445,8 +1499,7 @@ class InboxPane extends StatelessWidget {
                                 onPressed: () async {
                                   await state.deleteAiProfile(p.id);
                                   setSheet(() {
-                                    enabled =
-                                        state.aiEnabled && state.aiActive;
+                                    enabled = state.aiEnabled && state.aiActive;
                                   });
                                 },
                                 icon: const Icon(
@@ -1483,7 +1536,8 @@ class InboxPane extends StatelessWidget {
                           activeThumbColor: PrivetTheme.onAccent,
                           activeTrackColor: PrivetTheme.signal,
                           onChanged: (v) {
-                            if (v && !(state.activeAiProfile?.isReady ?? false)) {
+                            if (v &&
+                                !(state.activeAiProfile?.isReady ?? false)) {
                               if (context.mounted) {
                                 _toast(
                                   context,
@@ -1536,6 +1590,25 @@ class InboxPane extends StatelessWidget {
                           activeTrackColor: PrivetTheme.signal,
                           onChanged: (v) => state.setNotificationsEnabled(v),
                         ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('Low RAM & CPU mode'),
+                          subtitle: Text(
+                            'Cheaper media decode, static emoji, less animation. '
+                            'Recommended on older PCs.',
+                            style: TextStyle(
+                              color: PrivetTheme.mist,
+                              fontSize: 12,
+                            ),
+                          ),
+                          value: state.lowResourceMode,
+                          activeThumbColor: PrivetTheme.onAccent,
+                          activeTrackColor: PrivetTheme.signal,
+                          onChanged: (v) {
+                            state.setLowResourceMode(v);
+                            setSheet(() {});
+                          },
+                        ),
                         const SizedBox(height: 16),
                         Divider(color: PrivetTheme.line, height: 1),
                         const SizedBox(height: 12),
@@ -1579,11 +1652,10 @@ class InboxPane extends StatelessWidget {
                               try {
                                 String? uploadedAvatarUrl;
                                 if (pendingAvatarBytes != null) {
-                                  final uploaded =
-                                      await state.api.uploadBytes(
+                                  final uploaded = await state.api.uploadBytes(
                                     bytes: pendingAvatarBytes!,
-                                    filename: pendingAvatarFilename ??
-                                        'avatar.jpg',
+                                    filename:
+                                        pendingAvatarFilename ?? 'avatar.jpg',
                                     mimeType: pendingAvatarMime,
                                   );
                                   uploadedAvatarUrl = uploaded.mediaUrl;
@@ -1591,7 +1663,8 @@ class InboxPane extends StatelessWidget {
                                 await state.updateProfile(
                                   displayName: nameCtrl.text.trim(),
                                   avatarUrl: uploadedAvatarUrl,
-                                  clearAvatar: pendingClearAvatar &&
+                                  clearAvatar:
+                                      pendingClearAvatar &&
                                       uploadedAvatarUrl == null,
                                 );
                                 if (enabled &&
@@ -1608,8 +1681,7 @@ class InboxPane extends StatelessWidget {
                                 }
                                 await state.setAiEnabled(
                                   enabled &&
-                                      (state.activeAiProfile?.isReady ??
-                                          false),
+                                      (state.activeAiProfile?.isReady ?? false),
                                 );
                                 if (ctx.mounted) Navigator.pop(ctx);
                               } catch (e) {
@@ -1637,6 +1709,15 @@ class InboxPane extends StatelessWidget {
                             },
                             icon: const Icon(Icons.logout_rounded),
                             label: const Text('Sign out'),
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Privet $versionLabel',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: PrivetTheme.mist,
+                            fontSize: 12,
                           ),
                         ),
                       ],
@@ -1959,14 +2040,14 @@ class _SearchSheetState extends State<_SearchSheet> {
                           ),
                         )
                       : (_controller.text.isEmpty
-                          ? null
-                          : IconButton(
-                              icon: const Icon(Icons.clear_rounded),
-                              onPressed: () {
-                                _controller.clear();
-                                _run('');
-                              },
-                            )),
+                            ? null
+                            : IconButton(
+                                icon: const Icon(Icons.clear_rounded),
+                                onPressed: () {
+                                  _controller.clear();
+                                  _run('');
+                                },
+                              )),
                   filled: true,
                   fillColor: PrivetTheme.panelElevated,
                   border: OutlineInputBorder(
@@ -1998,22 +2079,25 @@ class _SearchSheetState extends State<_SearchSheet> {
                           hue: hit.avatarHue ?? (hit.isGroup ? 90 : 160),
                           avatarUrl: hit.avatarUrl == null
                               ? null
-                              : widget.state.api.absoluteMediaUrl(hit.avatarUrl),
+                              : widget.state.api.absoluteMediaUrl(
+                                  hit.avatarUrl,
+                                ),
                         ),
                         title: Text(hit.title),
                         subtitle: Text(
                           hit.snippet?.trim().isNotEmpty == true
                               ? hit.snippet!
                               : (hit.peerHandle != null
-                                  ? '@${hit.peerHandle}'
-                                  : (hit.isGroup ? 'Group' : 'Chat')),
+                                    ? '@${hit.peerHandle}'
+                                    : (hit.isGroup ? 'Group' : 'Chat')),
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),
                         onTap: () async {
                           Navigator.pop(context);
-                          await widget.state
-                              .openConversation(hit.conversationId);
+                          await widget.state.openConversation(
+                            hit.conversationId,
+                          );
                         },
                       ),
                   ],
@@ -2038,16 +2122,16 @@ class _SearchSheetState extends State<_SearchSheet> {
   }
 
   Widget _sectionLabel(String label) => Padding(
-        padding: const EdgeInsets.fromLTRB(12, 16, 12, 4),
-        child: Text(
-          label,
-          style: GoogleFonts.syne(
-            fontWeight: FontWeight.w700,
-            color: PrivetTheme.signal,
-            fontSize: 13,
-          ),
-        ),
-      );
+    padding: const EdgeInsets.fromLTRB(12, 16, 12, 4),
+    child: Text(
+      label,
+      style: GoogleFonts.syne(
+        fontWeight: FontWeight.w700,
+        color: PrivetTheme.signal,
+        fontSize: 13,
+      ),
+    ),
+  );
 }
 
 class ConversationPane extends StatefulWidget {
@@ -2071,6 +2155,8 @@ class _ConversationPaneState extends State<ConversationPane> {
   final _recorder = AudioRecorder();
   final _searchController = TextEditingController();
   final _messageKeys = <String, GlobalKey>{};
+  final _composerHasContent = ValueNotifier<bool>(false);
+  final _draftDebounce = Debouncer(const Duration(milliseconds: 400));
   OverlayEntry? _composerCtxMenu;
   bool _showEmoji = false;
   bool _recording = false;
@@ -2082,6 +2168,7 @@ class _ConversationPaneState extends State<ConversationPane> {
   Timer? _searchDebounce;
   final List<PickedBytes> _draftMedia = [];
   ChatMessage? _replyingTo;
+
   /// Selected snippet when replying to part of a message (quote preview).
   String? _replySnippet;
   int? _pasteBindId;
@@ -2102,7 +2189,7 @@ class _ConversationPaneState extends State<ConversationPane> {
     super.initState();
     _folderConversationId = widget.state.activeConversationId;
     _draftConversationId = widget.state.activeConversationId;
-    _controller.addListener(_persistDraft);
+    _controller.addListener(_onComposerTextChanged);
     _scroll.addListener(_onScrollForOlder);
     HardwareKeyboard.instance.addHandler(_onGlobalKey);
     _pasteBindId = bindImagePaste((file) {
@@ -2111,6 +2198,7 @@ class _ConversationPaneState extends State<ConversationPane> {
         _draftMedia.add(file);
         _showEmoji = false;
       });
+      _syncComposerHasContent();
     });
     _refreshMediaPermissions();
     listenMediaDeviceChanges(_refreshMediaPermissions);
@@ -2128,7 +2216,8 @@ class _ConversationPaneState extends State<ConversationPane> {
     // selection. Still honor Backspace/Delete against that range.
     final sel = _controller.selection;
     if (sel.isValid && !sel.isCollapsed) {
-      final del = event.logicalKey == LogicalKeyboardKey.backspace ||
+      final del =
+          event.logicalKey == LogicalKeyboardKey.backspace ||
           event.logicalKey == LogicalKeyboardKey.delete;
       if (del) {
         final next = _controller.text.replaceRange(sel.start, sel.end, '');
@@ -2307,9 +2396,7 @@ class _ConversationPaneState extends State<ConversationPane> {
       builder: (ctx) {
         final h = MediaQuery.sizeOf(ctx).height * 0.42;
         return Padding(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.viewInsetsOf(ctx).bottom,
-          ),
+          padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(ctx).bottom),
           child: CompactEmojiPicker(
             height: h,
             textEditingController: _controller,
@@ -2372,10 +2459,7 @@ class _ConversationPaneState extends State<ConversationPane> {
             chat?.title ?? 'Chat',
             overflow: TextOverflow.ellipsis,
             maxLines: 1,
-            style: GoogleFonts.syne(
-              fontWeight: FontWeight.w700,
-              fontSize: 18,
-            ),
+            style: GoogleFonts.syne(fontWeight: FontWeight.w700, fontSize: 18),
           ),
           Text(
             state.typingUserId != null
@@ -2395,10 +2479,7 @@ class _ConversationPaneState extends State<ConversationPane> {
           chat?.peer?.displayName ?? chat?.title ?? 'Chat',
           overflow: TextOverflow.ellipsis,
           maxLines: 1,
-          style: GoogleFonts.syne(
-            fontWeight: FontWeight.w700,
-            fontSize: 18,
-          ),
+          style: GoogleFonts.syne(fontWeight: FontWeight.w700, fontSize: 18),
         ),
         Text(
           state.typingUserId != null
@@ -2451,10 +2532,7 @@ class _ConversationPaneState extends State<ConversationPane> {
     });
   }
 
-  Future<void> _showChatMoreSheet(
-    PrivetState state,
-    Conversation? chat,
-  ) async {
+  Future<void> _showChatMoreSheet(PrivetState state, Conversation? chat) async {
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: PrivetTheme.panel,
@@ -2513,19 +2591,15 @@ class _ConversationPaneState extends State<ConversationPane> {
                     Icons.checklist_rtl_rounded,
                     color: _showTasks ? PrivetTheme.signal : PrivetTheme.mist,
                   ),
-                  title: Text(
-                    _showTasks ? 'Hide tasks' : 'Tasks',
-                  ),
-                  subtitle: Text(
-                    () {
-                      final board =
-                          state.taskBoardFor(state.activeConversationId);
-                      return board.isComplete
-                          ? 'All done'
-                          : '${board.doneCount}/${board.total} done';
-                    }(),
-                    style: TextStyle(color: PrivetTheme.mist, fontSize: 12),
-                  ),
+                  title: Text(_showTasks ? 'Hide tasks' : 'Tasks'),
+                  subtitle: Text(() {
+                    final board = state.taskBoardFor(
+                      state.activeConversationId,
+                    );
+                    return board.isComplete
+                        ? 'All done'
+                        : '${board.doneCount}/${board.total} done';
+                  }(), style: TextStyle(color: PrivetTheme.mist, fontSize: 12)),
                   onTap: () {
                     Navigator.pop(ctx);
                     _toggleTasks();
@@ -2600,8 +2674,8 @@ class _ConversationPaneState extends State<ConversationPane> {
       _CallActionButton(
         tooltip: _mediaPerms.canStartAudio
             ? (_mediaPerms.audioReady
-                ? 'Audio call'
-                : 'Allow microphone access to start audio calls')
+                  ? 'Audio call'
+                  : 'Allow microphone access to start audio calls')
             : 'No microphone detected — connect one to call',
         caution: !_mediaPerms.canStartAudio,
         icon: Icons.call_rounded,
@@ -2613,12 +2687,12 @@ class _ConversationPaneState extends State<ConversationPane> {
         tooltip: !_mediaPerms.hasCamera
             ? 'No camera detected — connect one for video calls'
             : !_mediaPerms.hasMicrophone
-                ? 'No microphone detected — needed for video calls'
-                : _mediaPerms.videoReady
-                    ? 'Video call'
-                    : !_mediaPerms.cameraGranted
-                        ? 'Allow camera access to start video calls'
-                        : 'Allow microphone access to start video calls',
+            ? 'No microphone detected — needed for video calls'
+            : _mediaPerms.videoReady
+            ? 'Video call'
+            : !_mediaPerms.cameraGranted
+            ? 'Allow camera access to start video calls'
+            : 'Allow microphone access to start video calls',
         caution: !_mediaPerms.hasCamera || !_mediaPerms.hasMicrophone,
         icon: Icons.videocam_rounded,
         active: _mediaPerms.videoReady,
@@ -2644,10 +2718,7 @@ class _ConversationPaneState extends State<ConversationPane> {
         IconButton(
           tooltip: 'Delete group',
           onPressed: _deleteGroup,
-          icon: Icon(
-            Icons.delete_outline_rounded,
-            color: PrivetTheme.danger,
-          ),
+          icon: Icon(Icons.delete_outline_rounded, color: PrivetTheme.danger),
         ),
     ];
   }
@@ -2682,8 +2753,8 @@ class _ConversationPaneState extends State<ConversationPane> {
         _CallActionButton(
           tooltip: _mediaPerms.canStartAudio
               ? (_mediaPerms.audioReady
-                  ? 'Audio call'
-                  : 'Allow microphone access to start audio calls')
+                    ? 'Audio call'
+                    : 'Allow microphone access to start audio calls')
               : 'No microphone detected — connect one to call',
           caution: !_mediaPerms.canStartAudio,
           icon: Icons.call_rounded,
@@ -2695,12 +2766,12 @@ class _ConversationPaneState extends State<ConversationPane> {
           tooltip: !_mediaPerms.hasCamera
               ? 'No camera detected — connect one for video calls'
               : !_mediaPerms.hasMicrophone
-                  ? 'No microphone detected — needed for video calls'
-                  : _mediaPerms.videoReady
-                      ? 'Video call'
-                      : !_mediaPerms.cameraGranted
-                          ? 'Allow camera access to start video calls'
-                          : 'Allow microphone access to start video calls',
+              ? 'No microphone detected — needed for video calls'
+              : _mediaPerms.videoReady
+              ? 'Video call'
+              : !_mediaPerms.cameraGranted
+              ? 'Allow camera access to start video calls'
+              : 'Allow microphone access to start video calls',
           caution: !_mediaPerms.hasCamera || !_mediaPerms.hasMicrophone,
           icon: Icons.videocam_rounded,
           active: _mediaPerms.videoReady,
@@ -2716,10 +2787,22 @@ class _ConversationPaneState extends State<ConversationPane> {
     );
   }
 
-  bool get _composerHasContent =>
+  bool get _composerHasContentNow =>
       _controller.text.trim().isNotEmpty ||
       _draftMedia.isNotEmpty ||
       _recording;
+
+  void _onComposerTextChanged() {
+    _syncComposerHasContent();
+    _draftDebounce(_persistDraft);
+  }
+
+  void _syncComposerHasContent() {
+    final has = _composerHasContentNow;
+    if (_composerHasContent.value != has) {
+      _composerHasContent.value = has;
+    }
+  }
 
   Future<void> _restoreDraft() async {
     final id = widget.state.activeConversationId;
@@ -2727,10 +2810,11 @@ class _ConversationPaneState extends State<ConversationPane> {
     final draft = await widget.state.loadDraft(id);
     if (!mounted || widget.state.activeConversationId != id) return;
     if (draft.isEmpty) return;
-    _controller.removeListener(_persistDraft);
+    _controller.removeListener(_onComposerTextChanged);
     _controller.text = draft;
     _controller.selection = TextSelection.collapsed(offset: draft.length);
-    _controller.addListener(_persistDraft);
+    _controller.addListener(_onComposerTextChanged);
+    _composerHasContent.value = _composerHasContentNow;
     setState(() {});
   }
 
@@ -2773,10 +2857,10 @@ class _ConversationPaneState extends State<ConversationPane> {
     cancelMediaDeviceChanges();
     final id = _draftConversationId;
     if (id != null) widget.state.detachChatSurface(id);
-    _persistDraft();
+    _draftDebounce.flush(_persistDraft);
     HardwareKeyboard.instance.removeHandler(_onGlobalKey);
     _dismissComposerCtxMenu();
-    _controller.removeListener(_persistDraft);
+    _controller.removeListener(_onComposerTextChanged);
     _scroll.removeListener(_onScrollForOlder);
     _searchDebounce?.cancel();
     unbindImagePaste(_pasteBindId);
@@ -2784,6 +2868,7 @@ class _ConversationPaneState extends State<ConversationPane> {
     _composerFocus.dispose();
     _scroll.dispose();
     _searchController.dispose();
+    _composerHasContent.dispose();
     _recorder.dispose();
     super.dispose();
   }
@@ -2857,7 +2942,8 @@ class _ConversationPaneState extends State<ConversationPane> {
     if (_searchMatchIds.isEmpty) return;
     final chatId = widget.state.activeConversationId;
     if (chatId == null) return;
-    final safe = ((index % _searchMatchIds.length) + _searchMatchIds.length) %
+    final safe =
+        ((index % _searchMatchIds.length) + _searchMatchIds.length) %
         _searchMatchIds.length;
     final messageId = _searchMatchIds[safe];
     if (_searchMatchIndex != safe) {
@@ -2913,7 +2999,9 @@ class _ConversationPaneState extends State<ConversationPane> {
       }
 
       final max = _scroll.position.maxScrollExtent;
-      final denom = messages.length <= 1 ? 1.0 : (messages.length - 1).toDouble();
+      final denom = messages.length <= 1
+          ? 1.0
+          : (messages.length - 1).toDouble();
       // Prefer average extent once the list has laid out some content.
       final avg = max > 0 && messages.isNotEmpty
           ? (max / denom).clamp(48.0, 220.0)
@@ -2936,7 +3024,7 @@ class _ConversationPaneState extends State<ConversationPane> {
     final next = _searchMatchIndex + delta;
     final normalized =
         ((next % _searchMatchIds.length) + _searchMatchIds.length) %
-            _searchMatchIds.length;
+        _searchMatchIds.length;
     unawaited(_jumpToSearchMatch(normalized));
   }
 
@@ -2986,12 +3074,16 @@ class _ConversationPaneState extends State<ConversationPane> {
                           ),
                         PrivetAvatar(
                           name: chat?.title ?? 'Chat',
-                          hue: chat?.peer?.avatarHue ??
+                          hue:
+                              chat?.peer?.avatarHue ??
                               (chat?.isGroup == true ? 90 : 160),
                           avatarUrl: chat?.peer?.avatarUrl == null
                               ? null
-                              : state.api.absoluteMediaUrl(chat!.peer!.avatarUrl),
-                          online: chat?.peer != null &&
+                              : state.api.absoluteMediaUrl(
+                                  chat!.peer!.avatarUrl,
+                                ),
+                          online:
+                              chat?.peer != null &&
                               state.online.contains(chat!.peer!.id),
                         ),
                         const SizedBox(width: 12),
@@ -3026,8 +3118,10 @@ class _ConversationPaneState extends State<ConversationPane> {
                           decoration: InputDecoration(
                             isDense: true,
                             hintText: 'Search messages in this chat…',
-                            prefixIcon:
-                                const Icon(Icons.search_rounded, size: 20),
+                            prefixIcon: const Icon(
+                              Icons.search_rounded,
+                              size: 20,
+                            ),
                             suffixIcon: _searchBusy
                                 ? const Padding(
                                     padding: EdgeInsets.all(12),
@@ -3040,21 +3134,20 @@ class _ConversationPaneState extends State<ConversationPane> {
                                     ),
                                   )
                                 : (_searchController.text.isEmpty
-                                    ? null
-                                    : IconButton(
-                                        icon: const Icon(Icons.clear_rounded),
-                                        onPressed: () {
-                                          _searchController.clear();
-                                          _onSearchChanged('');
-                                          setState(() {});
-                                        },
-                                      )),
+                                      ? null
+                                      : IconButton(
+                                          icon: const Icon(Icons.clear_rounded),
+                                          onPressed: () {
+                                            _searchController.clear();
+                                            _onSearchChanged('');
+                                            setState(() {});
+                                          },
+                                        )),
                             filled: true,
                             fillColor: PrivetTheme.panelElevated,
                             border: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(10),
-                              borderSide:
-                                  BorderSide(color: PrivetTheme.line),
+                              borderSide: BorderSide(color: PrivetTheme.line),
                             ),
                             contentPadding: const EdgeInsets.symmetric(
                               horizontal: 8,
@@ -3080,13 +3173,16 @@ class _ConversationPaneState extends State<ConversationPane> {
                               IconButton(
                                 tooltip: 'Older match',
                                 onPressed: () => _searchStep(1),
-                                icon: const Icon(Icons.keyboard_arrow_up_rounded),
+                                icon: const Icon(
+                                  Icons.keyboard_arrow_up_rounded,
+                                ),
                               ),
                               IconButton(
                                 tooltip: 'Newer match',
                                 onPressed: () => _searchStep(-1),
-                                icon:
-                                    const Icon(Icons.keyboard_arrow_down_rounded),
+                                icon: const Icon(
+                                  Icons.keyboard_arrow_down_rounded,
+                                ),
                               ),
                               IconButton(
                                 tooltip: 'Close search',
@@ -3116,8 +3212,10 @@ class _ConversationPaneState extends State<ConversationPane> {
                             decoration: InputDecoration(
                               isDense: true,
                               hintText: 'Search messages in this chat…',
-                              prefixIcon:
-                                  const Icon(Icons.search_rounded, size: 20),
+                              prefixIcon: const Icon(
+                                Icons.search_rounded,
+                                size: 20,
+                              ),
                               suffixIcon: _searchBusy
                                   ? const Padding(
                                       padding: EdgeInsets.all(12),
@@ -3130,21 +3228,22 @@ class _ConversationPaneState extends State<ConversationPane> {
                                       ),
                                     )
                                   : (_searchController.text.isEmpty
-                                      ? null
-                                      : IconButton(
-                                          icon: const Icon(Icons.clear_rounded),
-                                          onPressed: () {
-                                            _searchController.clear();
-                                            _onSearchChanged('');
-                                            setState(() {});
-                                          },
-                                        )),
+                                        ? null
+                                        : IconButton(
+                                            icon: const Icon(
+                                              Icons.clear_rounded,
+                                            ),
+                                            onPressed: () {
+                                              _searchController.clear();
+                                              _onSearchChanged('');
+                                              setState(() {});
+                                            },
+                                          )),
                               filled: true,
                               fillColor: PrivetTheme.panelElevated,
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(10),
-                                borderSide:
-                                    BorderSide(color: PrivetTheme.line),
+                                borderSide: BorderSide(color: PrivetTheme.line),
                               ),
                               contentPadding: const EdgeInsets.symmetric(
                                 horizontal: 8,
@@ -3211,134 +3310,144 @@ class _ConversationPaneState extends State<ConversationPane> {
             Expanded(
               child: Stack(
                 children: [
-              Listener(
-                behavior: HitTestBehavior.translucent,
-                onPointerUp: (_) {
-                  // Text body claims the pointer on down (child runs first).
-                  // Do not clear selection for those gestures — that was wiping
-                  // the Copy/Reply/Forward bar immediately after every drag.
-                  if (privetMessageSelectionDragging) return;
-                  if (privetMessageBodyClaimedPointer) {
-                    privetMessageBodyClaimedPointer = false;
-                    return;
-                  }
-                  privetClearMessageSelection();
-                },
-                onPointerCancel: (_) {
-                  privetMessageBodyClaimedPointer = false;
-                },
-                child: ListView.builder(
-                  controller: _scroll,
-                  reverse: true,
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                  itemCount: messages.length +
-                      ((state.activeConversationId != null &&
-                              state.loadingOlder
-                                  .contains(state.activeConversationId))
-                          ? 1
-                          : 0),
-                  itemBuilder: (context, i) {
-                    final loadingOlder = state.activeConversationId != null &&
-                        state.loadingOlder
-                            .contains(state.activeConversationId);
-                    if (loadingOlder && i == messages.length) {
-                      return const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 12),
-                        child: Center(
-                          child: SizedBox(
-                            width: 22,
-                            height: 22,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        ),
-                      );
-                    }
-                    // reverse: true → index 0 is newest (bottom); open lands on last message
-                    final actualIndex = messages.length - 1 - i;
-                    final m = messages[actualIndex];
-                    final mine = m.sender.id == state.user?.id;
-                    final key =
-                        _messageKeys.putIfAbsent(m.id, GlobalKey.new);
-                    final highlighted = _searchMatchIds.isNotEmpty &&
-                        _searchMatchIds[_searchMatchIndex] == m.id;
-                    // Day separator sits above the first message of each day.
-                    final showDaySeparator = actualIndex == 0 ||
-                        !_sameDay(
-                          messages[actualIndex - 1].createdAt,
-                          m.createdAt,
-                        );
-                    final bubble = MessageBubble(
-                      message: m,
-                      mine: mine,
-                      mediaBase: mediaBase,
-                      selfId: state.user?.id,
-                      showSender: true,
-                      highlighted: highlighted,
-                      readByPeer: mine &&
-                          (chat?.isReadByPeer(m, selfId: state.user?.id) ??
-                              false),
-                      seenByLabel: mine && chat?.isGroup == true
-                          ? _seenByShort(chat!, m, state)
-                          : null,
-                      onReply: (msg, {selectedText}) {
-                        final snippet = (selectedText != null &&
-                                selectedText.trim().isNotEmpty)
-                            ? selectedText.trim()
-                            : null;
-                        setState(() {
-                          _replyingTo = msg;
-                          _replySnippet = snippet;
-                          _showEmoji = false;
-                        });
-                        // Selection belongs only in the reply bar, not the draft.
-                        if (snippet != null) {
-                          _controller.clear();
+                  Listener(
+                    behavior: HitTestBehavior.translucent,
+                    onPointerUp: (_) {
+                      // Text body claims the pointer on down (child runs first).
+                      // Do not clear selection for those gestures — that was wiping
+                      // the Copy/Reply/Forward bar immediately after every drag.
+                      if (privetMessageSelectionDragging) return;
+                      if (privetMessageBodyClaimedPointer) {
+                        privetMessageBodyClaimedPointer = false;
+                        return;
+                      }
+                      privetClearMessageSelection();
+                    },
+                    onPointerCancel: (_) {
+                      privetMessageBodyClaimedPointer = false;
+                    },
+                    child: ListView.builder(
+                      controller: _scroll,
+                      reverse: true,
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                      itemCount:
+                          messages.length +
+                          ((state.activeConversationId != null &&
+                                  state.loadingOlder.contains(
+                                    state.activeConversationId,
+                                  ))
+                              ? 1
+                              : 0),
+                      itemBuilder: (context, i) {
+                        final loadingOlder =
+                            state.activeConversationId != null &&
+                            state.loadingOlder.contains(
+                              state.activeConversationId,
+                            );
+                        if (loadingOlder && i == messages.length) {
+                          return const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 12),
+                            child: Center(
+                              child: SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                            ),
+                          );
                         }
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          if (mounted) _composerFocus.requestFocus();
-                        });
+                        // reverse: true → index 0 is newest (bottom); open lands on last message
+                        final actualIndex = messages.length - 1 - i;
+                        final m = messages[actualIndex];
+                        final mine = m.sender.id == state.user?.id;
+                        final key = _messageKeys.putIfAbsent(
+                          m.id,
+                          GlobalKey.new,
+                        );
+                        final highlighted =
+                            _searchMatchIds.isNotEmpty &&
+                            _searchMatchIds[_searchMatchIndex] == m.id;
+                        // Day separator sits above the first message of each day.
+                        final showDaySeparator =
+                            actualIndex == 0 ||
+                            !_sameDay(
+                              messages[actualIndex - 1].createdAt,
+                              m.createdAt,
+                            );
+                        final bubble = MessageBubble(
+                          message: m,
+                          mine: mine,
+                          mediaBase: mediaBase,
+                          selfId: state.user?.id,
+                          showSender: true,
+                          highlighted: highlighted,
+                          readByPeer:
+                              mine &&
+                              (chat?.isReadByPeer(m, selfId: state.user?.id) ??
+                                  false),
+                          seenByLabel: mine && chat?.isGroup == true
+                              ? _seenByShort(chat!, m, state)
+                              : null,
+                          onReply: (msg, {selectedText}) {
+                            final snippet =
+                                (selectedText != null &&
+                                    selectedText.trim().isNotEmpty)
+                                ? selectedText.trim()
+                                : null;
+                            setState(() {
+                              _replyingTo = msg;
+                              _replySnippet = snippet;
+                              _showEmoji = false;
+                            });
+                            // Selection belongs only in the reply bar, not the draft.
+                            if (snippet != null) {
+                              _controller.clear();
+                            }
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (mounted) _composerFocus.requestFocus();
+                            });
+                          },
+                          onForward: (msg, {selectedText}) =>
+                              _forwardMessage(context, msg),
+                          onSeenBy: chat?.isGroup == true
+                              ? (msg) => _showSeenBy(context, chat!, msg)
+                              : null,
+                          onReact: (msg, emoji) =>
+                              state.toggleReaction(msg.id, emoji),
+                          onAddToTask: (msg) async {
+                            await state.addMessageToTask(msg);
+                            if (!mounted) return;
+                            setState(() {
+                              _mediaFolder = null;
+                              _showTasks = true;
+                            });
+                          },
+                          aiActive: state.aiActive,
+                          onAskAi: (msg) => _askAiAboutMessage(context, msg),
+                          onEdit: mine ? (msg) => _editMessage(msg) : null,
+                          onDelete: mine ? (msg) => _deleteMessage(msg) : null,
+                        );
+                        return KeyedSubtree(
+                          key: key,
+                          child: RepaintBoundary(
+                            child: showDaySeparator
+                                ? Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      _DaySeparator(
+                                        label: _dayLabel(m.createdAt),
+                                      ),
+                                      bubble,
+                                    ],
+                                  )
+                                : bubble,
+                          ),
+                        );
                       },
-                      onForward: (msg, {selectedText}) =>
-                          _forwardMessage(context, msg),
-                      onSeenBy: chat?.isGroup == true
-                          ? (msg) => _showSeenBy(context, chat!, msg)
-                          : null,
-                      onReact: (msg, emoji) =>
-                          state.toggleReaction(msg.id, emoji),
-                      onAddToTask: (msg) async {
-                        await state.addMessageToTask(msg);
-                        if (!mounted) return;
-                        setState(() {
-                          _mediaFolder = null;
-                          _showTasks = true;
-                        });
-                      },
-                      aiActive: state.aiActive,
-                      onAskAi: (msg) => _askAiAboutMessage(context, msg),
-                      onEdit: mine
-                          ? (msg) => _editMessage(msg)
-                          : null,
-                      onDelete: mine
-                          ? (msg) => _deleteMessage(msg)
-                          : null,
-                    );
-                    return KeyedSubtree(
-                      key: key,
-                      child: RepaintBoundary(
-                        child: showDaySeparator
-                            ? Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  _DaySeparator(label: _dayLabel(m.createdAt)),
-                                  bubble,
-                                ],
-                              )
-                            : bubble,
-                      ),
-                    );
-                  },
-                ),
-              ),
+                    ),
+                  ),
                   Positioned(
                     right: 16,
                     bottom: 16,
@@ -3416,7 +3525,8 @@ class _ConversationPaneState extends State<ConversationPane> {
                                 if (event is! KeyDownEvent) {
                                   return KeyEventResult.ignored;
                                 }
-                                final isEnter = event.logicalKey ==
+                                final isEnter =
+                                    event.logicalKey ==
                                         LogicalKeyboardKey.enter ||
                                     event.logicalKey ==
                                         LogicalKeyboardKey.numpadEnter;
@@ -3468,16 +3578,15 @@ class _ConversationPaneState extends State<ConversationPane> {
                                     onTapOutside: _onComposerTapOutside,
                                     onChanged: (_) {
                                       state.notifyTyping();
-                                      setState(() {});
                                     },
                                     onTap: _onComposerTap,
                                     decoration: InputDecoration(
                                       isDense: true,
                                       contentPadding:
                                           const EdgeInsets.symmetric(
-                                        horizontal: 8,
-                                        vertical: 12,
-                                      ),
+                                            horizontal: 8,
+                                            vertical: 12,
+                                          ),
                                       hintText: _draftMedia.isEmpty
                                           ? state.composerPlaceholder
                                           : 'Add a caption…',
@@ -3506,33 +3615,38 @@ class _ConversationPaneState extends State<ConversationPane> {
                             ),
                           ),
                           const SizedBox(width: 8),
-                          if (_composerHasContent)
-                            Material(
-                              color: PrivetTheme.signal,
-                              borderRadius: BorderRadius.circular(14),
-                              child: InkWell(
-                                onTap: _recording ? _toggleVoice : _send,
-                                borderRadius: BorderRadius.circular(14),
-                                child: SizedBox(
-                                  width: 48,
-                                  height: 48,
-                                  child: Icon(
-                                    _recording
-                                        ? Icons.stop_circle_rounded
-                                        : Icons.arrow_upward_rounded,
-                                    color: _recording
-                                        ? PrivetTheme.danger
-                                        : PrivetTheme.onAccent,
+                          ValueListenableBuilder<bool>(
+                            valueListenable: _composerHasContent,
+                            builder: (context, hasContent, _) {
+                              if (hasContent) {
+                                return Material(
+                                  color: PrivetTheme.signal,
+                                  borderRadius: BorderRadius.circular(14),
+                                  child: InkWell(
+                                    onTap: _recording ? _toggleVoice : _send,
+                                    borderRadius: BorderRadius.circular(14),
+                                    child: SizedBox(
+                                      width: 48,
+                                      height: 48,
+                                      child: Icon(
+                                        _recording
+                                            ? Icons.stop_circle_rounded
+                                            : Icons.arrow_upward_rounded,
+                                        color: _recording
+                                            ? PrivetTheme.danger
+                                            : PrivetTheme.onAccent,
+                                      ),
+                                    ),
                                   ),
-                                ),
-                              ),
-                            )
-                          else
-                            IconButton(
-                              tooltip: 'Voice message',
-                              onPressed: _toggleVoice,
-                              icon: const Icon(Icons.mic_rounded),
-                            ),
+                                );
+                              }
+                              return IconButton(
+                                tooltip: 'Voice message',
+                                onPressed: _toggleVoice,
+                                icon: const Icon(Icons.mic_rounded),
+                              );
+                            },
+                          ),
                         ],
                       )
                     : Row(
@@ -3551,8 +3665,9 @@ class _ConversationPaneState extends State<ConversationPane> {
                             tooltip: 'Attach files',
                             onPicked: _applyPickedFile,
                             onPressedFallback: _pickFile,
-                            onError: (e) => widget.state
-                                .setError('Could not attach file: $e'),
+                            onError: (e) => widget.state.setError(
+                              'Could not attach file: $e',
+                            ),
                           ),
                           Expanded(
                             child: Focus(
@@ -3560,7 +3675,8 @@ class _ConversationPaneState extends State<ConversationPane> {
                                 if (event is! KeyDownEvent) {
                                   return KeyEventResult.ignored;
                                 }
-                                final isEnter = event.logicalKey ==
+                                final isEnter =
+                                    event.logicalKey ==
                                         LogicalKeyboardKey.enter ||
                                     event.logicalKey ==
                                         LogicalKeyboardKey.numpadEnter;
@@ -3623,8 +3739,9 @@ class _ConversationPaneState extends State<ConversationPane> {
                             ),
                           ),
                           IconButton(
-                            tooltip:
-                                _recording ? 'Stop & send' : 'Voice message',
+                            tooltip: _recording
+                                ? 'Stop & send'
+                                : 'Voice message',
                             onPressed: _toggleVoice,
                             icon: Icon(
                               _recording
@@ -3677,16 +3794,16 @@ class _ConversationPaneState extends State<ConversationPane> {
     final preview = (snippet != null && snippet.isNotEmpty)
         ? snippet
         : reply.body.isNotEmpty
-            ? reply.body
-            : switch (reply.kind) {
-                'image' => '📷 Photo',
-                'video' => '🎬 Video',
-                'audio' => '🎵 Audio',
-                'voice' => '🎤 Voice message',
-                'file' => reply.fileName ?? '📎 File',
-                'album' => '📎 ${reply.mediaItems.length} attachments',
-                _ => reply.body,
-              };
+        ? reply.body
+        : switch (reply.kind) {
+            'image' => '📷 Photo',
+            'video' => '🎬 Video',
+            'audio' => '🎵 Audio',
+            'voice' => '🎤 Voice message',
+            'file' => reply.fileName ?? '📎 File',
+            'album' => '📎 ${reply.mediaItems.length} attachments',
+            _ => reply.body,
+          };
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
@@ -3724,10 +3841,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                   preview,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: PrivetTheme.mist,
-                    fontSize: 12,
-                  ),
+                  style: TextStyle(color: PrivetTheme.mist, fontSize: 12),
                 ),
               ],
             ),
@@ -3775,7 +3889,10 @@ class _ConversationPaneState extends State<ConversationPane> {
                   ),
                 ),
                 TextButton(
-                  onPressed: () => setState(() => _draftMedia.clear()),
+                  onPressed: () {
+                    setState(() => _draftMedia.clear());
+                    _syncComposerHasContent();
+                  },
                   child: const Text('Clear all'),
                 ),
               ],
@@ -3814,8 +3931,8 @@ class _ConversationPaneState extends State<ConversationPane> {
                                 draft.mimeType.startsWith('video/')
                                     ? Icons.videocam_rounded
                                     : draft.mimeType.startsWith('audio/')
-                                        ? Icons.audiotrack_rounded
-                                        : Icons.insert_drive_file_rounded,
+                                    ? Icons.audiotrack_rounded
+                                    : Icons.insert_drive_file_rounded,
                                 color: PrivetTheme.signal,
                               ),
                             ),
@@ -3828,7 +3945,10 @@ class _ConversationPaneState extends State<ConversationPane> {
                         shape: const CircleBorder(),
                         child: InkWell(
                           customBorder: const CircleBorder(),
-                          onTap: () => setState(() => _draftMedia.removeAt(index)),
+                          onTap: () {
+                            setState(() => _draftMedia.removeAt(index));
+                            _syncComposerHasContent();
+                          },
                           child: const Padding(
                             padding: EdgeInsets.all(2),
                             child: Icon(Icons.close_rounded, size: 16),
@@ -3954,8 +4074,8 @@ class _ConversationPaneState extends State<ConversationPane> {
                   mode == 'audio'
                       ? 'Audio call'
                       : mode == 'screen'
-                          ? 'Screen share'
-                          : 'Video call',
+                      ? 'Screen share'
+                      : 'Video call',
                   style: GoogleFonts.syne(
                     fontSize: 20,
                     fontWeight: FontWeight.w700,
@@ -4096,45 +4216,48 @@ class _ConversationPaneState extends State<ConversationPane> {
                               : () async {
                                   final picked =
                                       await showModalBottomSheet<PrivetUser>(
-                                    context: context,
-                                    backgroundColor: PrivetTheme.panelElevated,
-                                    showDragHandle: true,
-                                    builder: (ctx) => ListView(
-                                      children: [
-                                        Padding(
-                                          padding: const EdgeInsets.fromLTRB(
-                                            20,
-                                            8,
-                                            20,
-                                            12,
-                                          ),
-                                          child: Text(
-                                            'Add to group',
-                                            style: GoogleFonts.syne(
-                                              fontSize: 18,
-                                              fontWeight: FontWeight.w700,
+                                        context: context,
+                                        backgroundColor:
+                                            PrivetTheme.panelElevated,
+                                        showDragHandle: true,
+                                        builder: (ctx) => ListView(
+                                          children: [
+                                            Padding(
+                                              padding:
+                                                  const EdgeInsets.fromLTRB(
+                                                    20,
+                                                    8,
+                                                    20,
+                                                    12,
+                                                  ),
+                                              child: Text(
+                                                'Add to group',
+                                                style: GoogleFonts.syne(
+                                                  fontSize: 18,
+                                                  fontWeight: FontWeight.w700,
+                                                ),
+                                              ),
                                             ),
-                                          ),
+                                            ...candidates.map(
+                                              (u) => ListTile(
+                                                leading: PrivetAvatar(
+                                                  name: u.displayName,
+                                                  hue: u.avatarHue,
+                                                  online: state.online.contains(
+                                                    u.id,
+                                                  ),
+                                                ),
+                                                title: UserNameBlock.fromUser(
+                                                  u,
+                                                  titleSize: 15,
+                                                ),
+                                                onTap: () =>
+                                                    Navigator.pop(ctx, u),
+                                              ),
+                                            ),
+                                          ],
                                         ),
-                                        ...candidates.map(
-                                          (u) => ListTile(
-                                            leading: PrivetAvatar(
-                                              name: u.displayName,
-                                              hue: u.avatarHue,
-                                              online: state.online
-                                                  .contains(u.id),
-                                            ),
-                                            title: UserNameBlock.fromUser(
-                                              u,
-                                              titleSize: 15,
-                                            ),
-                                            onTap: () =>
-                                                Navigator.pop(ctx, u),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  );
+                                      );
                                   if (picked == null) return;
                                   try {
                                     members = await state.addGroupMember(
@@ -4276,16 +4399,14 @@ class _ConversationPaneState extends State<ConversationPane> {
                                 ),
                                 actions: [
                                   TextButton(
-                                    onPressed: () =>
-                                        Navigator.pop(ctx, false),
+                                    onPressed: () => Navigator.pop(ctx, false),
                                     child: const Text('Cancel'),
                                   ),
                                   ElevatedButton(
                                     style: ElevatedButton.styleFrom(
                                       backgroundColor: PrivetTheme.danger,
                                     ),
-                                    onPressed: () =>
-                                        Navigator.pop(ctx, true),
+                                    onPressed: () => Navigator.pop(ctx, true),
                                     child: const Text('Remove group'),
                                   ),
                                 ],
@@ -4299,9 +4420,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                               }
                             } catch (e) {
                               state.setError(
-                                e is ApiException
-                                    ? e.message
-                                    : e.toString(),
+                                e is ApiException ? e.message : e.toString(),
                               );
                             }
                           },
@@ -4395,8 +4514,8 @@ class _ConversationPaneState extends State<ConversationPane> {
     final who = message.sender.displayName.trim().isNotEmpty
         ? message.sender.displayName.trim()
         : (message.sender.handle.isNotEmpty
-            ? '@${message.sender.handle}'
-            : 'someone');
+              ? '@${message.sender.handle}'
+              : 'someone');
     final snippet = _messageAiSnippet(message);
     final ctrl = TextEditingController();
     final question = await showDialog<String>(
@@ -4414,10 +4533,7 @@ class _ConversationPaneState extends State<ConversationPane> {
             children: [
               Text(
                 'About message from $who',
-                style: TextStyle(
-                  color: PrivetTheme.mist,
-                  fontSize: 13,
-                ),
+                style: TextStyle(color: PrivetTheme.mist, fontSize: 13),
               ),
               if (snippet.isNotEmpty) ...[
                 const SizedBox(height: 8),
@@ -4524,7 +4640,10 @@ class _ConversationPaneState extends State<ConversationPane> {
     }
   }
 
-  Future<void> _forwardMessage(BuildContext context, ChatMessage message) async {
+  Future<void> _forwardMessage(
+    BuildContext context,
+    ChatMessage message,
+  ) async {
     final state = widget.state;
     final target = await showModalBottomSheet<Conversation>(
       context: context,
@@ -4599,6 +4718,7 @@ class _ConversationPaneState extends State<ConversationPane> {
       );
       _showEmoji = false;
     });
+    _syncComposerHasContent();
   }
 
   Future<void> _pickFile() async {
@@ -4661,6 +4781,7 @@ class _ConversationPaneState extends State<ConversationPane> {
     if (_recording) {
       final path = await _recorder.stop();
       setState(() => _recording = false);
+      _syncComposerHasContent();
       if (path == null || path.isEmpty) {
         _voiceToast('Recording produced no file');
         return;
@@ -4717,17 +4838,22 @@ class _ConversationPaneState extends State<ConversationPane> {
           'privet-voice-${DateTime.now().millisecondsSinceEpoch}.wav',
         );
         await _recorder.start(
-          const RecordConfig(
-            encoder: AudioEncoder.wav,
-            numChannels: 1,
-          ),
+          const RecordConfig(encoder: AudioEncoder.wav, numChannels: 1),
           path: out,
         );
       }
       setState(() => _recording = true);
+      _syncComposerHasContent();
     } catch (e) {
       _voiceToast('Could not start recording: $e');
     }
+  }
+
+  void _dismissComposerKeyboard() {
+    _composerFocus.unfocus();
+    FocusManager.instance.primaryFocus?.unfocus();
+    SystemChannels.textInput.invokeMethod('TextInput.hide');
+    dismissSoftKeyboard();
   }
 
   Future<void> _send() async {
@@ -4736,14 +4862,13 @@ class _ConversationPaneState extends State<ConversationPane> {
     final reply = _replyingTo;
     final replyToId = reply?.id;
     final snippet = _replySnippet?.trim();
-    final replyQuote =
-        (snippet != null && snippet.isNotEmpty) ? snippet : null;
+    final replyQuote = (snippet != null && snippet.isNotEmpty) ? snippet : null;
     final replyPreview = reply == null
         ? null
-        : ReplyPreview.fromMessage(
-            reply,
-            bodyOverride: replyQuote,
-          );
+        : ReplyPreview.fromMessage(reply, bodyOverride: replyQuote);
+    // PWA / compact: always dismiss IME after send so the OS keyboard does
+    // not stick open or leave a white viewport gap.
+    final dismissKeyboard = mounted && PrivetTheme.isCompact(context);
     if (drafts.isNotEmpty) {
       final caption = text.trim();
       _controller.clear();
@@ -4752,16 +4877,14 @@ class _ConversationPaneState extends State<ConversationPane> {
         _replyingTo = null;
         _replySnippet = null;
       });
+      _syncComposerHasContent();
       final chatId = widget.state.activeConversationId;
       if (chatId != null) await widget.state.clearDraft(chatId);
       await widget.state.sendMediaAlbum(
         files: drafts
             .map(
-              (d) => (
-                bytes: d.bytes,
-                filename: d.filename,
-                mimeType: d.mimeType,
-              ),
+              (d) =>
+                  (bytes: d.bytes, filename: d.filename, mimeType: d.mimeType),
             )
             .toList(),
         caption: caption,
@@ -4769,6 +4892,7 @@ class _ConversationPaneState extends State<ConversationPane> {
         replyTo: replyPreview,
         replyQuote: replyQuote,
       );
+      if (dismissKeyboard) _dismissComposerKeyboard();
       _scrollToEnd();
       return;
     }
@@ -4784,6 +4908,7 @@ class _ConversationPaneState extends State<ConversationPane> {
       _replyingTo = null;
       _replySnippet = null;
     });
+    if (dismissKeyboard) _dismissComposerKeyboard();
     _scrollToEnd();
   }
 
@@ -4802,9 +4927,7 @@ class _ConversationPaneState extends State<ConversationPane> {
           autofocus: true,
           maxLines: 5,
           minLines: 2,
-          decoration: const InputDecoration(
-            hintText: 'Message',
-          ),
+          decoration: const InputDecoration(hintText: 'Message'),
         ),
         actions: [
           TextButton(
@@ -4935,6 +5058,7 @@ class _CallActionButton extends StatelessWidget {
   final bool active;
   final bool enabled;
   final VoidCallback onPressed;
+
   /// Missing-device / blocked state — tooltip in caution red.
   final bool caution;
 
@@ -4972,8 +5096,8 @@ class _CallActionButton extends StatelessWidget {
           color: !enabled
               ? PrivetTheme.mist.withValues(alpha: 0.28)
               : active
-                  ? PrivetTheme.signal
-                  : PrivetTheme.mist.withValues(alpha: 0.55),
+              ? PrivetTheme.signal
+              : PrivetTheme.mist.withValues(alpha: 0.55),
         ),
       ),
     );
@@ -5149,7 +5273,11 @@ class _AccentPicker extends StatelessWidget {
               ),
             ),
             child: isSelected
-                ? Icon(Icons.check_rounded, size: 18, color: PrivetTheme.onAccent)
+                ? Icon(
+                    Icons.check_rounded,
+                    size: 18,
+                    color: PrivetTheme.onAccent,
+                  )
                 : null,
           ),
         ),

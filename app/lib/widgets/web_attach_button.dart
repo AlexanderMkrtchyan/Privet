@@ -1,7 +1,6 @@
-import 'dart:async';
-
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../util/clipboard_files.dart';
 
@@ -27,8 +26,8 @@ class WebAttachButton extends StatefulWidget {
 
 class _WebAttachButtonState extends State<WebAttachButton> {
   final _hostKey = GlobalKey();
-  Timer? _syncTimer;
   int? _attachBindId;
+  bool _scheduled = false;
 
   @override
   void initState() {
@@ -40,8 +39,6 @@ class _WebAttachButtonState extends State<WebAttachButton> {
       onError: widget.onError,
     );
     WidgetsBinding.instance.addPostFrameCallback((_) => _sync());
-    _syncTimer =
-        Timer.periodic(const Duration(milliseconds: 100), (_) => _sync());
   }
 
   @override
@@ -52,7 +49,17 @@ class _WebAttachButtonState extends State<WebAttachButton> {
         onPicked: widget.onPicked,
         onError: widget.onError,
       );
+      _scheduleSync();
     }
+  }
+
+  void _scheduleSync() {
+    if (!kIsWeb || _scheduled) return;
+    _scheduled = true;
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      _scheduled = false;
+      _sync();
+    });
   }
 
   void _sync() {
@@ -77,7 +84,6 @@ class _WebAttachButtonState extends State<WebAttachButton> {
 
   @override
   void dispose() {
-    _syncTimer?.cancel();
     if (kIsWeb) {
       clearAttachHandlers(_attachBindId);
       positionAttachInput(left: 0, top: 0, width: 0, height: 0, active: false);
@@ -94,6 +100,9 @@ class _WebAttachButtonState extends State<WebAttachButton> {
         icon: const Icon(Icons.attach_file_rounded),
       );
     }
+
+    // Reposition after layout without a 100ms polling timer.
+    _scheduleSync();
 
     return SizedBox(
       key: _hostKey,

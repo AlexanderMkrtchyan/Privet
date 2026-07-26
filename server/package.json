@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
-    "seed": "node src/seed.js"
+    "seed": "node src/seed.js",
+    "test": "node test/call_control_auth.test.js"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",

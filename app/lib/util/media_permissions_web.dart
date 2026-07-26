@@ -2,6 +2,7 @@
 
 import 'dart:html' as html;
 
+import 'display_capture_focus.dart';
 import 'media_permissions.dart';
 
 /// Sticky results from a real getUserMedia attempt (click-time only).
@@ -46,6 +47,7 @@ class _DevicePresence {
   });
   final bool hasMic;
   final bool hasCam;
+
   /// audioinput entries with empty labels (typical before permission).
   final bool unlabeledMic;
   final bool unlabeledCam;
@@ -93,7 +95,7 @@ Future<_DevicePresence> _detectDevices() async {
 
 Future<MediaPermissionStatus> queryMediaPermissions() async {
   var canQuery = false;
-  final hasDisplayCapture = html.window.navigator.mediaDevices != null;
+  final hasDisplayCapture = browserSupportsDisplayCapture;
   String micPerm = 'unknown';
   String camPerm = 'unknown';
 
@@ -102,7 +104,8 @@ Future<MediaPermissionStatus> queryMediaPermissions() async {
     if (perms != null) {
       canQuery = true;
       try {
-        micPerm = (await perms.query({'name': 'microphone'})).state ?? 'unknown';
+        micPerm =
+            (await perms.query({'name': 'microphone'})).state ?? 'unknown';
       } catch (_) {}
       try {
         camPerm = (await perms.query({'name': 'camera'})).state ?? 'unknown';
@@ -117,17 +120,13 @@ Future<MediaPermissionStatus> queryMediaPermissions() async {
   var hasMic = _micWorks == false
       ? false
       : (_micWorks == true ||
-          devices.hasMic ||
-          (_micWorks == null &&
-              devices.unlabeledMic &&
-              micPerm != 'denied'));
+            devices.hasMic ||
+            (_micWorks == null && devices.unlabeledMic && micPerm != 'denied'));
   var hasCam = _camWorks == false
       ? false
       : (_camWorks == true ||
-          devices.hasCam ||
-          (_camWorks == null &&
-              devices.unlabeledCam &&
-              camPerm != 'denied'));
+            devices.hasCam ||
+            (_camWorks == null && devices.unlabeledCam && camPerm != 'denied'));
 
   // Sticky success from a real getUserMedia counts as granted even when the
   // Permissions API is missing or still reports "unknown".
@@ -166,10 +165,7 @@ Future<MediaPermissionStatus> requestMediaPermissions({
     }
     return queryMediaPermissions();
   }
-  if (camera &&
-      !devices.hasCam &&
-      !devices.unlabeledCam &&
-      _camWorks != true) {
+  if (camera && !devices.hasCam && !devices.unlabeledCam && _camWorks != true) {
     if (_camWorks == null) _camWorks = false;
     return queryMediaPermissions();
   }

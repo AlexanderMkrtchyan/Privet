@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:audioplayers/audioplayers.dart';
@@ -14,6 +15,7 @@ import '../theme.dart';
 import '../util/ai_turn.dart';
 import '../util/app_clipboard.dart';
 import '../util/media_download.dart';
+import '../util/perf.dart';
 import '../util/web_select_cursor.dart';
 import 'compact_emoji_picker.dart';
 import 'image_lightbox.dart';
@@ -107,6 +109,7 @@ class MessageBubble extends StatelessWidget {
   final void Function(ChatMessage message, String emoji)? onReact;
   final ValueChanged<ChatMessage>? onAddToTask;
   final ValueChanged<ChatMessage>? onAskAi;
+
   /// When false, Ask AI is shown but not tappable.
   final bool aiActive;
   final ValueChanged<ChatMessage>? onEdit;
@@ -160,7 +163,8 @@ class MessageBubble extends StatelessWidget {
       final maxBubble = MediaQuery.sizeOf(context).width * 0.78;
       final payload = AiTurnPayload.tryParse(message.body);
       final onlyYou = message.aiLocal || (payload?.private ?? false);
-      final header = payload?.headerLabel ??
+      final header =
+          payload?.headerLabel ??
           (onlyYou ? 'Privet AI · only you' : 'Privet AI');
       final question = payload?.question.trim() ?? '';
       final answer = payload?.answer ?? message.body;
@@ -175,7 +179,9 @@ class MessageBubble extends StatelessWidget {
             decoration: BoxDecoration(
               color: PrivetTheme.panelElevated,
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: PrivetTheme.signal.withValues(alpha: 0.45)),
+              border: Border.all(
+                color: PrivetTheme.signal.withValues(alpha: 0.45),
+              ),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -230,11 +236,11 @@ class MessageBubble extends StatelessWidget {
                     onReply: onReply == null
                         ? null
                         : (selected) =>
-                            onReply!(message, selectedText: selected),
+                              onReply!(message, selectedText: selected),
                     onForward: onForward == null
                         ? null
                         : (selected) =>
-                            onForward!(message, selectedText: selected),
+                              onForward!(message, selectedText: selected),
                   ),
               ],
             ),
@@ -270,263 +276,265 @@ class MessageBubble extends StatelessWidget {
                   _openMenu(context, details.globalPosition);
                 },
           child: Container(
-          constraints: BoxConstraints(maxWidth: maxBubble),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: BoxDecoration(
-            color: mine ? PrivetTheme.mine : PrivetTheme.panelElevated,
-            borderRadius: BorderRadius.only(
-              topLeft: const Radius.circular(16),
-              topRight: const Radius.circular(16),
-              bottomLeft: Radius.circular(mine ? 16 : 4),
-              bottomRight: Radius.circular(mine ? 4 : 16),
+            constraints: BoxConstraints(maxWidth: maxBubble),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: mine ? PrivetTheme.mine : PrivetTheme.panelElevated,
+              borderRadius: BorderRadius.only(
+                topLeft: const Radius.circular(16),
+                topRight: const Radius.circular(16),
+                bottomLeft: Radius.circular(mine ? 16 : 4),
+                bottomRight: Radius.circular(mine ? 4 : 16),
+              ),
+              border: Border.all(
+                // Privet-P green wrap only for replies + link metadata cards.
+                color: accent
+                    ? PrivetTheme.signal.withValues(alpha: 0.75)
+                    : PrivetTheme.line,
+                width: accent ? 1.4 : 1,
+              ),
             ),
-            border: Border.all(
-              // Privet-P green wrap only for replies + link metadata cards.
-              color: accent
-                  ? PrivetTheme.signal.withValues(alpha: 0.75)
-                  : PrivetTheme.line,
-              width: accent ? 1.4 : 1,
-            ),
-          ),
-          // Hug content width. Swipe handles are Positioned strips that span the
-          // hugged bubble width (no IntrinsicWidth) — including own messages,
-          // which have no username row.
-          child: Stack(
-            children: [
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  if (showSender && !mine)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        widthFactor: 1,
-                        child: Text(
-                          message.sender.displayName.isNotEmpty
-                              ? message.sender.displayName
-                              : (message.sender.handle.isNotEmpty
-                                  ? '@${message.sender.handle}'
-                                  : ''),
-                          textAlign: TextAlign.left,
-                          style: GoogleFonts.syne(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            color: PrivetTheme.signal,
+            // Hug content width. Swipe handles are Positioned strips that span the
+            // hugged bubble width (no IntrinsicWidth) — including own messages,
+            // which have no username row.
+            child: Stack(
+              children: [
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    if (showSender && !mine)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          widthFactor: 1,
+                          child: Text(
+                            message.sender.displayName.isNotEmpty
+                                ? message.sender.displayName
+                                : (message.sender.handle.isNotEmpty
+                                      ? '@${message.sender.handle}'
+                                      : ''),
+                            textAlign: TextAlign.left,
+                            style: GoogleFonts.syne(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: PrivetTheme.signal,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                  if (message.forwardedFrom != null) ...[
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 6),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.shortcut_rounded,
-                            size: 14,
-                            color: PrivetTheme.mist.withValues(alpha: 0.9),
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            'Forwarded from ${message.forwardedFrom!.label}',
-                            style: GoogleFonts.ibmPlexSans(
-                              fontSize: 11,
-                              fontStyle: FontStyle.italic,
-                              color: PrivetTheme.mist,
+                    if (message.forwardedFrom != null) ...[
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.shortcut_rounded,
+                              size: 14,
+                              color: PrivetTheme.mist.withValues(alpha: 0.9),
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 4),
+                            Text(
+                              'Forwarded from ${message.forwardedFrom!.label}',
+                              style: GoogleFonts.ibmPlexSans(
+                                fontSize: 11,
+                                fontStyle: FontStyle.italic,
+                                color: PrivetTheme.mist,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
-                  if (message.replyTo != null) ...[
-                    _ReplyQuote(reply: message.replyTo!),
-                    const SizedBox(height: 6),
-                  ],
-                  // Body text: selection only — not covered by drag strips.
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    widthFactor: 1,
-                    child: _body(mediaBase),
-                  ),
-                  if (message.linkPreview != null) ...[
-                    const SizedBox(height: 8),
+                    ],
+                    if (message.replyTo != null) ...[
+                      _ReplyQuote(reply: message.replyTo!),
+                      const SizedBox(height: 6),
+                    ],
+                    // Body text: selection only — not covered by drag strips.
                     Align(
                       alignment: Alignment.centerLeft,
                       widthFactor: 1,
-                      child: _LinkPreviewCard(preview: message.linkPreview!),
+                      child: _body(mediaBase),
                     ),
-                  ],
-                  // Extra gap so the footer drag strip doesn't cover body text.
-                  const SizedBox(height: 8),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    widthFactor: 1,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (message.editedAt != null)
-                          Padding(
-                            padding: const EdgeInsets.only(right: 6),
-                            child: Text(
-                              'edited',
-                              style: TextStyle(
-                                color: PrivetTheme.mist
-                                    .withValues(alpha: 0.75),
-                                fontSize: 10,
-                                fontStyle: FontStyle.italic,
+                    if (message.linkPreview != null) ...[
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        widthFactor: 1,
+                        child: _LinkPreviewCard(preview: message.linkPreview!),
+                      ),
+                    ],
+                    // Extra gap above time/ticks (and mobile swipe handle strip).
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      widthFactor: 1,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (message.editedAt != null)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 6),
+                              child: Text(
+                                'edited',
+                                style: TextStyle(
+                                  color: PrivetTheme.mist.withValues(
+                                    alpha: 0.75,
+                                  ),
+                                  fontSize: 10,
+                                  fontStyle: FontStyle.italic,
+                                ),
                               ),
                             ),
+                          Text(
+                            _messageTimeFormat.format(message.createdAt),
+                            style: TextStyle(
+                              color: PrivetTheme.mist.withValues(alpha: 0.8),
+                              fontSize: 10,
+                            ),
                           ),
-                        Text(
-                          _messageTimeFormat.format(message.createdAt),
+                          if (mine) ...[
+                            const SizedBox(width: 4),
+                            GestureDetector(
+                              onTap: readByPeer && onSeenBy != null
+                                  ? () => onSeenBy!(message)
+                                  : null,
+                              child: Icon(
+                                readByPeer
+                                    ? Icons.done_all_rounded
+                                    : Icons.done_rounded,
+                                size: 14,
+                                color: readByPeer
+                                    ? PrivetTheme.signal
+                                    : PrivetTheme.mist.withValues(alpha: 0.75),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    if (mine &&
+                        seenByLabel != null &&
+                        seenByLabel!.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      GestureDetector(
+                        onTap: onSeenBy == null
+                            ? null
+                            : () => onSeenBy!(message),
+                        child: Text(
+                          seenByLabel!,
                           style: TextStyle(
-                            color: PrivetTheme.mist.withValues(alpha: 0.8),
+                            color: PrivetTheme.mist.withValues(alpha: 0.85),
                             fontSize: 10,
                           ),
                         ),
-                        if (mine) ...[
-                          const SizedBox(width: 4),
-                          GestureDetector(
-                            onTap: readByPeer && onSeenBy != null
-                                ? () => onSeenBy!(message)
-                                : null,
-                            child: Icon(
-                              readByPeer
-                                  ? Icons.done_all_rounded
-                                  : Icons.done_rounded,
-                              size: 14,
-                              color: readByPeer
-                                  ? PrivetTheme.signal
-                                  : PrivetTheme.mist
-                                      .withValues(alpha: 0.75),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                  if (mine &&
-                      seenByLabel != null &&
-                      seenByLabel!.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    GestureDetector(
-                      onTap:
-                          onSeenBy == null ? null : () => onSeenBy!(message),
-                      child: Text(
-                        seenByLabel!,
-                        style: TextStyle(
-                          color: PrivetTheme.mist.withValues(alpha: 0.85),
-                          fontSize: 10,
-                        ),
                       ),
-                    ),
+                    ],
                   ],
-                ],
-              ),
-              // Full-width header chrome for peers (username + empty space on
-              // that row). Own messages have no username — they use the footer.
-              if (showSender && !mine)
-                const Positioned(
-                  left: 0,
-                  right: 0,
-                  top: 0,
-                  height: 22,
-                  child: _SwipeReplyHandle(
-                    child: SizedBox.expand(),
+                ),
+                // Drag-to-reply handles: mobile/compact only (desktop selects text).
+                if (PrivetTheme.isCompact(context)) ...[
+                  // Full-width header chrome for peers (username + empty space on
+                  // that row). Own messages have no username — they use the footer.
+                  if (showSender && !mine)
+                    const Positioned(
+                      left: 0,
+                      right: 0,
+                      top: 0,
+                      height: 22,
+                      child: _SwipeReplyHandle(child: SizedBox.expand()),
+                    ),
+                  // Full-width footer (time / ticks) — every message, including
+                  // your own (no username shown on own bubbles).
+                  const Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    height: 18,
+                    child: _SwipeReplyHandle(child: SizedBox.expand()),
                   ),
-                ),
-              // Full-width footer (time / ticks) — every message, including
-              // your own (no username shown on own bubbles).
-              const Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                height: 18,
-                child: _SwipeReplyHandle(
-                  child: SizedBox.expand(),
-                ),
-              ),
-            ],
+                ],
+              ],
+            ),
           ),
-        ),
         ),
       ),
     );
 
     return _SwipeToReply(
       mine: mine,
-      enabled: onReply != null && !message.pending,
+      enabled: onReply != null &&
+          !message.pending &&
+          PrivetTheme.isCompact(context),
       onReply: () => onReply?.call(message),
       child: Align(
-      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: 10),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment:
-              mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-          children: [
-            bubble,
-            if (message.reactions.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Wrap(
-                  spacing: 4,
-                  runSpacing: 4,
-                  alignment:
-                      mine ? WrapAlignment.end : WrapAlignment.start,
-                  children: message.reactions.map((r) {
-                    final mineReact = r.reactedBy(selfId);
-                    return Material(
-                      color: mineReact
-                          ? PrivetTheme.signal.withValues(alpha: 0.18)
-                          : PrivetTheme.panelElevated,
-                      borderRadius: BorderRadius.circular(999),
-                      child: InkWell(
+        alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: mine
+                ? CrossAxisAlignment.end
+                : CrossAxisAlignment.start,
+            children: [
+              bubble,
+              if (message.reactions.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Wrap(
+                    spacing: 4,
+                    runSpacing: 4,
+                    alignment: mine ? WrapAlignment.end : WrapAlignment.start,
+                    children: message.reactions.map((r) {
+                      final mineReact = r.reactedBy(selfId);
+                      return Material(
+                        color: mineReact
+                            ? PrivetTheme.signal.withValues(alpha: 0.18)
+                            : PrivetTheme.panelElevated,
                         borderRadius: BorderRadius.circular(999),
-                        onTap: onReact == null
-                            ? null
-                            : () => onReact!(message, r.emoji),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 3,
-                          ),
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(999),
-                            border: Border.all(
-                              color: mineReact
-                                  ? PrivetTheme.signal.withValues(alpha: 0.55)
-                                  : PrivetTheme.line,
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(999),
+                          onTap: onReact == null
+                              ? null
+                              : () => onReact!(message, r.emoji),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(
+                                color: mineReact
+                                    ? PrivetTheme.signal.withValues(alpha: 0.55)
+                                    : PrivetTheme.line,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                PrivetEmoji(r.emoji, size: 16),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${r.count}',
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    height: 1.1,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              PrivetEmoji(r.emoji, size: 16),
-                              const SizedBox(width: 4),
-                              Text(
-                                '${r.count}',
-                                style: const TextStyle(
-                                  fontSize: 13,
-                                  height: 1.1,
-                                ),
-                              ),
-                            ],
-                          ),
                         ),
-                      ),
-                    );
-                  }).toList(),
+                      );
+                    }).toList(),
+                  ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
-      ),
       ),
     );
   }
@@ -605,9 +613,8 @@ class MessageBubble extends StatelessWidget {
                                     _ReactionChip(
                                       emoji: '+',
                                       isPlus: true,
-                                      onTap: () => setLocal(
-                                        () => showMore = !showMore,
-                                      ),
+                                      onTap: () =>
+                                          setLocal(() => showMore = !showMore),
                                     ),
                                     const Spacer(),
                                     InkWell(
@@ -651,8 +658,9 @@ class MessageBubble extends StatelessWidget {
                                         Icon(
                                           Icons.copy_rounded,
                                           size: 18,
-                                          color: PrivetTheme.signal
-                                              .withValues(alpha: 0.95),
+                                          color: PrivetTheme.signal.withValues(
+                                            alpha: 0.95,
+                                          ),
                                         ),
                                         const SizedBox(width: 10),
                                         Text(
@@ -679,8 +687,9 @@ class MessageBubble extends StatelessWidget {
                                         Icon(
                                           Icons.reply_rounded,
                                           size: 18,
-                                          color: PrivetTheme.signal
-                                              .withValues(alpha: 0.95),
+                                          color: PrivetTheme.signal.withValues(
+                                            alpha: 0.95,
+                                          ),
                                         ),
                                         const SizedBox(width: 10),
                                         Text(
@@ -737,8 +746,9 @@ class MessageBubble extends StatelessWidget {
                                           Icon(
                                             Icons.playlist_add_check_rounded,
                                             size: 18,
-                                            color: const Color(0xFF3D9CF0)
-                                                .withValues(alpha: 0.95),
+                                            color: const Color(
+                                              0xFF3D9CF0,
+                                            ).withValues(alpha: 0.95),
                                           ),
                                           const SizedBox(width: 10),
                                           Text(
@@ -995,9 +1005,12 @@ class _BigEmojiState extends State<_BigEmoji>
   @override
   Widget build(BuildContext context) {
     final size = widget.text.characters.length == 1 ? 64.0 : 48.0;
+    if (privetLowResourceEmoji) {
+      return PrivetEmoji(widget.text, size: size, animate: false);
+    }
     return ScaleTransition(
       scale: _scale,
-      child: PrivetEmoji(widget.text, size: size, repeat: true),
+      child: PrivetEmoji(widget.text, size: size),
     );
   }
 }
@@ -1134,10 +1147,10 @@ class _SingleMediaBody extends StatelessWidget {
   }
 
   Widget _captionText() => _LinkifiedText(
-        text: caption,
-        onReply: onReplySelection,
-        onForward: onForwardSelection,
-      );
+    text: caption,
+    onReply: onReplySelection,
+    onForward: onForwardSelection,
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -1169,6 +1182,10 @@ class _SingleMediaBody extends StatelessWidget {
                         _url,
                         fit: BoxFit.cover,
                         width: 260,
+                        cacheWidth: ImageDecodeCaps.cacheWidth(
+                          260,
+                          dpr: MediaQuery.devicePixelRatioOf(context),
+                        ),
                         errorBuilder: (_, error, stack) =>
                             const Text('Image unavailable'),
                       ),
@@ -1333,6 +1350,14 @@ class _AttachmentTile extends StatelessWidget {
               fit: BoxFit.cover,
               width: width,
               height: height,
+              cacheWidth: ImageDecodeCaps.cacheWidth(
+                width,
+                dpr: MediaQuery.devicePixelRatioOf(context),
+              ),
+              cacheHeight: ImageDecodeCaps.cacheHeight(
+                height,
+                dpr: MediaQuery.devicePixelRatioOf(context),
+              ),
               errorBuilder: (_, error, stack) => ColoredBox(
                 color: PrivetTheme.ink,
                 child: Center(child: Icon(Icons.broken_image_outlined)),
@@ -1355,12 +1380,19 @@ class _AttachmentTile extends StatelessWidget {
                       ),
                       if (item.fileName != null)
                         Padding(
-                          padding: const EdgeInsets.only(top: 4, left: 4, right: 4),
+                          padding: const EdgeInsets.only(
+                            top: 4,
+                            left: 4,
+                            right: 4,
+                          ),
                           child: Text(
                             item.fileName!,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: 10, color: PrivetTheme.mist),
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: PrivetTheme.mist,
+                            ),
                           ),
                         ),
                     ],
@@ -1397,8 +1429,10 @@ class _AttachmentTile extends StatelessWidget {
             padding: const EdgeInsets.all(8),
             child: Row(
               children: [
-                Icon(Icons.insert_drive_file_rounded,
-                    color: PrivetTheme.signal),
+                Icon(
+                  Icons.insert_drive_file_rounded,
+                  color: PrivetTheme.signal,
+                ),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
@@ -1516,11 +1550,7 @@ class _ReactionChip extends StatelessWidget {
             height: 32,
             child: Center(
               child: isPlus
-                  ? Icon(
-                      Icons.add_rounded,
-                      size: 20,
-                      color: PrivetTheme.mist,
-                    )
+                  ? Icon(Icons.add_rounded, size: 20, color: PrivetTheme.mist)
                   : PrivetEmoji(emoji, size: 26),
             ),
           ),
@@ -1533,6 +1563,10 @@ class _ReactionChip extends StatelessWidget {
 /// Telegram-style swipe-to-reply. Drag starts only from [_SwipeReplyHandle]
 /// regions (username / empty header chrome) — never from message body text.
 /// Others swipe right; own swipe left.
+///
+/// Drag offset lives in a [ValueNotifier] so per-frame updates only rebuild
+/// the transform/arrow layer — not the message contents underneath. That
+/// matters on Linux/GTK where full bubble rebuilds during drag starve frames.
 class _SwipeToReply extends StatefulWidget {
   const _SwipeToReply({
     required this.child,
@@ -1557,7 +1591,7 @@ class _SwipeToReply extends StatefulWidget {
 class _SwipeToReplyState extends State<_SwipeToReply> {
   static const _trigger = 56.0;
   static const _maxDrag = 84.0;
-  double _dx = 0;
+  final ValueNotifier<double> _dx = ValueNotifier(0);
   bool _dragging = false;
   bool _fired = false;
 
@@ -1574,77 +1608,79 @@ class _SwipeToReplyState extends State<_SwipeToReply> {
 
   void onDragUpdate(double deltaDx) {
     if (!_dragging) return;
-    var next = _dx + deltaDx;
-    next = widget.mine
-        ? next.clamp(-_maxDrag, 0.0)
-        : next.clamp(0.0, _maxDrag);
+    var next = _dx.value + deltaDx;
+    next = widget.mine ? next.clamp(-_maxDrag, 0.0) : next.clamp(0.0, _maxDrag);
     if (!_fired && next.abs() >= _trigger) {
       _fired = true;
       HapticFeedback.selectionClick();
     }
-    setState(() => _dx = next);
+    _dx.value = next;
   }
 
   void onDragEnd() {
     if (!_dragging) return;
-    final fire = _dx.abs() >= _trigger;
+    final fire = _dx.value.abs() >= _trigger;
     privetBubbleDragging = false;
-    setState(() {
-      _dragging = false;
-      _dx = 0;
-    });
+    _dx.value = 0;
+    setState(() => _dragging = false);
     if (fire) widget.onReply();
   }
 
   void onDragCancel() {
     if (!_dragging) return;
     privetBubbleDragging = false;
-    setState(() {
-      _dragging = false;
-      _dx = 0;
-    });
+    _dx.value = 0;
+    setState(() => _dragging = false);
   }
 
   @override
   void dispose() {
     if (_dragging) privetBubbleDragging = false;
+    _dx.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     if (!widget.enabled) return widget.child;
-    final progress = (_dx.abs() / _trigger).clamp(0.0, 1.0);
-    final arrow = Positioned.fill(
-      child: Align(
-        alignment:
-            widget.mine ? Alignment.centerRight : Alignment.centerLeft,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Opacity(
-            opacity: progress,
-            child: Transform.scale(
-              scale: 0.7 + 0.3 * progress,
-              child: Icon(
-                Icons.reply_rounded,
-                size: 22,
-                color: progress >= 1
-                    ? PrivetTheme.signal
-                    : PrivetTheme.mist,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-
     return Stack(
       children: [
-        arrow,
-        // Transform only — AnimatedContainer rebuilt/tweened every frame and
-        // made Linux scrolling feel starved for CPU.
-        Transform.translate(
-          offset: Offset(_dx, 0),
+        Positioned.fill(
+          child: ValueListenableBuilder<double>(
+            valueListenable: _dx,
+            builder: (context, dx, _) {
+              final progress = (dx.abs() / _trigger).clamp(0.0, 1.0);
+              return Align(
+                alignment: widget.mine
+                    ? Alignment.centerRight
+                    : Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Opacity(
+                    opacity: progress,
+                    child: Transform.scale(
+                      scale: 0.7 + 0.3 * progress,
+                      child: Icon(
+                        Icons.reply_rounded,
+                        size: 22,
+                        color: progress >= 1
+                            ? PrivetTheme.signal
+                            : PrivetTheme.mist,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        // ValueListenableBuilder keeps [child] stable across drag frames so
+        // the bubble tree is not rebuilt/laid out on every pointer move.
+        ValueListenableBuilder<double>(
+          valueListenable: _dx,
+          builder: (context, dx, child) {
+            return Transform.translate(offset: Offset(dx, 0), child: child);
+          },
           child: widget.child,
         ),
       ],
@@ -1655,11 +1691,9 @@ class _SwipeToReplyState extends State<_SwipeToReply> {
 /// Drag-to-reply hit target (username / empty header chrome / time row).
 /// Message body text must NOT be wrapped in this — selection stays free there.
 ///
-/// Paints a classic OS-style open hand on hover (neutral) and a squeezed fist
-/// on press/drag (accent). The hand is drawn in an [Overlay] at the **global**
-/// pointer so it stays under the cursor when the bubble translates during a
-/// swipe (local painting drifted once the bubble slid out from under the
-/// pointer).
+/// Uses the OS grab/grabbing cursor. A custom Overlay-drawn hand that
+/// followed the pointer on every move was a major Linux stutter source
+/// (global pointer route + OverlayEntry.markNeedsBuild + CustomPaint).
 class _SwipeReplyHandle extends StatefulWidget {
   const _SwipeReplyHandle({required this.child});
 
@@ -1670,166 +1704,34 @@ class _SwipeReplyHandle extends StatefulWidget {
 }
 
 class _SwipeReplyHandleState extends State<_SwipeReplyHandle> {
-  /// CSS/X11 grab hotspot — base of the fingers, not geometric center.
-  static const _hotspot = Offset(12, 8);
-  static const _handSize = Size(32, 32);
-
-  OverlayEntry? _handOverlay;
-  Offset? _global;
-  bool _hovering = false;
   bool _pressed = false;
-  int? _pointer;
-  bool _globalRouteAttached = false;
-
-  bool get _dragging =>
-      _SwipeToReply.maybeOf(context)?.dragging ?? false;
-
-  bool get _squeezing => _pressed || _dragging;
-
-  bool get _showHand =>
-      _global != null && (_hovering || _pressed || _dragging);
-
-  @override
-  void dispose() {
-    _detachGlobalRoute();
-    _removeHandOverlay();
-    super.dispose();
-  }
-
-  void _attachGlobalRoute() {
-    if (_globalRouteAttached) return;
-    GestureBinding.instance.pointerRouter.addGlobalRoute(_onGlobalPointer);
-    _globalRouteAttached = true;
-  }
-
-  void _detachGlobalRoute() {
-    if (!_globalRouteAttached) return;
-    GestureBinding.instance.pointerRouter.removeGlobalRoute(_onGlobalPointer);
-    _globalRouteAttached = false;
-  }
-
-  void _onGlobalPointer(PointerEvent event) {
-    if (event.pointer != _pointer) return;
-    if (event is PointerMoveEvent) {
-      _setGlobal(event.position);
-    } else if (event is PointerUpEvent || event is PointerCancelEvent) {
-      _pointer = null;
-      _pressed = false;
-      _detachGlobalRoute();
-      _clearHandIfIdle();
-    }
-  }
-
-  void _removeHandOverlay() {
-    _handOverlay?.remove();
-    _handOverlay = null;
-  }
-
-  void _syncHandOverlay() {
-    if (!mounted) return;
-    if (!_showHand || _global == null) {
-      _removeHandOverlay();
-      return;
-    }
-    if (_handOverlay == null) {
-      _handOverlay = OverlayEntry(
-        builder: (ctx) {
-          final g = _global;
-          if (g == null) return const SizedBox.shrink();
-          return Positioned(
-            left: g.dx - _hotspot.dx,
-            top: g.dy - _hotspot.dy,
-            width: _handSize.width,
-            height: _handSize.height,
-            child: IgnorePointer(
-              child: _AccentGrabHand(squeezing: _squeezing),
-            ),
-          );
-        },
-      );
-      final overlay = Overlay.maybeOf(context, rootOverlay: true);
-      if (overlay == null) return;
-      overlay.insert(_handOverlay!);
-    } else {
-      _handOverlay!.markNeedsBuild();
-    }
-  }
-
-  void _setGlobal(Offset global) {
-    final prev = _global;
-    if (prev != null && (prev - global).distance < 0.4) return;
-    _global = global;
-    _syncHandOverlay();
-  }
-
-  void _clearHandIfIdle() {
-    if (_hovering || _pressed || _dragging) {
-      _syncHandOverlay();
-      return;
-    }
-    _global = null;
-    _removeHandOverlay();
-  }
 
   @override
   Widget build(BuildContext context) {
     final swipe = _SwipeToReply.maybeOf(context);
     if (swipe == null || !swipe.widget.enabled) {
-      _detachGlobalRoute();
-      _removeHandOverlay();
       return widget.child;
     }
 
+    final grabbing = _pressed || swipe.dragging;
     return MouseRegion(
-      cursor: SystemMouseCursors.none,
-      onEnter: (event) {
-        _hovering = true;
-        _setGlobal(event.position);
-      },
-      onExit: (_) {
-        _hovering = false;
-        // Keep the hand while pressed/dragging — bubble translation often
-        // exits the header hit target mid-swipe (the "header glitch").
-        _clearHandIfIdle();
-      },
-      onHover: (event) => _setGlobal(event.position),
-      child: Listener(
+      cursor: grabbing ? SystemMouseCursors.grabbing : SystemMouseCursors.grab,
+      child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onPointerDown: (event) {
-          if (event.buttons != kPrimaryMouseButton) return;
-          _pointer = event.pointer;
-          _pressed = true;
-          _attachGlobalRoute();
-          _setGlobal(event.position);
+        onHorizontalDragStart: (_) {
+          setState(() => _pressed = true);
+          swipe.onDragStart();
         },
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onHorizontalDragStart: (details) {
-            swipe.onDragStart();
-            _setGlobal(details.globalPosition);
-            // Parent setState — refresh fist color in overlay.
-            _handOverlay?.markNeedsBuild();
-          },
-          onHorizontalDragUpdate: (d) {
-            swipe.onDragUpdate(d.delta.dx);
-            _setGlobal(d.globalPosition);
-          },
-          onHorizontalDragEnd: (_) {
-            swipe.onDragEnd();
-            _pressed = false;
-            _pointer = null;
-            _detachGlobalRoute();
-            _clearHandIfIdle();
-          },
-          onHorizontalDragCancel: () {
-            swipe.onDragCancel();
-            _pressed = false;
-            _pointer = null;
-            _detachGlobalRoute();
-            _clearHandIfIdle();
-          },
-          child: widget.child,
-        ),
+        onHorizontalDragUpdate: (d) => swipe.onDragUpdate(d.delta.dx),
+        onHorizontalDragEnd: (_) {
+          setState(() => _pressed = false);
+          swipe.onDragEnd();
+        },
+        onHorizontalDragCancel: () {
+          setState(() => _pressed = false);
+          swipe.onDragCancel();
+        },
+        child: widget.child,
       ),
     );
   }
@@ -1850,9 +1752,7 @@ class _ReplyQuote extends StatelessWidget {
       decoration: BoxDecoration(
         color: PrivetTheme.ink.withValues(alpha: 0.35),
         borderRadius: BorderRadius.circular(10),
-        border: Border(
-          left: BorderSide(color: PrivetTheme.signal, width: 3),
-        ),
+        border: Border(left: BorderSide(color: PrivetTheme.signal, width: 3)),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1895,11 +1795,7 @@ Future<void> _openExternal(String url) async {
 }
 
 class _LinkifiedText extends StatefulWidget {
-  const _LinkifiedText({
-    required this.text,
-    this.onReply,
-    this.onForward,
-  });
+  const _LinkifiedText({required this.text, this.onReply, this.onForward});
 
   final String text;
   final ValueChanged<String>? onReply;
@@ -1938,6 +1834,7 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
   ScrollHoldController? _webScrollHold;
   bool _hovering = false;
   bool _webPainterHover = false;
+
   /// Native accent I-beam in an overlay — never setState on pointer move.
   OverlayEntry? _ibeamOverlay;
   Offset? _ibeamGlobal;
@@ -2090,8 +1987,10 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     final origin = box.localToGlobal(Offset.zero);
     final size = MediaQuery.sizeOf(context);
     const barWidth = 228.0;
-    final left = (origin.dx + box.size.width / 2 - barWidth / 2)
-        .clamp(8.0, size.width - barWidth - 8);
+    final left = (origin.dx + box.size.width / 2 - barWidth / 2).clamp(
+      8.0,
+      size.width - barWidth - 8,
+    );
     final top = (origin.dy - 44).clamp(8.0, size.height - 52.0);
 
     _claimSelectionDismiss();
@@ -2128,10 +2027,10 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
   }
 
   static TextStyle _baseStyleFor({required bool hovering}) => TextStyle(
-        height: 1.35,
-        fontSize: 15,
-        color: hovering ? PrivetTheme.signal : PrivetTheme.paper,
-      );
+    height: 1.35,
+    fontSize: 15,
+    color: hovering ? PrivetTheme.signal : PrivetTheme.paper,
+  );
 
   TextSpan _spanFor(
     String text, {
@@ -2232,7 +2131,10 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
       local.dx.clamp(0.0, painter.width),
       local.dy.clamp(0.0, painter.height),
     );
-    return painter.getPositionForOffset(pos).offset.clamp(0, widget.text.length);
+    return painter
+        .getPositionForOffset(pos)
+        .offset
+        .clamp(0, widget.text.length);
   }
 
   void _setWebSelection(TextSelection next) {
@@ -2265,11 +2167,13 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     }
   }
 
-  Widget _buildWebBody() {
+  Widget _buildWebBody({required bool selectable}) {
     // Hug content: layout at bubble max without LayoutBuilder (IntrinsicWidth
     // used to need that; Column hug no longer does, but this stays cheap).
-    final maxW =
-        (MediaQuery.sizeOf(context).width * 0.68 - 24).clamp(64.0, 10000.0);
+    final maxW = (MediaQuery.sizeOf(context).width * 0.68 - 24).clamp(
+      64.0,
+      10000.0,
+    );
     // Never rebuild glyphs for hover tint — that relayout felt like low CPU on
     // Linux. Accent is on the I-beam / web CSS cursor only.
     _ensureWebPainter(maxW, hovering: false);
@@ -2277,20 +2181,26 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     final size = Size(painter.width, painter.height);
 
     return MouseRegion(
-      cursor: privetBubbleDragging
+      cursor: !selectable
+          ? SystemMouseCursors.basic
+          : privetBubbleDragging
           ? MouseCursor.defer
           : (kIsWeb ? SystemMouseCursors.text : SystemMouseCursors.none),
-      onEnter: (event) {
-        setPrivetMessageSelectHover(true);
-        _hovering = true;
-        if (!kIsWeb) _setIBeamGlobal(event.position);
-      },
-      onExit: (_) {
-        setPrivetMessageSelectHover(false);
-        _hovering = false;
-        _removeIBeamOverlay();
-      },
-      onHover: kIsWeb
+      onEnter: selectable
+          ? (event) {
+              setPrivetMessageSelectHover(true);
+              _hovering = true;
+              if (!kIsWeb) _setIBeamGlobal(event.position);
+            }
+          : null,
+      onExit: selectable
+          ? (_) {
+              setPrivetMessageSelectHover(false);
+              _hovering = false;
+              _removeIBeamOverlay();
+            }
+          : null,
+      onHover: !selectable || kIsWeb
           ? null
           : (event) {
               if (_webSelectMoved || privetBubbleDragging) {
@@ -2323,6 +2233,10 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
             _webMultiTapSelect = false;
             privetMessageSelectionDragging = false;
             _removeToolbar();
+
+            // Mobile: tap only (links / long-press menu). No drag-select.
+            if (!selectable) return;
+
             _syncIBeamOverlay();
 
             _updateWebTapCount(event.localPosition);
@@ -2337,11 +2251,13 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
 
             if (event.kind == PointerDeviceKind.mouse) {
               _releaseWebScrollHold();
-              _webScrollHold =
-                  Scrollable.maybeOf(context)?.position.hold(() {});
+              _webScrollHold = Scrollable.maybeOf(
+                context,
+              )?.position.hold(() {});
             }
           },
           onPointerMove: (event) {
+            if (!selectable) return;
             if (_webSelectPointer != event.pointer) return;
             if (_blockToolbarForSecondary) return;
             final origin = _webSelectOrigin;
@@ -2358,18 +2274,36 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
 
             final extent = _webOffsetAt(event.localPosition);
             _setWebSelection(
-              TextSelection(
-                baseOffset: _webSelectBase,
-                extentOffset: extent,
-              ),
+              TextSelection(baseOffset: _webSelectBase, extentOffset: extent),
             );
           },
           onPointerUp: (event) {
             if (_webSelectPointer != event.pointer) return;
+            if (!selectable) {
+              _webSelectPointer = null;
+              final origin = _webSelectOrigin;
+              _webSelectOrigin = null;
+              if (_blockToolbarForSecondary) {
+                _blockToolbarForSecondary = false;
+                return;
+              }
+              // Tap (no drag): open link under finger when present.
+              if (origin != null &&
+                  (event.localPosition - origin).distance < kTouchSlop) {
+                _openLinkAt(event.localPosition);
+              }
+              return;
+            }
             _finishWebPointer(event.localPosition);
           },
           onPointerCancel: (event) {
             if (_webSelectPointer != event.pointer) return;
+            if (!selectable) {
+              _webSelectPointer = null;
+              _webSelectOrigin = null;
+              _blockToolbarForSecondary = false;
+              return;
+            }
             _finishWebPointer(null);
           },
           child: CustomPaint(
@@ -2441,10 +2375,10 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
 
   @override
   Widget build(BuildContext context) {
-    // Custom TextPainter selection (green rounded highlight) on all platforms.
-    // SelectableText on Linux paints a stock system selection that hides under
-    // the hover tint and does not match the web look.
-    return _buildWebBody();
+    // Desktop / wide web: custom TextPainter selection (green highlight).
+    // Mobile / compact: tap only — long-press opens the reaction menu; no
+    // drag-select (matches typical mobile messengers).
+    return _buildWebBody(selectable: !PrivetTheme.isCompact(context));
   }
 }
 
@@ -2490,129 +2424,6 @@ class _AccentIBeamPainter extends CustomPainter {
       oldDelegate.color != color;
 }
 
-/// Classic OS-style grab / grabbing hand (CSS/X11 shape), not a custom blob.
-/// Hover uses a neutral fill; press/drag uses the user accent.
-class _AccentGrabHand extends StatelessWidget {
-  const _AccentGrabHand({required this.squeezing});
-
-  final bool squeezing;
-
-  @override
-  Widget build(BuildContext context) {
-    return CustomPaint(
-      size: const Size(32, 32),
-      painter: _AccentGrabHandPainter(
-        fill: squeezing ? PrivetTheme.signal : const Color(0xFFF5F5F5),
-        // OS grab cursors use a dark outline on any fill.
-        outline: const Color(0xFF1A1A1A),
-        squeezing: squeezing,
-      ),
-    );
-  }
-}
-
-class _AccentGrabHandPainter extends CustomPainter {
-  _AccentGrabHandPainter({
-    required this.fill,
-    required this.outline,
-    required this.squeezing,
-  });
-
-  final Color fill;
-  final Color outline;
-  final bool squeezing;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final path = squeezing ? _grabbingPath() : _grabPath();
-    final fillPaint = Paint()
-      ..color = fill
-      ..style = PaintingStyle.fill
-      ..isAntiAlias = true;
-    final strokePaint = Paint()
-      ..color = outline
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.4
-      ..strokeJoin = StrokeJoin.round
-      ..strokeCap = StrokeCap.round
-      ..isAntiAlias = true;
-    canvas.drawPath(path, fillPaint);
-    canvas.drawPath(path, strokePaint);
-  }
-
-  /// Open hand — approximate standard CSS `cursor: grab` silhouette.
-  Path _grabPath() {
-    final p = Path();
-    // Palm
-    p.moveTo(10, 14);
-    p.lineTo(10, 24);
-    p.quadraticBezierTo(10, 28, 15, 28);
-    p.lineTo(22, 28);
-    p.quadraticBezierTo(26, 28, 26, 23);
-    p.lineTo(26, 16);
-    // Pinky
-    p.lineTo(26, 11);
-    p.quadraticBezierTo(26, 8.5, 24.2, 8.5);
-    p.quadraticBezierTo(22.5, 8.5, 22.5, 11);
-    p.lineTo(22.5, 14);
-    // Ring
-    p.lineTo(22.5, 8);
-    p.quadraticBezierTo(22.5, 5.5, 20.7, 5.5);
-    p.quadraticBezierTo(19, 5.5, 19, 8);
-    p.lineTo(19, 14);
-    // Middle
-    p.lineTo(19, 6.5);
-    p.quadraticBezierTo(19, 4, 17.2, 4);
-    p.quadraticBezierTo(15.5, 4, 15.5, 6.5);
-    p.lineTo(15.5, 14);
-    // Index
-    p.lineTo(15.5, 7.5);
-    p.quadraticBezierTo(15.5, 5, 13.7, 5);
-    p.quadraticBezierTo(12, 5, 12, 7.5);
-    p.lineTo(12, 14);
-    // Thumb
-    p.lineTo(12, 16);
-    p.quadraticBezierTo(12, 12, 8, 11);
-    p.quadraticBezierTo(5.5, 10.5, 5.5, 13);
-    p.quadraticBezierTo(5.5, 15, 8.5, 16.5);
-    p.lineTo(10, 17.5);
-    p.close();
-    return p;
-  }
-
-  /// Closed fist — approximate standard CSS `cursor: grabbing`.
-  Path _grabbingPath() {
-    final p = Path();
-    p.moveTo(9, 16);
-    p.quadraticBezierTo(8, 12.5, 11, 11);
-    // Knuckle line
-    p.lineTo(12.5, 10);
-    p.quadraticBezierTo(13, 8.2, 14.8, 8.2);
-    p.quadraticBezierTo(16.2, 8.2, 16.5, 10);
-    p.quadraticBezierTo(17, 7.5, 19, 7.5);
-    p.quadraticBezierTo(20.8, 7.5, 21, 10);
-    p.quadraticBezierTo(21.5, 8, 23.5, 8.2);
-    p.quadraticBezierTo(25.2, 8.5, 25, 11);
-    p.lineTo(25, 18);
-    p.quadraticBezierTo(25, 24, 19.5, 25.5);
-    p.lineTo(13, 25.5);
-    p.quadraticBezierTo(9, 25, 9, 20);
-    p.close();
-    // Thumb tuck
-    p.moveTo(9, 17);
-    p.quadraticBezierTo(6.5, 16, 6.2, 18.2);
-    p.quadraticBezierTo(6, 20.5, 9, 21);
-    p.close();
-    return p;
-  }
-
-  @override
-  bool shouldRepaint(covariant _AccentGrabHandPainter oldDelegate) =>
-      oldDelegate.fill != fill ||
-      oldDelegate.outline != outline ||
-      oldDelegate.squeezing != squeezing;
-}
-
 class _WebSelRepaint extends ChangeNotifier {
   void tick() => notifyListeners();
 }
@@ -2632,8 +2443,7 @@ class _WebMessageTextPainter extends CustomPainter {
     final selection = getSelection();
     if (selection.isValid && !selection.isCollapsed) {
       final boxes = textPainter.getBoxesForSelection(selection);
-      final paint = Paint()
-        ..color = PrivetTheme.signal.withValues(alpha: 0.45);
+      final paint = Paint()..color = PrivetTheme.signal.withValues(alpha: 0.45);
       for (final box in boxes) {
         canvas.drawRRect(
           RRect.fromRectAndRadius(box.toRect(), const Radius.circular(2)),
@@ -2704,11 +2514,7 @@ class _MessageSelectionBar extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            action(
-              icon: Icons.copy_rounded,
-              label: 'Copy',
-              onTap: onCopy,
-            ),
+            action(icon: Icons.copy_rounded, label: 'Copy', onTap: onCopy),
             if (onReply != null)
               action(
                 icon: Icons.reply_rounded,
@@ -2735,10 +2541,8 @@ class _LinkPreviewCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final host = Uri.tryParse(preview.url)?.host.replaceFirst(
-          RegExp(r'^www\.'),
-          '',
-        ) ??
+    final host =
+        Uri.tryParse(preview.url)?.host.replaceFirst(RegExp(r'^www\.'), '') ??
         preview.siteName;
     final title = (preview.title?.trim().isNotEmpty ?? false)
         ? preview.title!.trim()
@@ -2752,9 +2556,7 @@ class _LinkPreviewCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: PrivetTheme.ink.withValues(alpha: 0.45),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: PrivetTheme.signal.withValues(alpha: 0.55),
-        ),
+        border: Border.all(color: PrivetTheme.signal.withValues(alpha: 0.55)),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -2770,8 +2572,15 @@ class _LinkPreviewCard extends StatelessWidget {
                 child: Image.network(
                   preview.image!,
                   fit: BoxFit.cover,
-                  errorBuilder: (_, error, stack) =>
-                      const SizedBox.shrink(),
+                  cacheWidth: ImageDecodeCaps.cacheWidth(
+                    260,
+                    dpr: MediaQuery.devicePixelRatioOf(context),
+                  ),
+                  cacheHeight: ImageDecodeCaps.cacheHeight(
+                    136,
+                    dpr: MediaQuery.devicePixelRatioOf(context),
+                  ),
+                  errorBuilder: (_, error, stack) => const SizedBox.shrink(),
                 ),
               ),
             ),
@@ -2839,10 +2648,12 @@ class VoicePlayer extends StatefulWidget {
 
 class _VoicePlayerState extends State<VoicePlayer> {
   final _player = AudioPlayer();
+  StreamSubscription? _completeSub;
   bool _playing = false;
 
   @override
   void dispose() {
+    _completeSub?.cancel();
     _player.dispose();
     super.dispose();
   }
@@ -2855,7 +2666,8 @@ class _VoicePlayerState extends State<VoicePlayer> {
     }
     await _player.play(UrlSource(widget.url));
     setState(() => _playing = true);
-    _player.onPlayerComplete.listen((_) {
+    await _completeSub?.cancel();
+    _completeSub = _player.onPlayerComplete.listen((_) {
       if (mounted) setState(() => _playing = false);
     });
   }

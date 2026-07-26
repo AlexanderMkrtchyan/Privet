@@ -6,6 +6,7 @@ import '../models.dart';
 import '../state.dart';
 import '../theme.dart';
 import '../util/clipboard_files.dart';
+import '../util/perf.dart';
 import 'web_attach_button.dart';
 
 /// Compact header control: green "Task done" or a live 3/7 progress bar.
@@ -658,6 +659,14 @@ class _TaskRowState extends State<_TaskRow> {
                                 width: 52,
                                 height: 52,
                                 fit: BoxFit.cover,
+                                cacheWidth: ImageDecodeCaps.cacheWidth(
+                                  52,
+                                  dpr: MediaQuery.devicePixelRatioOf(context),
+                                ),
+                                cacheHeight: ImageDecodeCaps.cacheHeight(
+                                  52,
+                                  dpr: MediaQuery.devicePixelRatioOf(context),
+                                ),
                                 errorBuilder: (_, __, ___) =>
                                     _fileThumb(item.fileName),
                               )

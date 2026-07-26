@@ -31,11 +31,17 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void initState() {
     super.initState();
+    widget.state.addListener(_onState);
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoJoin());
+  }
+
+  void _onState() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    widget.state.removeListener(_onState);
     _handleDebounce?.cancel();
     _handle.dispose();
     _displayName.dispose();

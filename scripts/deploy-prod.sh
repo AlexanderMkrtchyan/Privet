@@ -55,6 +55,18 @@ import re, shutil
 stamp = "$STAMP"
 root = Path("$ROOT/server/public")
 
+# Ensure custom PWA assets survive Flutter publish (also copied from app/web/).
+src_web = Path("$ROOT/app/web")
+for name in ("sw.js", "pwa-install.js", "manifest.json"):
+    src = src_web / name
+    if src.is_file():
+        shutil.copy2(src, root / name)
+
+# Stamp service worker cache version.
+sw = root / "sw.js"
+if sw.is_file():
+    sw.write_text(sw.read_text().replace("__PRIVET_BUILD__", stamp))
+
 # The freshly built Flutter shell lands at public/index.html — relocate it to
 # /app/ so the marketing landing page can own the site root.
 shell = (root / "index.html").read_text()
@@ -63,6 +75,19 @@ shell = re.sub(
     f"flutter_bootstrap.js?v={stamp}",
     shell,
     count=1,
+)
+# Prefer absolute PWA asset URLs after relocate under /app/.
+shell = shell.replace('href="manifest.json"', 'href="/manifest.json"')
+shell = shell.replace("href='manifest.json'", "href='/manifest.json'")
+shell = re.sub(
+    r'src="pwa-install\.js"',
+    'src="/pwa-install.js"',
+    shell,
+)
+shell = re.sub(
+    r"src='pwa-install\.js'",
+    "src='/pwa-install.js'",
+    shell,
 )
 app_dir = root / "app"
 app_dir.mkdir(exist_ok=True)

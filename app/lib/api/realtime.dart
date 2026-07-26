@@ -187,9 +187,64 @@ class RealtimeClient {
   void sendShareStarted({
     required String callId,
     required String toUserId,
+    bool controllable = false,
+    String controlPlatform = '',
+    String controlBackend = '',
+    String controlDetail = '',
   }) {
     send({
       'type': 'call.share_started',
+      'callId': callId,
+      'toUserId': toUserId,
+      'controllable': controllable,
+      if (controlPlatform.isNotEmpty) 'controlPlatform': controlPlatform,
+      if (controlBackend.isNotEmpty) 'controlBackend': controlBackend,
+      if (controlDetail.isNotEmpty) 'controlDetail': controlDetail,
+    });
+  }
+
+  void requestControl({
+    required String callId,
+    required String toUserId,
+  }) {
+    send({
+      'type': 'call.control_request',
+      'callId': callId,
+      'toUserId': toUserId,
+    });
+  }
+
+  void grantControl({
+    required String callId,
+    required String toUserId,
+  }) {
+    send({
+      'type': 'call.control_grant',
+      'callId': callId,
+      'toUserId': toUserId,
+    });
+  }
+
+  void denyControl({
+    required String callId,
+    required String toUserId,
+    String? reason,
+  }) {
+    final trimmed = reason?.trim();
+    send({
+      'type': 'call.control_deny',
+      'callId': callId,
+      'toUserId': toUserId,
+      if (trimmed != null && trimmed.isNotEmpty) 'reason': trimmed,
+    });
+  }
+
+  void revokeControl({
+    required String callId,
+    required String toUserId,
+  }) {
+    send({
+      'type': 'call.control_revoke',
       'callId': callId,
       'toUserId': toUserId,
     });

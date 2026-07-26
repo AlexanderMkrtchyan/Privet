@@ -93,6 +93,12 @@ class PrivetTheme {
   static PrivetPalette _active = _buildDark(defaultAccent);
   static PrivetPalette get palette => _active;
 
+  /// Cached [ThemeData] keyed by brightness + accent — rebuilding Google Fonts
+  /// text themes on every root frame was a measurable low-end cost.
+  static ThemeData? _cachedTheme;
+  static Brightness? _cachedBrightness;
+  static int? _cachedAccent;
+
   // Runtime color getters (kept as the historical names used across the app).
   static Color get ink => _active.ink;
   static Color get panel => _active.panel;
@@ -125,9 +131,21 @@ class PrivetTheme {
 
   /// Recompute the active palette. Call this before building [MaterialApp].
   static void apply({required Brightness brightness, required Color accent}) {
-    _active = brightness == Brightness.light
+    final next = brightness == Brightness.light
         ? _buildLight(accent)
         : _buildDark(accent);
+    final accentKey = accent.toARGB32();
+    if (_cachedBrightness == brightness &&
+        _cachedAccent == accentKey &&
+        _active.signal == next.signal) {
+      _active = next;
+      syncPrivetAccentCursors(_active.signal);
+      return;
+    }
+    _active = next;
+    _cachedTheme = null;
+    _cachedBrightness = brightness;
+    _cachedAccent = accentKey;
     // Keep web painted I-beam / move cursors on the live accent.
     syncPrivetAccentCursors(_active.signal);
   }
@@ -178,6 +196,8 @@ class PrivetTheme {
 
   /// Builds the [ThemeData] for the currently active palette.
   static ThemeData themeData() {
+    final cached = _cachedTheme;
+    if (cached != null) return cached;
     final p = _active;
     final base = ThemeData(
       useMaterial3: true,
@@ -205,7 +225,7 @@ class PrivetTheme {
       displayColor: p.paper,
     );
 
-    return base.copyWith(
+    final theme = base.copyWith(
       textTheme: body.copyWith(
         displayLarge: display.displayLarge?.copyWith(fontWeight: FontWeight.w700),
         displayMedium: display.displayMedium?.copyWith(fontWeight: FontWeight.w700),
@@ -279,6 +299,8 @@ class PrivetTheme {
       ),
       dividerColor: p.line,
     );
+    _cachedTheme = theme;
+    return theme;
   }
 
   /// Pointer on enabled buttons; default arrow when disabled.

@@ -1,1 +1,3 @@
 void bootstrapWebPlatform() {}
+
+void dismissSoftKeyboard() {}

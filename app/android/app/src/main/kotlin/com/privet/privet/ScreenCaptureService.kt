@@ -1,0 +1,71 @@
+package com.privet.privet
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.os.IBinder
+import androidx.core.app.ContextCompat
+
+class ScreenCaptureService : Service() {
+    companion object {
+        private const val CHANNEL_ID = "privet_screen_capture"
+        private const val NOTIFICATION_ID = 2407
+
+        fun start(context: Context) {
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, ScreenCaptureService::class.java),
+            )
+        }
+
+        fun stop(context: Context) {
+            context.stopService(Intent(context, ScreenCaptureService::class.java))
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        val manager = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    CHANNEL_ID,
+                    "Screen sharing",
+                    NotificationManager.IMPORTANCE_LOW,
+                ),
+            )
+        }
+
+        val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+            .setContentTitle("Privet is sharing your screen")
+            .setContentText("Return to Privet to stop sharing")
+            .setSmallIcon(applicationInfo.icon)
+            .setOngoing(true)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int =
+        START_NOT_STICKY
+
+    override fun onBind(intent: Intent?): IBinder? = null
+}

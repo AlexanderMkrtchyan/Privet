@@ -1,5 +1,6 @@
 // ignore_for_file: avoid_web_libraries_in_flutter, deprecated_member_use
 
+import 'dart:async';
 import 'dart:html' as html;
 
 import 'app_clipboard.dart';
@@ -53,6 +54,57 @@ flt-semantics[role="button"][aria-disabled="true"] {
   // Shared attach <input type="file"> — must exist before first paint so the
   // paperclip overlay can position a real, gesture-safe control.
   ensureAttachFileInput();
+  _installVisualViewportSync();
+}
+
+/// Blur focused composer / IME host and pin the visual viewport so iOS/Android
+/// PWAs do not leave a white keyboard-sized gap after dismiss.
+void dismissSoftKeyboard() {
+  try {
+    html.document.activeElement?.blur();
+  } catch (_) {}
+  _syncVisualViewport();
+  html.window.scrollTo(0, 0);
+  // Second pass after the browser finishes collapsing the keyboard.
+  Future<void>.delayed(const Duration(milliseconds: 50), () {
+    _syncVisualViewport();
+    html.window.scrollTo(0, 0);
+  });
+  Future<void>.delayed(const Duration(milliseconds: 280), () {
+    _syncVisualViewport();
+    html.window.scrollTo(0, 0);
+  });
+}
+
+void _syncVisualViewport() {
+  final vv = html.window.visualViewport;
+  final h = vv?.height ?? html.window.innerHeight?.toDouble() ?? 0;
+  final w = vv?.width ?? html.window.innerWidth?.toDouble() ?? 0;
+  if (h <= 0) return;
+  final root = html.document.documentElement;
+  root?.style.setProperty('--privet-vvh', '${h}px');
+  if (w > 0) root?.style.setProperty('--privet-vvw', '${w}px');
+  html.document.body?.style.height = '${h}px';
+  root?.style.height = '${h}px';
+}
+
+void _installVisualViewportSync() {
+  void sync([_]) => _syncVisualViewport();
+  sync();
+  html.window.onResize.listen(sync);
+  final vv = html.window.visualViewport;
+  if (vv != null) {
+    vv.onResize.listen(sync);
+    vv.onScroll.listen((_) {
+      // Keyboard open can offset the visual viewport; keep the page pinned.
+      html.window.scrollTo(0, 0);
+      sync();
+    });
+  }
+  html.document.addEventListener('focusout', (_) {
+    Future<void>.delayed(const Duration(milliseconds: 50), sync);
+    Future<void>.delayed(const Duration(milliseconds: 300), sync);
+  });
 }
 
 void _mirrorDomClipboard() {

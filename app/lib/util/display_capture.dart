@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'browser_kind.dart';
@@ -7,6 +8,8 @@ import 'display_capture_focus.dart';
 import 'display_share_surface.dart';
 
 export 'display_share_surface.dart';
+
+const _screenCaptureChannel = MethodChannel('privet/screen_capture');
 
 /// Capture a display surface.
 ///
@@ -29,6 +32,21 @@ Future<MediaStream> captureDisplayMedia({
 }) async {
   if (WebRTC.platformIsDesktop) {
     return _captureDesktop(prefer: prefer, sourceId: sourceId);
+  }
+
+  if (WebRTC.platformIsAndroid) {
+    return _captureAndroid();
+  }
+
+  // Never let flutter_webrtc's web fallback turn "share screen" into camera.
+  // When getDisplayMedia is missing (notably iOS/Android PWA browsers), the
+  // package calls getUserMedia with a non-standard mediaSource constraint.
+  // Mobile Chromium/WebKit may ignore it and return the front camera.
+  if (!browserSupportsDisplayCapture) {
+    throw StateError(
+      'Screen sharing is not supported by this mobile browser. '
+      'You can still watch a screen shared from the desktop or Android app.',
+    );
   }
 
   // Firefox: one plain capture. Chromium-only constraints (displaySurface,
@@ -64,9 +82,7 @@ Future<MediaStream> captureDisplayMedia({
     {'video': true},
     {'video': true, 'audio': false},
     {
-      'video': {
-        'cursor': 'always',
-      },
+      'video': {'cursor': 'always'},
     },
     <String, dynamic>{},
   ];
@@ -90,6 +106,40 @@ Future<MediaStream> captureDisplayMedia({
   }
 
   throw StateError(_friendlyDisplayError(last));
+}
+
+/// Android requires a media-projection foreground service before the app is
+/// backgrounded, otherwise switching to the shared app freezes the capture.
+Future<MediaStream> _captureAndroid() async {
+  var serviceStarted = false;
+  try {
+    final granted = await Helper.requestCapturePermission();
+    if (!granted) throw StateError('Screen share cancelled.');
+    await _screenCaptureChannel.invokeMethod<void>('start');
+    serviceStarted = true;
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    final stream = await navigator.mediaDevices.getDisplayMedia({
+      'video': true,
+      'audio': false,
+    });
+    await stripDisplayAudioTracks(stream);
+    return stream;
+  } catch (e) {
+    if (serviceStarted) {
+      await stopDisplayCaptureService();
+    }
+    if (e is StateError) rethrow;
+    if (_isUserCancel(e)) throw StateError('Screen share cancelled.');
+    throw StateError(_friendlyDisplayError(e));
+  }
+}
+
+/// Release Android's foreground screen-capture notification/service.
+Future<void> stopDisplayCaptureService() async {
+  if (!WebRTC.platformIsAndroid) return;
+  try {
+    await _screenCaptureChannel.invokeMethod<void>('stop');
+  } catch (_) {}
 }
 
 /// Native desktop: list sources via DesktopCapturer, then capture by id.
@@ -160,26 +210,17 @@ Map<String, dynamic> _constraintsFor(DisplayShareSurface prefer) {
   switch (prefer) {
     case DisplayShareSurface.monitor:
       return {
-        'video': {
-          'displaySurface': 'monitor',
-          'cursor': 'always',
-        },
+        'video': {'displaySurface': 'monitor', 'cursor': 'always'},
         'audio': false,
       };
     case DisplayShareSurface.window:
       return {
-        'video': {
-          'displaySurface': 'window',
-          'cursor': 'always',
-        },
+        'video': {'displaySurface': 'window', 'cursor': 'always'},
         'audio': false,
       };
     case DisplayShareSurface.browser:
       return {
-        'video': {
-          'displaySurface': 'browser',
-          'cursor': 'always',
-        },
+        'video': {'displaySurface': 'browser', 'cursor': 'always'},
         'audio': false,
         // Include this tab among options; do not force "current tab only".
         'selfBrowserSurface': 'include',

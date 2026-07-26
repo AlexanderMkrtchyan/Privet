@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import '../models.dart';
 import '../theme.dart';
 import '../util/media_download.dart';
+import '../util/perf.dart';
 import 'image_lightbox.dart';
 import 'inline_video_player.dart';
 
@@ -264,6 +265,14 @@ class _PhotosGrid extends StatelessWidget {
                 Image.network(
                   url,
                   fit: BoxFit.cover,
+                  cacheWidth: ImageDecodeCaps.cacheWidth(
+                    180,
+                    dpr: MediaQuery.devicePixelRatioOf(context),
+                  ),
+                  cacheHeight: ImageDecodeCaps.cacheHeight(
+                    180,
+                    dpr: MediaQuery.devicePixelRatioOf(context),
+                  ),
                   errorBuilder: (context, error, stackTrace) => Center(
                     child: Icon(
                       Icons.broken_image_outlined,

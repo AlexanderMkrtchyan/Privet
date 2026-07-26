@@ -5,10 +5,12 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../models.dart';
+import '../remote_control/protocol.dart';
 import '../state.dart';
 import '../theme.dart';
 import '../util/web_select_cursor.dart';
 import '../widgets/avatar.dart';
+import '../widgets/remote_control_layer.dart';
 import '../widgets/screen_share_picker.dart';
 
 /// Human label for the current call transport.
@@ -74,9 +76,11 @@ class _DraggableMiniCallBarState extends State<_DraggableMiniCallBar> {
   Offset? _dragOrigin;
   Offset? _positionOrigin;
   Size? _sizeOrigin;
+  Offset? _localOffset;
+  Size? _localSize;
 
   Offset _defaultOffset(Size screen) {
-    final size = widget.state.miniCallSize;
+    final size = _localSize ?? widget.state.miniCallSize;
     return Offset(
       (screen.width - size.width - 16).clamp(8.0, screen.width - size.width),
       (screen.height - size.height - 16).clamp(8.0, screen.height - size.height),
@@ -84,11 +88,18 @@ class _DraggableMiniCallBarState extends State<_DraggableMiniCallBar> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    _localOffset = widget.state.miniCallOffset;
+    _localSize = widget.state.miniCallSize;
+  }
+
+  @override
   Widget build(BuildContext context) {
     final screen = MediaQuery.sizeOf(context);
     final compact = PrivetTheme.isCompact(context);
-    final size = widget.state.miniCallSize;
-    final offset = widget.state.miniCallOffset ?? _defaultOffset(screen);
+    final size = _localSize ?? widget.state.miniCallSize;
+    final offset = _localOffset ?? widget.state.miniCallOffset ?? _defaultOffset(screen);
 
     if (compact) {
       return Positioned(
@@ -131,11 +142,12 @@ class _DraggableMiniCallBarState extends State<_DraggableMiniCallBar> {
                 (pos.dx + delta.dx).clamp(0.0, screen.width - size.width),
                 (pos.dy + delta.dy).clamp(0.0, screen.height - size.height),
               );
-              widget.state.setMiniCallOffset(next);
+              setState(() => _localOffset = next);
             },
             onDragEnd: (_) {
               _dragOrigin = null;
               _positionOrigin = null;
+              widget.state.commitMiniCallLayout(offset: _localOffset);
             },
             onResizeStart: (details) {
               _dragOrigin = details.globalPosition;
@@ -162,13 +174,19 @@ class _DraggableMiniCallBarState extends State<_DraggableMiniCallBar> {
                 (pos.dy + origin.height - nextSize.height)
                     .clamp(0.0, screen.height - nextSize.height),
               );
-              widget.state.setMiniCallSize(nextSize);
-              widget.state.setMiniCallOffset(nextOffset);
+              setState(() {
+                _localSize = nextSize;
+                _localOffset = nextOffset;
+              });
             },
             onResizeEnd: (_) {
               _dragOrigin = null;
               _sizeOrigin = null;
               _positionOrigin = null;
+              widget.state.commitMiniCallLayout(
+                offset: _localOffset,
+                size: _localSize,
+              );
             },
           ),
         ),
@@ -987,7 +1005,9 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
 
     return Material(
       color: PrivetTheme.ink,
-      child: Stack(
+      child: RemoteControlLayer(
+        session: session,
+        child: Stack(
         children: [
           Positioned.fill(child: ColoredBox(color: Colors.black, child: stage)),
           // Top scrim for legibility of the header.
@@ -1075,14 +1095,17 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
               ),
             ),
           ),
-          if (session.error != null)
+          if (session.error != null || session.remoteControlError != null)
             Positioned(
               left: 16,
               right: 16,
               bottom: compact ? 120 : 132,
-              child: _ErrorBanner(message: session.error!),
+              child: _ErrorBanner(
+                message: session.error ?? session.remoteControlError!,
+              ),
             ),
         ],
+        ),
       ),
     );
   }
@@ -1421,6 +1444,7 @@ class _ControlDock extends StatelessWidget {
           }
         },
       ),
+      _remoteControlButton(session),
       _CallButton(
         color: PrivetTheme.danger,
         icon: Icons.call_end_rounded,
@@ -1456,6 +1480,63 @@ class _ControlDock extends StatelessWidget {
       ),
     );
   }
+}
+
+Widget _remoteControlButton(CallSession session) {
+  final active = session.remoteControlActive;
+  final pending = session.remoteControl?.state.auth == RemoteControlAuth.requested &&
+      session.remoteControl?.state.role == RemoteControlRole.controller;
+  final canRequest = session.canRequestRemoteControl;
+  final hosting = session.isRemoteHost;
+  final blocked = session.remoteControlBlockedReason;
+
+  String label;
+  if (hosting || (active && session.isRemoteController)) {
+    label = 'Stop ctrl';
+  } else if (pending) {
+    label = 'Waiting…';
+  } else if (session.isSharingLocally &&
+      session.remoteInputCapability?.canInject == true) {
+    label = 'Host';
+  } else {
+    label = 'Control';
+  }
+
+  final enabled = active || hosting || canRequest || pending;
+  final tip = active || hosting
+      ? 'Stop remote control'
+      : pending
+          ? 'Waiting for them to Allow'
+          : (blocked ??
+              (canRequest
+                  ? 'Request control of their shared screen'
+                  : 'Control unavailable'));
+
+  return Tooltip(
+    message: tip,
+    child: _CallButton(
+      color: active || hosting
+          ? const Color(0xFFFFA726)
+          : session.isSharingLocally &&
+                  session.remoteInputCapability?.canInject == true
+              ? PrivetTheme.signal.withValues(alpha: 0.35)
+              : PrivetTheme.panelElevated,
+      icon: active || hosting || pending
+          ? Icons.mouse_rounded
+          : Icons.mouse_outlined,
+      ink: canRequest && !pending,
+      label: label,
+      enabled: enabled,
+      onTap: () async {
+        if (active || hosting) {
+          await session.revokeRemoteControl();
+          return;
+        }
+        if (pending) return;
+        await session.requestRemoteControl();
+      },
+    ),
+  );
 }
 
 class _GlassIconButton extends StatelessWidget {

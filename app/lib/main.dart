@@ -7,17 +7,25 @@ import 'screens/login_screen.dart';
 import 'screens/messenger_shell.dart';
 import 'state.dart';
 import 'theme.dart';
+import 'util/perf.dart';
 import 'util/web_bootstrap.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Web: expose semantics so assistive tech (and attach overlays) work reliably.
-  SemanticsBinding.instance.ensureSemantics();
+  // Web only: expose semantics so assistive tech (and attach overlays) work.
+  // On Linux/GTK a forced app-wide semantics tree adds per-frame overhead for
+  // no desktop benefit (accessibility still works via the platform embedder).
+  if (kIsWeb) {
+    SemanticsBinding.instance.ensureSemantics();
+  }
   bootstrapWebPlatform();
   // Flutter web enables the browser menu by default (Inspect / Copy / etc.).
   // Must stay disabled or SelectableText right-click opens Chrome's menu.
   if (kIsWeb) {
     await BrowserContextMenu.disableContextMenu();
+  }
+  if (kDebugMode || bool.fromEnvironment('PRIVET_PERF')) {
+    PerfDiagnostics.enable();
   }
   runApp(const PrivetApp());
 }
@@ -31,12 +39,17 @@ class PrivetApp extends StatefulWidget {
 
 class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
   final PrivetState _state = PrivetState();
+  /// Only session-level fields should rebuild MaterialApp.
+  (bool, String?, ThemeMode, int, bool)? _sessionKey;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _state.addListener(_onChange);
+    _state.sessionTick.addListener(_onSession);
+    // Also catch first bootstrap via broad notify before sessionTick existed
+    // in older call sites — sessionTick is bumped by notifySession/notifyListeners.
+    _state.addListener(_onLegacy);
     _state.bootstrap();
     if (kIsWeb) {
       // Re-assert after first frame — some plugins re-enable the browser menu.
@@ -46,7 +59,24 @@ class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
     }
   }
 
-  void _onChange() => setState(() {});
+  void _onSession() {
+    final next = (
+      _state.booting,
+      _state.user?.id,
+      _state.themeMode,
+      _state.accent.toARGB32(),
+      _state.lowResourceMode,
+    );
+    if (next == _sessionKey) return;
+    _sessionKey = next;
+    PerfDiagnostics.markBuild('PrivetApp.session');
+    setState(() {});
+  }
+
+  void _onLegacy() {
+    // Ensure first paint after bootstrap even if only notifyListeners ran.
+    _onSession();
+  }
 
   @override
   void didChangePlatformBrightness() {
@@ -57,7 +87,8 @@ class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _state.removeListener(_onChange);
+    _state.sessionTick.removeListener(_onSession);
+    _state.removeListener(_onLegacy);
     _state.dispose();
     super.dispose();
   }
@@ -86,12 +117,10 @@ class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
       debugShowCheckedModeBanner: false,
       theme: PrivetTheme.themeData(),
       home: _state.booting
-          ? const Scaffold(
-              body: Center(child: CircularProgressIndicator()),
-            )
+          ? const Scaffold(body: Center(child: CircularProgressIndicator()))
           : _state.user == null
-              ? LoginScreen(state: _state)
-              : MessengerShell(state: _state),
+          ? LoginScreen(state: _state)
+          : MessengerShell(state: _state),
     );
   }
 }

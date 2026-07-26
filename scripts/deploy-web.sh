@@ -55,9 +55,21 @@ rm -f "$ROOT/server/public/flutter_service_worker.js"
 rm -rf "$STAGE"
 
 # Stamp PWA service worker cache version (source lives in app/web/sw.js).
-if [[ -f "$ROOT/server/public/sw.js" ]]; then
-  sed -i "s/__PRIVET_BUILD__/${STAMP}/g" "$ROOT/server/public/sw.js"
-fi
+# Also ensure install helper + manifest are present at site root.
+python3 - <<PY
+from pathlib import Path
+import shutil
+stamp = "$STAMP"
+root = Path("$ROOT/server/public")
+src_web = Path("$ROOT/app/web")
+for name in ("sw.js", "pwa-install.js", "manifest.json"):
+    src = src_web / name
+    if src.is_file():
+        shutil.copy2(src, root / name)
+sw = root / "sw.js"
+if sw.is_file():
+    sw.write_text(sw.read_text().replace("__PRIVET_BUILD__", stamp))
+PY
 
 # Unique filename — query-string cache bust is ignored by some browsers.
 MAIN_NAMED="main.${STAMP}.js"

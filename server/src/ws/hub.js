@@ -125,6 +125,31 @@ export function broadcastToUsers(userIds, payload, exceptUserId = null, opts = {
   }
 }
 
+/**
+ * @param {import('ws').WebSocket} socket
+ * @param {object} payload
+ */
+export function sendToSocket(socket, payload) {
+  if (!socket || socket.readyState !== 1) return false;
+  socket.send(JSON.stringify(payload));
+  return true;
+}
+
+/**
+ * Prefer a specific live socket for a user; fall back to fan-out only when
+ * the bound socket is gone (reconnect mid-call).
+ * @param {string} userId
+ * @param {import('ws').WebSocket|null|undefined} preferred
+ * @param {object} payload
+ */
+export function sendToUserPreferred(userId, preferred, payload) {
+  if (preferred && preferred.readyState === 1) {
+    return sendToSocket(preferred, payload);
+  }
+  sendToUser(userId, payload);
+  return true;
+}
+
 /** Dev/debug: open socket counts per user (no secrets). */
 export function socketStats() {
   /** @type {Record<string, { sockets: number, primary: boolean }>} */

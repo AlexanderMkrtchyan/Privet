@@ -12,6 +12,7 @@ const PRECACHE = [
   '/app/',
   '/app/index.html',
   '/manifest.json',
+  '/pwa-install.js',
   '/favicon.png',
   '/icons/Icon-192.png',
   '/icons/Icon-512.png',
