@@ -1,1 +1,16 @@
-{"app_name":"privet","version":"0.1.3","build_number":"4","package_name":"privet"}
+{
+  "app_name": "privet",
+  "version": "0.1.8",
+  "build_number": "5",
+  "package_name": "privet",
+  "windows_setup_url": "/downloads/Privet-Setup.exe",
+  "linux_deb_url": "/downloads/privet-linux-amd64.deb",
+  "linux_tar_url": "/downloads/privet-linux-x64.tar.gz",
+  "windows": {
+    "setup_url": "/downloads/Privet-Setup.exe"
+  },
+  "linux": {
+    "deb_url": "/downloads/privet-linux-amd64.deb",
+    "tar_url": "/downloads/privet-linux-x64.tar.gz"
+  }
+}

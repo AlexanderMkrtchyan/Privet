@@ -130,6 +130,7 @@ jobs:
             "$root\packaging\windows\privet.iss"
           Copy-Item "server/public/downloads/Privet-Setup-${{ steps.ver.outputs.version }}.exe" `
             "server/public/downloads/Privet-Setup.exe" -Force
+          bash scripts/write-version-json.sh
           Get-ChildItem server/public/downloads | Format-Table Name, Length
 
       - name: Upload Windows artifacts
@@ -139,6 +140,7 @@ jobs:
           path: |
             server/public/downloads/Privet-Setup.exe
             server/public/downloads/Privet-Setup-*.exe
+            server/public/version.json
           if-no-files-found: error
 
   publish:
@@ -181,7 +183,7 @@ jobs:
             ## Privet desktop release
 
             - **Linux:** `.deb` (Ubuntu/Debian) and `.tar.gz`
-            - **Windows:** native Flutter installer (`Privet-Setup.exe`) — unsigned; SmartScreen may warn (More info → Run anyway)
+            - **Windows:** native Flutter installer (`Privet-Setup.exe`) — unsigned; SmartScreen may warn (More info → Run anyway). Installed apps can update from Profile → **Update available**.
 
             Default API: `https://messenger.banderdog.com`
 

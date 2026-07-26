@@ -103,3 +103,5 @@ fi
 
 ls -lah "$STABLE" "$VERSIONED" 2>/dev/null || ls -lah "$OUT"/Privet-Setup*.exe
 echo "Windows build stamp=${STAMP} version=${VERSION}"
+chmod +x "$ROOT/scripts/write-version-json.sh"
+"$ROOT/scripts/write-version-json.sh"

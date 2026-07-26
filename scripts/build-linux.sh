@@ -237,3 +237,5 @@ gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || tr
 echo "Installed native app → $INSTALL_DIR/privet (v${VERSION}, build ${STAMP})"
 echo "Menu entry → ~/.local/share/applications/privet.desktop"
 ls -lah "$TAR_OUT" "$DEB_OUT" "$DEB_STABLE" "$INSTALL_DIR/privet" "$INSTALL_DIR/privet.png"
+chmod +x "$ROOT/scripts/write-version-json.sh"
+"$ROOT/scripts/write-version-json.sh"

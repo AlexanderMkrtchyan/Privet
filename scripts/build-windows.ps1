@@ -40,3 +40,4 @@ $Stable = Join-Path $Out "Privet-Setup.exe"
 Copy-Item $Versioned $Stable -Force
 Write-Host "Wrote $Versioned"
 Write-Host "Wrote $Stable (stamp=$Stamp)"
+& bash (Join-Path $Root "scripts/write-version-json.sh")

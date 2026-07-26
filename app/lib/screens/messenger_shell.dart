@@ -19,6 +19,7 @@ import '../models.dart';
 import '../state.dart';
 import '../theme.dart';
 import '../util/app_clipboard.dart';
+import '../util/app_update.dart';
 import '../util/clipboard_files.dart';
 import '../util/ai_turn.dart';
 import '../util/media_permissions.dart';
@@ -1241,6 +1242,7 @@ class InboxPane extends StatelessWidget {
     if (me == null) return;
     await state.refreshAiStatus();
     final packageInfo = await PackageInfo.fromPlatform();
+    final updateStatus = await AppUpdate.check(baseUrl: state.api.baseUrl);
     if (!context.mounted) return;
     final versionLabel = packageInfo.buildNumber.isEmpty
         ? packageInfo.version
@@ -1251,6 +1253,8 @@ class InboxPane extends StatelessWidget {
     String? pendingAvatarFilename;
     String pendingAvatarMime = 'image/jpeg';
     var pendingClearAvatar = false;
+    var updating = false;
+    var updateProgress = 0.0;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -1720,6 +1724,81 @@ class InboxPane extends StatelessWidget {
                             fontSize: 12,
                           ),
                         ),
+                        if (updateStatus.supportsInAppUpdate &&
+                            updateStatus.updateAvailable) ...[
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton.icon(
+                              onPressed: updating
+                                  ? null
+                                  : () async {
+                                      final latest = updateStatus.latest;
+                                      final rel = latest?.windowsSetupUrl;
+                                      if (rel == null || rel.isEmpty) return;
+                                      final origin = state.api.baseUrl
+                                          .replaceAll(RegExp(r'/+$'), '');
+                                      final setupUrl = rel.startsWith('http')
+                                          ? rel
+                                          : '$origin${rel.startsWith('/') ? rel : '/$rel'}';
+                                      setSheet(() {
+                                        updating = true;
+                                        updateProgress = 0;
+                                      });
+                                      try {
+                                        await AppUpdate.applyWindowsUpdate(
+                                          setupUrl: setupUrl,
+                                          onProgress: (p) {
+                                            if (ctx.mounted) {
+                                              setSheet(
+                                                () => updateProgress = p,
+                                              );
+                                            }
+                                          },
+                                        );
+                                      } catch (e) {
+                                        if (ctx.mounted) {
+                                          setSheet(() => updating = false);
+                                          _toast(
+                                            context,
+                                            e.toString(),
+                                            error: true,
+                                          );
+                                        }
+                                      }
+                                    },
+                              icon: updating
+                                  ? SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        value: updateProgress > 0 &&
+                                                updateProgress < 1
+                                            ? updateProgress
+                                            : null,
+                                        color: PrivetTheme.onAccent,
+                                      ),
+                                    )
+                                  : const Icon(Icons.system_update_alt_rounded),
+                              label: Text(
+                                updating
+                                    ? (updateProgress > 0 && updateProgress < 1
+                                          ? 'Downloading ${(updateProgress * 100).round()}%'
+                                          : 'Installing…')
+                                    : 'Update available',
+                              ),
+                            ),
+                          ),
+                          Text(
+                            'Downloads and installs v${updateStatus.latest?.version ?? ''} automatically, then restarts.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: PrivetTheme.mist,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),
