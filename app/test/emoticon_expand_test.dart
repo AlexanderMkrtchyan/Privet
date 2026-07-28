@@ -22,4 +22,32 @@ void main() {
     expect(expandEmoticons('hello world'), 'hello world');
     expect(expandEmoticons(''), '');
   });
+
+  group('tryExpandEmoticonAtCursor', () {
+    test('expands western faces at caret', () {
+      expect(tryExpandEmoticonAtCursor(':)', 2)?.emoji, '🙂');
+      expect(tryExpandEmoticonAtCursor(':(', 2)?.emoji, '😞');
+      expect(tryExpandEmoticonAtCursor('hi :)', 5)?.emoji, '🙂');
+      expect(tryExpandEmoticonAtCursor(':-)', 3)?.emoji, '🙂');
+      expect(tryExpandEmoticonAtCursor(':D', 2)?.emoji, '😃');
+    });
+
+    test('expands parenthetical codes when ) closes token', () {
+      expect(tryExpandEmoticonAtCursor('(sob)', 5)?.emoji, '😭');
+      expect(tryExpandEmoticonAtCursor('(SOB)', 5)?.emoji, '😭');
+    });
+
+    test('does not expand partial tokens', () {
+      expect(tryExpandEmoticonAtCursor(':', 1), isNull);
+      expect(tryExpandEmoticonAtCursor(':-', 2), isNull);
+      expect(tryExpandEmoticonAtCursor('(sm', 3), isNull);
+    });
+
+    test('does not expand into words or URLs', () {
+      expect(tryExpandEmoticonAtCursor(':Debug', 2), isNull);
+      expect(tryExpandEmoticonAtCursor('http:/', 6), isNull);
+      expect(tryExpandEmoticonAtCursor('http://', 7), isNull);
+      expect(tryExpandEmoticonAtCursor(':/', 2), isNull);
+    });
+  });
 }

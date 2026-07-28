@@ -195,6 +195,32 @@ class ComposerAutocorrectController extends TextEditingController {
     refreshSpelling();
   }
 
+  /// Replace a span without autocorrect flash (e.g. live emoticon expansion).
+  void applySilentReplacement({
+    required int start,
+    required int end,
+    required String replacement,
+    required int caretAfter,
+  }) {
+    if (_applying) return;
+    _applying = true;
+    try {
+      final text = this.text;
+      final s = start.clamp(0, text.length);
+      final e = end.clamp(s, text.length);
+      if (text.substring(s, e) == replacement) return;
+      final next = text.replaceRange(s, e, replacement);
+      final delta = replacement.length - (e - s);
+      final caret = (caretAfter + delta).clamp(0, next.length);
+      value = TextEditingValue(
+        text: next,
+        selection: TextSelection.collapsed(offset: caret),
+      );
+    } finally {
+      _applying = false;
+    }
+  }
+
   void applyCorrection(AutocorrectAttempt attempt, {required int caretAfter}) {
     if (_applying) return;
     if (_suppressed.contains(attempt.original.toLowerCase())) return;

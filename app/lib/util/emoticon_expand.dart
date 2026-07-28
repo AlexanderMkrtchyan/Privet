@@ -1,3 +1,105 @@
+/// Live composer replacement for a completed emoticon token at the caret.
+class EmoticonLiveExpand {
+  const EmoticonLiveExpand({
+    required this.replaceStart,
+    required this.replaceEnd,
+    required this.emoji,
+  });
+
+  final int replaceStart;
+  final int replaceEnd;
+  final String emoji;
+}
+
+/// Returns a live replacement when [cursor] sits right after a completed
+/// emoticon token (e.g. `:)` → 🙂 while typing).
+EmoticonLiveExpand? tryExpandEmoticonAtCursor(String text, int cursor) {
+  if (cursor <= 0 || cursor > text.length) return null;
+
+  final parenthetical = _tryExpandParentheticalAtCursor(text, cursor);
+  if (parenthetical != null) return parenthetical;
+
+  return _tryExpandWesternAtCursor(text, cursor);
+}
+
+EmoticonLiveExpand? _tryExpandParentheticalAtCursor(String text, int cursor) {
+  if (cursor < 2 || text[cursor - 1] != ')') return null;
+
+  var i = cursor - 2;
+  while (i >= 0) {
+    final ch = text[i];
+    if (ch == ')') return null;
+    if (ch == '(') break;
+    if (!_isShortcodeChar(ch)) return null;
+    i--;
+  }
+  if (i < 0 || text[i] != '(') return null;
+
+  final token = text.substring(i, cursor);
+  for (final entry in emoticonParenthetical) {
+    if (token.toLowerCase() != entry.$1.toLowerCase()) continue;
+    return EmoticonLiveExpand(
+      replaceStart: i,
+      replaceEnd: cursor,
+      emoji: entry.$2,
+    );
+  }
+  return null;
+}
+
+EmoticonLiveExpand? _tryExpandWesternAtCursor(String text, int cursor) {
+  for (final entry in emoticonWestern) {
+    final token = entry.$1;
+    final len = token.length;
+    if (cursor < len) continue;
+
+    final start = cursor - len;
+    final slice = text.substring(start, cursor);
+    if (!_westernTokenMatches(slice, token)) continue;
+    if (!_westernLiveExpandOk(text, start, cursor, token)) continue;
+
+    return EmoticonLiveExpand(
+      replaceStart: start,
+      replaceEnd: cursor,
+      emoji: entry.$2,
+    );
+  }
+  return null;
+}
+
+bool _westernTokenMatches(String slice, String token) {
+  if (slice.length != token.length) return false;
+  return slice.toLowerCase() == token.toLowerCase();
+}
+
+bool _westernLiveExpandOk(String text, int start, int cursor, String token) {
+  // `:/` is handled on send — live expansion fights http(s):// typing.
+  if (token == ':/' || token == ':-/') return false;
+
+  if (cursor < text.length && !_isEmoticonTailBoundary(text[cursor])) {
+    return false;
+  }
+  return true;
+}
+
+bool _isEmoticonTailBoundary(String ch) {
+  if (ch.length != 1) return true;
+  final c = ch.codeUnitAt(0);
+  final isLower = c >= 97 && c <= 122;
+  final isUpper = c >= 65 && c <= 90;
+  final isDigit = c >= 48 && c <= 57;
+  return !(isLower || isUpper || isDigit);
+}
+
+bool _isShortcodeChar(String ch) {
+  if (ch.length != 1) return false;
+  final c = ch.codeUnitAt(0);
+  final isLower = c >= 97 && c <= 122;
+  final isUpper = c >= 65 && c <= 90;
+  final isDigit = c >= 48 && c <= 57;
+  return isLower || isUpper || isDigit;
+}
+
 /// Expands text emoticons / shortcodes into Unicode emoji on send.
 ///
 /// Supports western faces (`:D`, `:)`, `:(`, …) and parenthetical codes

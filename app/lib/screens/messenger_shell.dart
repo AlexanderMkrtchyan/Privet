@@ -25,6 +25,7 @@ import '../util/app_update.dart';
 import '../util/clipboard_files.dart';
 import '../util/ai_turn.dart';
 import '../util/composer_autocomplete.dart';
+import '../util/emoticon_expand.dart';
 import '../util/composer_autocorrect.dart';
 import '../util/composer_media_attach.dart';
 import '../util/desktop_tray.dart';
@@ -3484,9 +3485,41 @@ class _ConversationPaneState extends State<ConversationPane>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _controller.isApplying) return;
       if (_controller.text != text) return; // newer edit superseded this
+      _maybeApplyEmoticonExpand();
+      if (!mounted || _controller.isApplying) return;
       _lastAutocorrectText = _controller.text;
       _maybeApplyAutocorrect();
     });
+  }
+
+  void _maybeApplyEmoticonExpand() {
+    if (_controller.isApplying) return;
+    // Parenthetical typeahead owns `(partial` tokens — don't fight it.
+    if (_acSuggestions.isNotEmpty) return;
+
+    final value = _controller.value;
+    final text = value.text;
+    final sel = value.selection;
+    final int cursor;
+    if (sel.isValid && sel.isCollapsed) {
+      cursor = sel.baseOffset;
+    } else if (text.isNotEmpty && _looksLikeWordBoundary(text[text.length - 1])) {
+      cursor = text.length;
+    } else {
+      return;
+    }
+
+    final expand = tryExpandEmoticonAtCursor(text, cursor);
+    if (expand == null) return;
+
+    _controller.applySilentReplacement(
+      start: expand.replaceStart,
+      end: expand.replaceEnd,
+      replacement: expand.emoji,
+      caretAfter: cursor,
+    );
+    _lastAutocorrectText = _controller.text;
+    widget.state.notifyTyping();
   }
 
   void _maybeApplyAutocorrect() {
