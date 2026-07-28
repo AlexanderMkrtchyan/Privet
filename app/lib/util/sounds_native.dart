@@ -25,7 +25,7 @@ Future<AudioPlayer> _ensureMessagePlayer() async {
   if (existing != null) return existing;
   final p = AudioPlayer();
   await p.setReleaseMode(ReleaseMode.stop);
-  await p.setVolume(0.85);
+  await p.setVolume(1.0);
   _msgPlayer = p;
   return p;
 }
@@ -38,7 +38,7 @@ void unlockNotificationAudio() {
       await p.setVolume(0.001);
       await p.play(AssetSource(_messageAsset));
       await p.stop();
-      await p.setVolume(0.85);
+      await p.setVolume(1.0);
     } catch (_) {}
   }());
 }
@@ -65,7 +65,7 @@ void playMessageSound({String? messageId}) {
 
       final p = await _ensureMessagePlayer();
       await p.stop();
-      await p.setVolume(0.85);
+      await p.setVolume(1.0);
       await p.play(AssetSource(_messageAsset));
     } catch (_) {}
   }());

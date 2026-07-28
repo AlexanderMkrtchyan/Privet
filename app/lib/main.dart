@@ -10,7 +10,6 @@ import 'screens/login_screen.dart';
 import 'screens/messenger_shell.dart';
 import 'state.dart';
 import 'theme.dart';
-import 'util/agent_debug_log.dart';
 import 'util/desktop_single_instance.dart';
 import 'util/desktop_tray.dart';
 import 'util/low_resource.dart';
@@ -19,18 +18,6 @@ import 'util/web_bootstrap.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // #region agent log
-  agentDebugLog(
-    hypothesisId: 'H1',
-    location: 'main.dart:main',
-    message: 'app start',
-    data: {
-      'platform': defaultTargetPlatform.name,
-      'isWeb': kIsWeb,
-    },
-  );
-  agentDebugInstallFrameProbe();
-  // #endregion
   // Web only: expose semantics so assistive tech (and attach overlays) work.
   // On Linux/GTK a forced app-wide semantics tree adds per-frame overhead for
   // no desktop benefit (accessibility still works via the platform embedder).

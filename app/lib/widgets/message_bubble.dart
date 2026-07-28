@@ -14,6 +14,7 @@ import '../models.dart';
 import '../theme.dart';
 import '../util/ai_turn.dart';
 import '../util/app_clipboard.dart';
+import '../util/call_history.dart';
 import '../util/low_resource.dart';
 import '../util/media_download.dart';
 import '../util/perf.dart';
@@ -86,10 +87,12 @@ class MessageBubble extends StatelessWidget {
     this.highlighted = false,
     this.readByPeer = false,
     this.seenByLabel,
+    this.addedToTask = false,
     this.onReply,
     this.onForward,
     this.onReact,
     this.onAddToTask,
+    this.onOpenTasks,
     this.onAskAi,
     this.aiActive = false,
     this.onEdit,
@@ -105,10 +108,16 @@ class MessageBubble extends StatelessWidget {
   final bool highlighted;
   final bool readByPeer;
   final String? seenByLabel;
+
+  /// True when a shared task item was created from this message.
+  final bool addedToTask;
   final void Function(ChatMessage message, {String? selectedText})? onReply;
   final void Function(ChatMessage message, {String? selectedText})? onForward;
   final void Function(ChatMessage message, String emoji)? onReact;
   final ValueChanged<ChatMessage>? onAddToTask;
+
+  /// Opens the conversation task board (e.g. when tapping the "added to task" note).
+  final VoidCallback? onOpenTasks;
   final ValueChanged<ChatMessage>? onAskAi;
 
   /// When false, Ask AI is shown but not tappable.
@@ -158,6 +167,10 @@ class MessageBubble extends StatelessWidget {
           ),
         ),
       );
+    }
+
+    if (message.isCallHistory) {
+      return _CallHistoryChip(message: message);
     }
 
     if (message.aiLocal || message.kind == 'ai') {
@@ -324,24 +337,20 @@ class MessageBubble extends StatelessWidget {
                 if (message.forwardedFrom != null) ...[
                   Padding(
                     padding: const EdgeInsets.only(bottom: 6),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.shortcut_rounded,
-                          size: 14,
-                          color: PrivetTheme.mist.withValues(alpha: 0.9),
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          'Forwarded from ${message.forwardedFrom!.label}',
-                          style: GoogleFonts.ibmPlexSans(
-                            fontSize: 11,
-                            fontStyle: FontStyle.italic,
-                            color: PrivetTheme.mist,
-                          ),
-                        ),
-                      ],
+                    child: _MessageStatusNote(
+                      icon: Icons.shortcut_rounded,
+                      label: 'Forwarded from ${message.forwardedFrom!.label}',
+                      prominent: true,
+                    ),
+                  ),
+                ],
+                if (message.forwardedToLabel != null) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: _MessageStatusNote(
+                      icon: Icons.arrow_outward_rounded,
+                      label: message.forwardedToLabel!,
+                      prominent: true,
                     ),
                   ),
                 ],
@@ -362,6 +371,18 @@ class MessageBubble extends StatelessWidget {
                     child: _LinkPreviewCard(preview: message.linkPreview!),
                   ),
                 ],
+                if (addedToTask) ...[
+                  const SizedBox(height: 6),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: 1,
+                    child: _MessageStatusNote(
+                      icon: Icons.playlist_add_check_rounded,
+                      label: 'Added to task',
+                      onTap: onOpenTasks,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 8),
                 Align(
                   alignment: Alignment.centerRight,
@@ -370,17 +391,12 @@ class MessageBubble extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       if (message.editedAt != null)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 6),
-                          child: Text(
-                            'edited',
-                            style: TextStyle(
-                              color: PrivetTheme.mist.withValues(
-                                alpha: 0.75,
-                              ),
-                              fontSize: 10,
-                              fontStyle: FontStyle.italic,
-                            ),
+                        const Padding(
+                          padding: EdgeInsets.only(right: 6),
+                          child: _MessageStatusNote(
+                            icon: Icons.edit_rounded,
+                            label: 'edited',
+                            compact: true,
                           ),
                         ),
                       Text(
@@ -948,6 +964,88 @@ class MessageBubble extends StatelessWidget {
       text: message.body,
       onReply: onReply == null ? null : replyWithSelection,
       onForward: onForward == null ? null : forwardWithSelection,
+    );
+  }
+}
+
+/// Centered Teams-style call history chip (not a message bubble).
+class _CallHistoryChip extends StatelessWidget {
+  const _CallHistoryChip({required this.message});
+
+  final ChatMessage message;
+
+  IconData _iconFor(CallHistoryPayload? payload) {
+    final mode = payload?.mode ?? 'video';
+    final outcome = payload?.outcome ?? 'completed';
+    if (outcome == 'missed' || outcome == 'declined' || outcome == 'canceled') {
+      switch (mode) {
+        case 'audio':
+          return Icons.call_missed_outgoing_rounded;
+        case 'screen':
+          return Icons.screen_share_outlined;
+        case 'control':
+          return Icons.mouse_outlined;
+        default:
+          return Icons.missed_video_call_outlined;
+      }
+    }
+    switch (mode) {
+      case 'audio':
+        return Icons.call_rounded;
+      case 'screen':
+        return Icons.screen_share_rounded;
+      case 'control':
+        return Icons.mouse_rounded;
+      default:
+        return Icons.videocam_rounded;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final payload = CallHistoryPayload.tryParse(message.body);
+    final label = payload?.label ?? CallHistoryPayload.preview(message.body);
+    final muted = payload != null &&
+        (payload.outcome == 'missed' ||
+            payload.outcome == 'declined' ||
+            payload.outcome == 'canceled');
+    // paper = primary text (light on dark / dark on light). Never use ink —
+    // that is the app background and vanishes on dark theme.
+    final textColor = muted ? PrivetTheme.mist : PrivetTheme.paper;
+    final iconColor = muted
+        ? PrivetTheme.mist
+        : PrivetTheme.signal.withValues(alpha: 0.95);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          decoration: BoxDecoration(
+            color: PrivetTheme.panelElevated,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: PrivetTheme.line),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(_iconFor(payload), size: 15, color: iconColor),
+              const SizedBox(width: 7),
+              Flexible(
+                child: Text(
+                  label,
+                  style: GoogleFonts.ibmPlexSans(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: textColor,
+                    letterSpacing: 0.1,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1767,6 +1865,62 @@ class _SwipeReplyHandleState extends State<_SwipeReplyHandle> {
           ),
         },
         child: widget.child,
+      ),
+    );
+  }
+}
+
+/// Compact italic status chip used for edited / forwarded / added-to-task notes.
+class _MessageStatusNote extends StatelessWidget {
+  const _MessageStatusNote({
+    required this.icon,
+    required this.label,
+    this.compact = false,
+    this.prominent = false,
+    this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool compact;
+  final bool prominent;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final alpha = compact ? 0.75 : 0.9;
+    final size = compact ? 10.0 : (prominent ? 14.0 : 12.0);
+    final fontSize = compact ? 10.0 : (prominent ? 11.0 : 10.5);
+    final row = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          icon,
+          size: size,
+          color: PrivetTheme.mist.withValues(alpha: alpha),
+        ),
+        SizedBox(width: compact ? 3 : 4),
+        Flexible(
+          child: Text(
+            label,
+            style: GoogleFonts.ibmPlexSans(
+              fontSize: fontSize,
+              fontStyle: FontStyle.italic,
+              color: PrivetTheme.mist.withValues(alpha: alpha),
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+    if (onTap == null) return row;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: row,
       ),
     );
   }

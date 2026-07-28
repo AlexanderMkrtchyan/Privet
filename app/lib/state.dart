@@ -233,19 +233,13 @@ class CallSession extends ChangeNotifier {
   /// True when this side is the one sending a display surface.
   bool get isSharingLocally => sharingScreen;
 
-  /// Screen/control call where we stopped sharing (or peer stopped) — not
-  /// "still connecting". Video calls never use this placeholder: a peer camera
-  /// mute/end must not look like "Screen share stopped".
-  ///
-  /// Do not treat "I shared earlier" as stopped once the peer is sharing (or
-  /// their video is bound). Sticky [everSharedLocally] alone used to hide
-  /// remote video after maximize following a share take-over.
+  /// True when nobody is sharing and the last share just ended — show the
+  /// peer avatar + "Share stopped" placeholder (not a frozen/black frame).
   bool get showShareStopped =>
-      isScreenLike &&
       !sharingScreen &&
       !peerSharingScreen &&
       !remoteHasVideo &&
-      (remoteShareStopped || everSharedLocally);
+      remoteShareStopped;
 
   /// Share button: unlocked after peer stop even if a mute/unmute race left
   /// [peerSharingScreen] stuck true (that regression blocked take-over).
@@ -471,18 +465,13 @@ class CallSession extends ChangeNotifier {
     _displaySourceId = lastDesktopCaptureSourceId;
     sharingScreen = true;
     everSharedLocally = true;
-    // Control host: do not mirror the capture into the local UI — it nests
-    // inside the shared desktop and wastes GPU. Controllers see the encode.
-    if (call.mode == 'control' || autoGrantControl) {
-      try {
-        localRenderer.srcObject = null;
-      } catch (_) {}
-    } else {
-      // Video-only preview: never attach display audio to the local
-      // renderer — tab/system capture can loop ringback through its
-      // HTMLAudioElement after accept.
-      await _setLocalPreview(screenTrack);
-    }
+    // Never mirror the capture into our own UI. Also suppress stale peer
+    // frames from a previous share on this call.
+    _purgeStaleRemoteVideo(markStopped: true);
+    try {
+      localRenderer.srcObject = null;
+    } catch (_) {}
+    await _clearLocalPreview();
     _scheduleRendererRebind();
     screenTrack.onEnded = () {
       if (_disposed) return;
@@ -604,11 +593,22 @@ class CallSession extends ChangeNotifier {
           await _releaseStream(stream);
           return;
         }
-        await stream.addTrack(event.track);
+        try {
+          await stream.addTrack(event.track);
+        } catch (_) {
+          if (event.track.kind == 'video') {
+            await _tryBindRemoteVideoTrack(
+              event.track,
+              remoteRenderer.srcObject,
+            );
+          }
+          return;
+        }
       }
       if (_disposed) return;
 
       if (event.track.kind == 'video') {
+        if (_blockStaleRemoteVideo) return;
         await _bindRemoteVideoStream(event.track, stream);
         return;
       }
@@ -668,6 +668,7 @@ class CallSession extends ChangeNotifier {
     MediaStream stream,
   ) async {
     if (_disposed) return;
+    if (_blockStaleRemoteVideo) return;
     _remoteVideoMuteTimer?.cancel();
     track.enabled = true;
     // Muted leftover after peer stop must not resurrect the presenter lock
@@ -749,13 +750,59 @@ class CallSession extends ChangeNotifier {
     track.onUnMute = () {
       if (_disposed) return;
       _remoteVideoMuteTimer?.cancel();
-      // Ignore unmute after an explicit share_stopped / local clear.
-      if (remoteShareStopped) return;
+      // Ignore unmute after share stop / while we are presenting.
+      if (_blockStaleRemoteVideo) return;
       remoteHasVideo = true;
       _scheduleRendererRebind();
       notifyListeners();
     };
     notifyListeners();
+  }
+
+  /// After [call.share_started], the peer's SDP may land slightly later (or
+  /// [onTrack] may never re-fire on a reused m-line). Retry the receiving
+  /// bind a few times so the Ubuntu viewer actually paints the share.
+  Future<void> _recoverIncomingShareVideo() async {
+    for (final ms in [0, 150, 400, 900, 1800]) {
+      if (ms > 0) {
+        await Future<void>.delayed(Duration(milliseconds: ms));
+      }
+      if (_disposed || remoteShareStopped || !peerSharingScreen) return;
+      await _bindReceivingVideoTracks();
+      if (remoteHasVideo) {
+        _scheduleRendererRebind();
+        return;
+      }
+    }
+  }
+
+  /// Peer advertised a new screen share — unlock UI and (re)bind remote video.
+  void onPeerShareStarted({
+    required bool controllable,
+    String controlPlatform = '',
+    String controlBackend = '',
+    String controlDetail = '',
+  }) {
+    if (_disposed) return;
+    remoteShareStopped = false;
+    peerSharingScreen = true;
+    peerShareControllable = controllable;
+    peerShareControlPlatform = controlPlatform;
+    peerShareControlBackend = controlBackend;
+    peerShareControlDetail = controlDetail;
+    notifyListeners();
+    // Never null↔set textures here on Linux — that path crashed mid-handoff.
+    // Bind (with retries) is what makes the share visible on native.
+    unawaited(_recoverIncomingShareVideo());
+    if (kIsWeb) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (_disposed) return;
+        rebindRenderers();
+        wakeUiAfterMediaDialog();
+      });
+    } else {
+      wakeUiAfterMediaDialog();
+    }
   }
 
   /// Safety net for the screen-share handoff. When the callee takes over
@@ -773,6 +820,10 @@ class CallSession extends ChangeNotifier {
   /// and arm unmute watchers on still-SendOnly receivers.
   Future<void> _bindReceivingVideoTracks() async {
     if (_disposed || _pc == null) return;
+    // While we present, or after peer stop without a new share_started, never
+    // rebind leftover receiver tracks — that painted their last frame again
+    // when we later stopped our own share.
+    if (_blockStaleRemoteVideo) return;
     var bound = false;
     try {
       final list = await _pc!.getTransceivers();
@@ -851,6 +902,14 @@ class CallSession extends ChangeNotifier {
     MediaStreamTrack track,
     MediaStream? current,
   ) async {
+    // Warm Linux flutter_webrtc's track cache (GetTransceivers) before
+    // mediaStreamAddTrack — otherwise MediaTrackForId returns null / crashed.
+    if (!kIsWeb && _pc != null) {
+      try {
+        await _pc!.getTransceivers();
+      } catch (_) {}
+    }
+
     Future<void> scrubZombie(MediaStream stream) async {
       try {
         if (stream.getVideoTracks().any((v) => v.id == track.id)) {
@@ -894,7 +953,7 @@ class CallSession extends ChangeNotifier {
   void _armReceiverUnmuteBind(MediaStreamTrack track) {
     if (_disposed || track.kind != 'video') return;
     track.onUnMute = () {
-      if (_disposed || remoteShareStopped) return;
+      if (_disposed || _blockStaleRemoteVideo) return;
       unawaited(_bindReceivingVideoTracks());
     };
     // Some engines report the placeholder receiver as already unmuted while
@@ -902,7 +961,7 @@ class CallSession extends ChangeNotifier {
     track.onMute = () {
       if (_disposed) return;
       track.onUnMute = () {
-        if (_disposed || remoteShareStopped) return;
+        if (_disposed || _blockStaleRemoteVideo) return;
         unawaited(_bindReceivingVideoTracks());
       };
     };
@@ -1420,7 +1479,14 @@ class CallSession extends ChangeNotifier {
       _displaySourceId = sourceId ?? lastDesktopCaptureSourceId;
       sharingScreen = true;
       everSharedLocally = true;
-      await _setLocalPreview(screenTrack);
+      // Status-only while sharing — do not paint our own capture locally.
+      // Keep remoteShareStopped so peer's leftover receiver track cannot
+      // resurrect as a frozen frame when we later stop presenting.
+      _purgeStaleRemoteVideo(markStopped: true);
+      try {
+        localRenderer.srcObject = null;
+      } catch (_) {}
+      await _clearLocalPreview();
       _scheduleRendererRebind();
       screenTrack.onEnded = () {
         if (_disposed) return;
@@ -1484,11 +1550,8 @@ class CallSession extends ChangeNotifier {
         (t) => t.id != track.id && t.enabled && t.muted != true,
       );
       if (!stillLiveVideo) {
-        remoteRenderer.srcObject = null;
+        // Flags first → placeholder stage, then detach (avoids black Texture).
         remoteHasVideo = false;
-        // Only clear the share lock when this really was a screen share —
-        // a peer turning their camera off must not flip the video UI into
-        // "Screen share stopped" or unlock/lock share incorrectly.
         if (call.mode == 'screen' ||
             call.mode == 'control' ||
             peerSharingScreen) {
@@ -1498,6 +1561,9 @@ class CallSession extends ChangeNotifier {
           unawaited(remoteControl?.onRemoteShareStopped());
         }
         notifyListeners();
+        try {
+          remoteRenderer.srcObject = null;
+        } catch (_) {}
       }
     } else {
       remoteHasVideo = false;
@@ -1514,15 +1580,38 @@ class CallSession extends ChangeNotifier {
   }
 
   void clearRemoteShare() {
-    _remoteVideoMuteTimer?.cancel();
-    remoteRenderer.srcObject = null;
-    remoteHasVideo = false;
-    remoteShareStopped = true;
-    peerSharingScreen = false;
-    _clearPeerShareControlMeta();
+    _purgeStaleRemoteVideo(markStopped: true);
     unawaited(remoteControl?.onRemoteShareStopped());
-    notifyListeners();
   }
+
+  /// Drop remote video UI + disarm unmute/ended handlers so a stopped peer
+  /// share cannot resurrect as a frozen last frame after we present/stop.
+  void _purgeStaleRemoteVideo({required bool markStopped}) {
+    _remoteVideoMuteTimer?.cancel();
+    remoteHasVideo = false;
+    if (markStopped) {
+      remoteShareStopped = true;
+      peerSharingScreen = false;
+      _clearPeerShareControlMeta();
+    }
+    notifyListeners();
+    try {
+      final stream = remoteRenderer.srcObject;
+      if (stream != null) {
+        for (final t in stream.getTracks()) {
+          _clearTrackCallbacks(t);
+        }
+      }
+    } catch (_) {}
+    try {
+      remoteRenderer.srcObject = null;
+    } catch (_) {}
+  }
+
+  /// True when we must not paint incoming video (we are presenting, or the
+  /// peer explicitly stopped and has not started again).
+  bool get _blockStaleRemoteVideo =>
+      sharingScreen || (remoteShareStopped && !peerSharingScreen);
 
   void _clearPeerShareControlMeta() {
     peerShareControllable = false;
@@ -1541,23 +1630,6 @@ class CallSession extends ChangeNotifier {
       controlBackend: cap?.backend ?? '',
       controlDetail: cap?.detail ?? '',
     );
-  }
-
-  /// Video-only local screen preview. Never attach the capture stream (it may
-  /// include display audio that loops through the renderer's HTMLAudioElement).
-  Future<void> _setLocalPreview(MediaStreamTrack screenTrack) async {
-    final old = _localPreview;
-    final preview = await createLocalMediaStream('screen-preview');
-    await preview.addTrack(screenTrack);
-    _localPreview = preview;
-    localRenderer.srcObject = preview;
-    unawaited(muteLocalRenderer(localRenderer));
-    if (old != null && !identical(old, preview)) {
-      try {
-        // Don't stop the shared video track — only dispose the wrapper stream.
-        await old.dispose();
-      } catch (_) {}
-    }
   }
 
   Future<void> _clearLocalPreview() async {
@@ -1590,7 +1662,21 @@ class CallSession extends ChangeNotifier {
         ? _local!.getVideoTracks().first
         : null;
 
-    // Stop sending frames immediately.
+    // Drop share UI first — never leave a capture Texture mounted (black /
+    // last-frame). Always mark share stopped so both sides show the same
+    // neutral placeholder (not "You stopped…" on the wrong peer).
+    sharingScreen = false;
+    remoteShareStopped = true;
+    // Purge again: unmute callbacks from the peer's old track must not
+    // rebind their last frame now that we are no longer presenting.
+    _purgeStaleRemoteVideo(markStopped: true);
+    try {
+      localRenderer.srcObject = null;
+    } catch (_) {}
+    await _clearLocalPreview();
+    notifyListeners();
+
+    // Stop sending frames.
     for (final t in _display?.getVideoTracks() ?? []) {
       t.enabled = false;
     }
@@ -1627,18 +1713,17 @@ class CallSession extends ChangeNotifier {
     for (final t in _display?.getTracks() ?? []) {
       await t.stop();
     }
-    await _display?.dispose();
-    await stopDisplayCaptureService();
+    // Avoid MediaStream.dispose() on Linux while the PC may still hold refs —
+    // stop tracks is enough; drop the Dart handle.
     _display = null;
     _displaySourceId = null;
-    sharingScreen = false;
-    // Local stop on a screen call — treat like share-stopped for our UI, and
-    // stay ready for the peer (or us) to start sharing again.
-    if (isScreenCall) {
-      remoteShareStopped = true;
+    try {
+      await stopDisplayCaptureService();
+    } catch (_) {}
+    // Restore camera preview only when this wasn't a screen-only call.
+    if (camTrack != null && _local != null) {
+      localRenderer.srcObject = _local;
     }
-    await _clearLocalPreview();
-    localRenderer.srcObject = _local;
     _scheduleRendererRebind();
     notifyListeners();
   }
@@ -1646,8 +1731,16 @@ class CallSession extends ChangeNotifier {
   /// Re-attach streams after RTCVideoView remounts (minimize/maximize on web).
   /// flutter_webrtc reuses a fixed video element id per renderer — remounts can
   /// leave a stale DOM node and a frozen frame until srcObject is rebound.
+  ///
+  /// Native Linux: null↔set thrash re-registers Flutter pixel-buffer textures
+  /// and has crashed mid-call (share handoff, PiP, minimize). Skip the detach;
+  /// [notifyListeners] is enough for RTCVideoView to pick up existing frames.
   void rebindRenderers() {
     if (_disposed) return;
+    if (!kIsWeb) {
+      notifyListeners();
+      return;
+    }
     final local = localRenderer.srcObject;
     final remote = remoteRenderer.srcObject;
     localRenderer.srcObject = null;
@@ -1743,7 +1836,11 @@ class CallSession extends ChangeNotifier {
       }
       _display = next;
       _displaySourceId = sourceId;
-      await _setLocalPreview(screenTrack);
+      // Still no local mirror of the capture — status chrome covers sharing.
+      try {
+        localRenderer.srcObject = null;
+      } catch (_) {}
+      await _clearLocalPreview();
       screenTrack.onEnded = () {
         if (_disposed) return;
         _stopScreenShare();
@@ -1864,38 +1961,43 @@ class CallSession extends ChangeNotifier {
       hypothesisId: 'H4',
       location: 'state.dart:disposeSession',
       message: 'disposeSession begin',
-      data: {'callId': call.id, 'mode': call.mode},
+      data: {'callId': call.id, 'mode': call.mode, 'native': !kIsWeb},
     );
     final disposeSw = Stopwatch()..start();
+    void step(String name) {
+      agentDebugLog(
+        hypothesisId: 'H4',
+        location: 'state.dart:disposeSession',
+        message: 'dispose step',
+        data: {
+          'callId': call.id,
+          'step': name,
+          'elapsedMs': disposeSw.elapsedMilliseconds,
+        },
+      );
+    }
     // #endregion
     ready = false;
     _remoteVideoMuteTimer?.cancel();
     _remoteVideoMuteTimer = null;
+    micOn = false;
+    camOn = false;
+    sharingScreen = false;
+    remoteHasVideo = false;
 
-    // Capture renderer streams before detaching — remote wrappers are not
-    // always held in [_local]/[_display] and must still be released.
-    MediaStream? remoteStream;
-    MediaStream? localAttached;
-    try {
-      remoteStream = remoteRenderer.srcObject;
-    } catch (_) {}
-    try {
-      localAttached = localRenderer.srcObject;
-    } catch (_) {}
-
-    // Detach HTML/native video elements first — flutter_webrtc web dispose()
-    // does not clear srcObject, which can keep the tab's recording indicator.
-    // Also stops GPU texture updates on Linux before PC teardown finishes.
-    try {
-      localRenderer.srcObject = null;
-    } catch (_) {}
-    try {
-      remoteRenderer.srcObject = null;
-    } catch (_) {}
-
-    // Drop PC/track callbacks so late ICE/track events cannot re-attach media
-    // or notifyListeners into the messenger after hangup.
     final pc = _pc;
+    _pc = null;
+    _videoSender = null;
+    _videoMid = null;
+    final ownedDisplay = _display;
+    _display = null;
+    _displaySourceId = null;
+    final ownedLocal = _local;
+    _local = null;
+    final ownedPreview = _localPreview;
+    _localPreview = null;
+
+    // 1) Kill async callbacks so nothing re-enters during teardown.
     if (pc != null) {
       try {
         pc.onTrack = null;
@@ -1906,84 +2008,81 @@ class CallSession extends ChangeNotifier {
       try {
         pc.onDataChannel = null;
       } catch (_) {}
-      try {
-        for (final sender in await pc.getSenders()) {
-          _clearTrackCallbacks(sender.track);
-        }
-      } catch (_) {}
-      try {
-        for (final receiver in await pc.getReceivers()) {
-          _clearTrackCallbacks(receiver.track);
-          final track = receiver.track;
-          if (track != null) await _stopTrack(track);
-        }
-      } catch (_) {}
     }
+    for (final t in ownedDisplay?.getTracks() ?? const <MediaStreamTrack>[]) {
+      _clearTrackCallbacks(t);
+    }
+    for (final t in ownedLocal?.getTracks() ?? const <MediaStreamTrack>[]) {
+      _clearTrackCallbacks(t);
+    }
+    step('callbacks');
 
     try {
       await remoteControl?.dispose();
     } catch (_) {}
     remoteControl = null;
+    step('remoteControl');
 
-    // Stop display without renegotiating / restoring cam onto a dying PC.
+    // 2) Detach GPU textures from tracks, then dispose renderers BEFORE
+    // closing the PC. Reverse order left OnFrame → MarkTextureFrameAvailable
+    // hitting a half-dead registrar ("corrupted size vs. prev_size").
     try {
-      await _releaseDisplayCapture(announce: false);
+      localRenderer.srcObject = null;
     } catch (_) {}
-
-    // Sender tracks can outlive the MediaStream wrapper (replaceTrack, etc.).
     try {
-      if (pc != null) {
-        for (final sender in await pc.getSenders()) {
-          final track = sender.track;
-          if (track != null) {
-            try {
-              await sender.replaceTrack(null);
-            } catch (_) {}
-            await _stopTrack(track);
-          }
-        }
-      }
+      remoteRenderer.srcObject = null;
     } catch (_) {}
+    step('srcObject-null');
 
-    await _clearLocalPreview();
-    await _releaseStream(_local);
-    _local = null;
-    // preparedLocal may equal _local; _releaseStream is idempotent on stopped tracks.
-    await _releaseStream(preparedLocal);
-    await _releaseStream(preparedDisplay);
+    try {
+      await localRenderer.dispose();
+    } catch (_) {}
+    try {
+      await remoteRenderer.dispose();
+    } catch (_) {}
+    step('renderers');
 
-    // Only dispose Dart-created recv wrappers — never MediaStreams that came
-    // from onTrack (event.streams). On Linux, disposing those erases tracks
-    // from the native registry while the PC is still closing.
-    if (remoteStream != null &&
-        !identical(remoteStream, _local) &&
-        !identical(remoteStream, _display) &&
-        !identical(remoteStream, preparedLocal) &&
-        !identical(remoteStream, preparedDisplay)) {
-      final id = remoteStream.id;
-      if (id.startsWith('remote-') ||
-          id.startsWith('recv-') ||
-          id.startsWith('recv-fb-')) {
+    // 3) Close PeerConnection (releases sender/receiver track refs).
+    if (pc != null) {
+      try {
+        await pc.close();
+      } catch (_) {}
+      // Skip pc.dispose() on native — close() is enough and dispose() raced
+      // capturer cleanup into heap corruption on End call.
+      if (kIsWeb) {
         try {
-          await remoteStream.dispose();
+          await pc.dispose();
         } catch (_) {}
       }
     }
-    if (localAttached != null &&
-        !identical(localAttached, remoteStream) &&
-        !identical(localAttached, _local) &&
-        !identical(localAttached, _display) &&
-        !identical(localAttached, _localPreview)) {
-      try {
-        await localAttached.dispose();
-      } catch (_) {}
+    step('pc');
+
+    // 4) Stop owned tracks. Do NOT MediaStream.dispose() on native — that
+    // erases the capturer registry and double-frees with PC teardown.
+    Future<void> stopTracks(MediaStream? stream) async {
+      if (stream == null) return;
+      for (final t in stream.getTracks()) {
+        try {
+          await t.stop();
+        } catch (_) {}
+      }
+      if (kIsWeb) {
+        try {
+          await stream.dispose();
+        } catch (_) {}
+      }
     }
 
-    await _releasePeerConnection();
-    await _releaseRenderers();
-    micOn = false;
-    camOn = false;
-    sharingScreen = false;
+    await stopTracks(ownedPreview);
+    await stopTracks(ownedDisplay);
+    try {
+      await stopDisplayCaptureService();
+    } catch (_) {}
+    await stopTracks(ownedLocal);
+    await stopTracks(preparedLocal);
+    await stopTracks(preparedDisplay);
+    step('tracks');
+
     // #region agent log
     agentDebugSetHasCall(false);
     agentDebugLog(
@@ -2034,8 +2133,16 @@ class CallSession extends ChangeNotifier {
         try {
           t.enabled = false;
         } catch (_) {}
+        try {
+          await t.stop();
+        } catch (_) {}
       }
-      await _releaseStream(display);
+      // Native: skip MediaStream.dispose — registry erase races PC teardown.
+      if (kIsWeb) {
+        try {
+          await display.dispose();
+        } catch (_) {}
+      }
     }
     try {
       await stopDisplayCaptureService();
@@ -2094,7 +2201,7 @@ class PrivetState extends ChangeNotifier {
     _rt = RealtimeClient(url: _api.wsUrl);
     _rt.addHandler(_onEvent);
     _disposeVisibility = onDocumentVisible(_onTabVisible);
-    // Install web focus hooks early (no-op on non-web).
+    // Install focus hooks early (web document focus / desktop window focus).
     documentHasFocus;
   }
 
@@ -3266,8 +3373,12 @@ class PrivetState extends ChangeNotifier {
         tasksByChat[id] = [];
       }
     }
-    // Clear unread locally right away, then sync read cursor.
-    if (idx >= 0 && conversations[idx].unreadCount > 0) {
+    // Clear unread locally only when this window is actually focused —
+    // otherwise an open chat in the background would swallow badges.
+    if (idx >= 0 &&
+        conversations[idx].unreadCount > 0 &&
+        !documentHidden &&
+        documentHasFocus) {
       conversations[idx] = conversations[idx].copyWith(unreadCount: 0);
     }
     notifyShell();
@@ -3425,14 +3536,19 @@ class PrivetState extends ChangeNotifier {
     required String messageId,
     required String toConversationId,
   }) async {
-    final message = await _api.forwardMessage(
+    final result = await _api.forwardMessage(
       conversationId: toConversationId,
       messageId: messageId,
     );
+    final message = result.message;
     final list = List<ChatMessage>.from(messagesByChat[toConversationId] ?? []);
     if (!list.any((m) => m.id == message.id)) {
       list.add(message);
       messagesByChat[toConversationId] = list;
+    }
+    final source = result.sourceMessage;
+    if (source != null) {
+      _replaceMessage(source);
     }
     notifyListeners();
     await refreshInbox();
@@ -4766,7 +4882,9 @@ Examples:
           // Always ding on every new incoming message (mute is the only off switch).
           // Server sets playSound:false on non-primary sockets so multi-tab /
           // multi-browser logins for the same user only ding once.
-          if (isNew && event['playSound'] != false) {
+          if (isNew &&
+              event['playSound'] != false &&
+              message.kind != 'call') {
             var muted = false;
             for (final c in conversations) {
               if (c.id == chatId) {
@@ -4966,21 +5084,13 @@ Examples:
         final session = callSession;
         if (session == null) return;
         if (callId != null && callId != session.call.id) return;
-        session.remoteShareStopped = false;
-        session.peerSharingScreen = true;
-        session.peerShareControllable = event['controllable'] == true;
-        session.peerShareControlPlatform =
-            (event['controlPlatform'] as String?)?.trim() ?? '';
-        session.peerShareControlBackend =
-            (event['controlBackend'] as String?)?.trim() ?? '';
-        session.peerShareControlDetail =
-            (event['controlDetail'] as String?)?.trim() ?? '';
-        session.notifyListeners();
-        SchedulerBinding.instance.addPostFrameCallback((_) {
-          if (!identical(callSession, session)) return;
-          session.rebindRenderers();
-          wakeUiAfterMediaDialog();
-        });
+        session.onPeerShareStarted(
+          controllable: event['controllable'] == true,
+          controlPlatform:
+              (event['controlPlatform'] as String?)?.trim() ?? '',
+          controlBackend: (event['controlBackend'] as String?)?.trim() ?? '',
+          controlDetail: (event['controlDetail'] as String?)?.trim() ?? '',
+        );
         notifyListeners();
       case 'call.control_request':
         final callId = event['callId'] as String?;

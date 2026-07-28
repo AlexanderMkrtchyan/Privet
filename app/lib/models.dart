@@ -1,3 +1,4 @@
+import 'util/call_history.dart';
 import 'util/server_time.dart';
 
 class PrivetUser {
@@ -101,6 +102,36 @@ class ForwardedFrom {
       );
 }
 
+/// One outbound forward of a message into another conversation.
+class ForwardedTo {
+  ForwardedTo({
+    required this.conversationId,
+    required this.title,
+    this.isGroup = false,
+    this.forwardedMessageId,
+    this.byUserId,
+    this.createdAt,
+  });
+
+  final String conversationId;
+  final String title;
+  final bool isGroup;
+  final String? forwardedMessageId;
+  final String? byUserId;
+  final DateTime? createdAt;
+
+  factory ForwardedTo.fromJson(Map<String, dynamic> json) => ForwardedTo(
+        conversationId: (json['conversationId'] as String?) ?? '',
+        title: ((json['title'] as String?) ?? '').trim().isNotEmpty
+            ? (json['title'] as String).trim()
+            : 'Chat',
+        isGroup: json['isGroup'] == true,
+        forwardedMessageId: json['forwardedMessageId'] as String?,
+        byUserId: json['byUserId'] as String?,
+        createdAt: parseServerUtc(json['createdAt']),
+      );
+}
+
 class MessageReaction {
   MessageReaction({
     required this.emoji,
@@ -155,19 +186,21 @@ class ReplyPreview {
         id: m.id,
         body: (bodyOverride != null && bodyOverride.isNotEmpty)
             ? bodyOverride
-            : m.body.isNotEmpty
-                ? m.body
-                : switch (m.kind) {
-                    'image' => '📷 Photo',
-                    'video' => '🎬 Video',
-                    'audio' => '🎵 Audio',
-                    'voice' => '🎤 Voice message',
-                    'file' => m.fileName ?? '📎 File',
-                    'album' => m.body.isNotEmpty
-                        ? m.body
-                        : '📎 ${m.mediaItems.length} attachments',
-                    _ => m.body,
-                  },
+            : m.kind == 'call'
+                ? CallHistoryPayload.preview(m.body)
+                : m.body.isNotEmpty
+                    ? m.body
+                    : switch (m.kind) {
+                        'image' => '📷 Photo',
+                        'video' => '🎬 Video',
+                        'audio' => '🎵 Audio',
+                        'voice' => '🎤 Voice message',
+                        'file' => m.fileName ?? '📎 File',
+                        'album' => m.body.isNotEmpty
+                            ? m.body
+                            : '📎 ${m.mediaItems.length} attachments',
+                        _ => m.body,
+                      },
         kind: m.kind,
         senderName: m.sender.displayName,
         senderHandle: m.sender.handle,
@@ -349,6 +382,7 @@ class ChatMessage {
     this.replyToId,
     this.replyTo,
     this.forwardedFrom,
+    this.forwardedTo = const [],
     this.linkPreview,
     this.reactions = const [],
     this.pending = false,
@@ -373,6 +407,9 @@ class ChatMessage {
   final String? replyToId;
   final ReplyPreview? replyTo;
   final ForwardedFrom? forwardedFrom;
+
+  /// Chats this message was forwarded into (outbound notes on the source).
+  final List<ForwardedTo> forwardedTo;
   final LinkPreview? linkPreview;
   final List<MessageReaction> reactions;
   final bool pending;
@@ -385,9 +422,26 @@ class ChatMessage {
   bool get isDeleted =>
       deletedAt != null || kind == 'deleted';
 
+  bool get isCallHistory => kind == 'call';
+
   bool get hasAccentWrap =>
       !isDeleted &&
-      (replyTo != null || linkPreview != null || forwardedFrom != null);
+      (replyTo != null ||
+          linkPreview != null ||
+          forwardedFrom != null ||
+          forwardedTo.isNotEmpty);
+
+  /// e.g. "Forwarded to Jon", "Forwarded to Jon, Team", "Forwarded to 3 chats".
+  String? get forwardedToLabel {
+    if (forwardedTo.isEmpty) return null;
+    if (forwardedTo.length == 1) {
+      return 'Forwarded to ${forwardedTo.first.title}';
+    }
+    if (forwardedTo.length == 2) {
+      return 'Forwarded to ${forwardedTo[0].title}, ${forwardedTo[1].title}';
+    }
+    return 'Forwarded to ${forwardedTo.length} chats';
+  }
 
   List<MediaAttachment> get mediaItems {
     if (isDeleted) return const [];
@@ -419,6 +473,7 @@ class ChatMessage {
     List<MessageReaction>? reactions,
     ReplyPreview? replyTo,
     ForwardedFrom? forwardedFrom,
+    List<ForwardedTo>? forwardedTo,
     LinkPreview? linkPreview,
     bool? pending,
     DateTime? editedAt,
@@ -440,6 +495,7 @@ class ChatMessage {
         replyToId: replyToId,
         replyTo: replyTo ?? this.replyTo,
         forwardedFrom: forwardedFrom ?? this.forwardedFrom,
+        forwardedTo: forwardedTo ?? this.forwardedTo,
         linkPreview: linkPreview ?? this.linkPreview,
         reactions: reactions ?? this.reactions,
         pending: pending ?? this.pending,
@@ -463,6 +519,7 @@ class ChatMessage {
     final linkRaw = json['linkPreview'] as Map<String, dynamic>?;
     final reactionsRaw = (json['reactions'] as List?) ?? const [];
     final attachmentsRaw = (json['attachments'] as List?) ?? const [];
+    final forwardedToRaw = (json['forwardedTo'] as List?) ?? const [];
 
     return ChatMessage(
       id: json['id'] as String,
@@ -482,6 +539,11 @@ class ChatMessage {
       replyTo: replyRaw == null ? null : ReplyPreview.fromJson(replyRaw),
       forwardedFrom:
           forwardRaw == null ? null : ForwardedFrom.fromJson(forwardRaw),
+      forwardedTo: forwardedToRaw
+          .whereType<Map>()
+          .map((e) => ForwardedTo.fromJson(Map<String, dynamic>.from(e)))
+          .where((e) => e.conversationId.isNotEmpty)
+          .toList(),
       linkPreview: linkRaw == null ? null : LinkPreview.fromJson(linkRaw),
       reactions: reactionsRaw
           .map((e) => MessageReaction.fromJson(e as Map<String, dynamic>))

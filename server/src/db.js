@@ -124,6 +124,19 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_reactions_message
       ON message_reactions(message_id);
 
+    -- Outbound forward notes on the *source* message ("Forwarded to Jon").
+    CREATE TABLE IF NOT EXISTS message_forwards (
+      forwarded_message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+      source_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      to_conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      by_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      target_title TEXT NOT NULL,
+      target_is_group INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_forwards_source
+      ON message_forwards(source_message_id);
+
     CREATE TABLE IF NOT EXISTS task_items (
       id TEXT PRIMARY KEY,
       conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -159,6 +172,40 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_device_tokens_user
       ON device_tokens(user_id);
   `);
+
+  // Backfill outbound notes from existing inbound forward copies.
+  db.prepare(
+    `
+    INSERT OR IGNORE INTO message_forwards (
+      forwarded_message_id, source_message_id, to_conversation_id,
+      by_user_id, target_title, target_is_group, created_at
+    )
+    SELECT
+      m.id,
+      m.forwarded_from_id,
+      m.conversation_id,
+      m.sender_id,
+      COALESCE(
+        NULLIF(TRIM(c.title), ''),
+        (
+          SELECT u.display_name
+          FROM conversation_members cm
+          JOIN users u ON u.id = cm.user_id
+          WHERE cm.conversation_id = m.conversation_id
+            AND cm.user_id != m.sender_id
+          ORDER BY cm.joined_at ASC
+          LIMIT 1
+        ),
+        'Chat'
+      ),
+      c.is_group,
+      m.created_at
+    FROM messages m
+    JOIN conversations c ON c.id = m.conversation_id
+    WHERE m.forwarded_from_id IS NOT NULL
+      AND m.forwarded_from_id != ''
+  `,
+  ).run();
 }
 
 export function publicUser(row) {

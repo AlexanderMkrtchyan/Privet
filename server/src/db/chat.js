@@ -69,7 +69,7 @@ function parseAttachments(raw, fallback = null) {
   return [];
 }
 
-function mapMessage(m, { reactions = [], replyTo = null } = {}) {
+function mapMessage(m, { reactions = [], replyTo = null, forwardedTo = [] } = {}) {
   const deleted = !!m.deleted_at;
   const attachments = deleted
     ? []
@@ -101,6 +101,7 @@ function mapMessage(m, { reactions = [], replyTo = null } = {}) {
     replyToId: m.reply_to_id || null,
     replyTo: deleted ? null : replyTo,
     forwardedFrom,
+    forwardedTo: deleted ? [] : forwardedTo,
     linkPreview: deleted ? null : parseLinkPreview(m.link_preview),
     reactions: deleted ? [] : reactions,
     createdAt: m.created_at,
@@ -185,6 +186,54 @@ function unreadCount(conversationId, userId, lastReadAt) {
     .get(conversationId, userId).n;
 }
 
+function formatCallDuration(totalSec) {
+  const s = Math.max(0, Math.floor(Number(totalSec) || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`;
+  }
+  return `${m}:${String(r).padStart(2, '0')}`;
+}
+
+function callModeLabel(mode) {
+  switch (mode) {
+    case 'audio':
+      return 'Audio call';
+    case 'screen':
+      return 'Screen share';
+    case 'control':
+      return 'Remote control';
+    default:
+      return 'Video call';
+  }
+}
+
+/** Teams-style label for kind=call JSON bodies (and plain fallbacks). */
+export function callHistoryLabel(body) {
+  try {
+    const parsed = JSON.parse(body || '');
+    if (!parsed || typeof parsed !== 'object') {
+      return body || 'Call';
+    }
+    const modeLabel = callModeLabel(parsed.mode);
+    const lower = modeLabel.toLowerCase();
+    switch (parsed.outcome) {
+      case 'missed':
+        return `Missed ${lower}`;
+      case 'declined':
+        return `Declined ${lower}`;
+      case 'canceled':
+        return `Canceled ${lower}`;
+      default:
+        return `${modeLabel} · ${formatCallDuration(parsed.durationSec)}`;
+    }
+  } catch {
+    return body || 'Call';
+  }
+}
+
 function previewBody(kind, body, attachmentCount = 0) {
   switch (kind) {
     case 'image':
@@ -199,6 +248,8 @@ function previewBody(kind, body, attachmentCount = 0) {
       return body || '📎 File';
     case 'album':
       return body || `📎 ${attachmentCount || 2} attachments`;
+    case 'call':
+      return callHistoryLabel(body);
     case 'ai': {
       try {
         const parsed = JSON.parse(body || '');
@@ -245,6 +296,81 @@ function reactionsForMessage(messageId) {
   return [...grouped.values()];
 }
 
+function conversationTitleFor(conversationId, viewerId) {
+  const meta = db
+    .prepare(
+      'SELECT is_group, title FROM conversations WHERE id = ?',
+    )
+    .get(conversationId);
+  if (!meta) return 'Chat';
+  if (meta.is_group) {
+    const title = (meta.title || '').trim();
+    return title || 'Group';
+  }
+  const peer = peerForDm(conversationId, viewerId);
+  const name = (peer?.displayName || '').trim();
+  if (name) return name;
+  const handle = (peer?.handle || '').trim();
+  if (handle) return `@${handle}`;
+  return 'Chat';
+}
+
+function forwardsForMessage(messageId) {
+  return db
+    .prepare(
+      `
+      SELECT
+        forwarded_message_id AS forwardedMessageId,
+        to_conversation_id AS conversationId,
+        target_title AS title,
+        target_is_group AS isGroup,
+        by_user_id AS byUserId,
+        created_at AS createdAt
+      FROM message_forwards
+      WHERE source_message_id = ?
+      ORDER BY created_at ASC
+    `,
+    )
+    .all(messageId)
+    .map((row) => ({
+      forwardedMessageId: row.forwardedMessageId,
+      conversationId: row.conversationId,
+      title: row.title || 'Chat',
+      isGroup: !!row.isGroup,
+      byUserId: row.byUserId,
+      createdAt: row.createdAt,
+    }));
+}
+
+function recordMessageForward({
+  sourceMessageId,
+  forwardedMessageId,
+  toConversationId,
+  byUserId,
+}) {
+  const title = conversationTitleFor(toConversationId, byUserId);
+  const meta = db
+    .prepare('SELECT is_group FROM conversations WHERE id = ?')
+    .get(toConversationId);
+  db.prepare(
+    `
+    INSERT OR REPLACE INTO message_forwards (
+      forwarded_message_id, source_message_id, to_conversation_id,
+      by_user_id, target_title, target_is_group, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `,
+  ).run(
+    forwardedMessageId,
+    sourceMessageId,
+    toConversationId,
+    byUserId,
+    title,
+    meta?.is_group ? 1 : 0,
+    nowSql(),
+  );
+}
+
 function replyPreview(replyToId, quoteOverride = null) {
   if (!replyToId) return null;
   const row = db
@@ -286,6 +412,7 @@ function hydrateMessage(row) {
   return mapMessage(row, {
     reactions: reactionsForMessage(row.id),
     replyTo: replyPreview(row.reply_to_id, row.reply_quote),
+    forwardedTo: forwardsForMessage(row.id),
   });
 }
 
@@ -594,6 +721,15 @@ export function createMessage({
 
   // Sender has already seen their own message.
   markConversationRead(conversationId, senderId, id);
+
+  if (forwardMeta.forwarded_from_id) {
+    recordMessageForward({
+      sourceMessageId: forwardMeta.forwarded_from_id,
+      forwardedMessageId: id,
+      toConversationId: conversationId,
+      byUserId: senderId,
+    });
+  }
 
   return getMessage(id);
 }

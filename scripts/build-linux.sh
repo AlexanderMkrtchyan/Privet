@@ -319,10 +319,11 @@ if [[ -e /dev/nvidia0 ]]; then
   export __GL_SYNC_TO_VBLANK="${__GL_SYNC_TO_VBLANK:-0}"
   unset __GL_MaxFramesAllowed
 fi
-# Flutter Linux OpenGL present (gdk_cairo_draw_from_gl) caps ~20fps on NVIDIA+X11.
-# Software compositor sustains ~60fps; WebRTC still uses pixel-buffer textures.
-# Animations stay on (not low-resource mode). Override: FLUTTER_LINUX_RENDERER=opengl.
-export FLUTTER_LINUX_RENDERER="${FLUTTER_LINUX_RENDERER:-software}"
+# MUST use OpenGL: Flutter's software backend has no external-texture GL
+# callback, so flutter_webrtc RTCVideoView (screen share / camera) paints black.
+# Prefer OpenGL even if NVIDIA+X11 present is ~20–30fps — invisible video is worse.
+# Override only for debugging: FLUTTER_LINUX_RENDERER=software.
+export FLUTTER_LINUX_RENDERER="${FLUTTER_LINUX_RENDERER:-opengl}"
 cd "$APP_DIR"
 exec "$APP_DIR/privet" "$@"
 EOF
@@ -414,10 +415,11 @@ if [[ -e /dev/nvidia0 ]]; then
   export __GL_SYNC_TO_VBLANK="\${__GL_SYNC_TO_VBLANK:-0}"
   unset __GL_MaxFramesAllowed
 fi
-# Flutter Linux OpenGL present (gdk_cairo_draw_from_gl) caps ~20fps on NVIDIA+X11.
-# Software compositor sustains ~60fps; WebRTC still uses pixel-buffer textures.
-# Animations stay on (not low-resource mode). Override: FLUTTER_LINUX_RENDERER=opengl.
-export FLUTTER_LINUX_RENDERER="\${FLUTTER_LINUX_RENDERER:-software}"
+# MUST use OpenGL: Flutter's software backend has no external-texture GL
+# callback, so flutter_webrtc RTCVideoView (screen share / camera) paints black.
+# Prefer OpenGL even if NVIDIA+X11 present is ~20–30fps — invisible video is worse.
+# Override only for debugging: FLUTTER_LINUX_RENDERER=software.
+export FLUTTER_LINUX_RENDERER="\${FLUTTER_LINUX_RENDERER:-opengl}"
 exec "$INSTALL_DIR/privet" "\$@"
 EOF
 chmod +x "$INSTALL_DIR/privet-launch.sh"

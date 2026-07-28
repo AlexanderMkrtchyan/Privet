@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -82,6 +83,13 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   Offset? _cursorLocal;
   bool _cursorOver = false;
   bool _exporting = false;
+  bool _hasCommittedMarks = false;
+
+  /// High-frequency draw updates — must not rebuild Image.network.
+  final ValueNotifier<int> _draftTick = ValueNotifier<int>(0);
+
+  /// Cursor-only ticks — avoid repainting committed marks on every hover.
+  final ValueNotifier<int> _cursorTick = ValueNotifier<int>(0);
 
   bool get _gallery => widget.urls.length > 1;
 
@@ -93,7 +101,8 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
 
   bool get _drawingLocked => _annotateMode;
 
-  bool get _hasMarks => _currentMarks.isNotEmpty || _draft != null;
+  bool get _hasMarks =>
+      _hasCommittedMarks || _currentMarks.isNotEmpty || _draft != null;
 
   bool get _canAddToMessage =>
       _hasMarks && composerMediaAttachAvailable && !_exporting;
@@ -107,6 +116,21 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
       return named[_index]!;
     }
     return 'image.jpg';
+  }
+
+  void _bumpDraft() {
+    _draftTick.value++;
+  }
+
+  void _bumpCursor() {
+    _cursorTick.value++;
+  }
+
+  void _syncHasCommittedMarks() {
+    final next = _currentMarks.isNotEmpty;
+    if (next != _hasCommittedMarks) {
+      setState(() => _hasCommittedMarks = next);
+    }
   }
 
   @override
@@ -125,6 +149,8 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   @override
   void dispose() {
     setPrivetAnnotHover(false);
+    _draftTick.dispose();
+    _cursorTick.dispose();
     _pageController.dispose();
     for (final t in _transforms) {
       t.dispose();
@@ -136,13 +162,16 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
 
   void _onPageChanged(int page) {
     _transforms[_index].value = Matrix4.identity();
+    _draft = null;
+    _cursorLocal = null;
+    _cursorOver = false;
     setState(() {
       _index = page;
       _zoomed = false;
-      _draft = null;
-      _cursorLocal = null;
-      _cursorOver = false;
+      _hasCommittedMarks = _marks[page].isNotEmpty;
     });
+    _bumpDraft();
+    _bumpCursor();
   }
 
   void _syncZoomed() {
@@ -197,129 +226,276 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   }
 
   void _setAnnotateMode(bool on) {
-    setPrivetAnnotHover(on);
+    if (!on) setPrivetAnnotHover(false);
+    if (_annotateMode == on) return;
+    _draft = null;
+    _cursorLocal = null;
+    _cursorOver = false;
     setState(() {
       _annotateMode = on;
-      _draft = null;
-      _cursorLocal = null;
-      _cursorOver = false;
       if (on) {
         _transforms[_index].value = Matrix4.identity();
         _zoomed = false;
       }
     });
+    _bumpDraft();
+    _bumpCursor();
   }
 
   void _selectTool(ImageAnnotTool tool) {
-    setPrivetAnnotHover(true);
+    final alreadyOn = _annotateMode;
+    final sameTool = _tool == tool;
+    _draft = null;
+    if (alreadyOn && sameTool) {
+      _bumpDraft();
+      return;
+    }
     setState(() {
       _annotateMode = true;
       _tool = tool;
-      _draft = null;
-      _transforms[_index].value = Matrix4.identity();
-      _zoomed = false;
+      if (!alreadyOn) {
+        _transforms[_index].value = Matrix4.identity();
+        _zoomed = false;
+      }
     });
+    _bumpDraft();
   }
 
   void _cycleInk() {
     setState(() => _inkIndex = (_inkIndex + 1) % kAnnotationInks.length);
+    _bumpDraft();
+    _bumpCursor();
   }
 
   void _undo() {
     if (_currentMarks.isEmpty) return;
-    setState(() {
-      _currentMarks.removeLast();
-      _draft = null;
-    });
+    _currentMarks.removeLast();
+    _draft = null;
+    _syncHasCommittedMarks();
+    _bumpDraft();
+    setState(() {});
   }
 
   void _clearMarks() {
     if (_currentMarks.isEmpty && _draft == null) return;
-    setState(() {
-      _currentMarks.clear();
-      _draft = null;
-    });
+    _currentMarks.clear();
+    _draft = null;
+    _hasCommittedMarks = false;
+    _bumpDraft();
+    setState(() {});
   }
 
   double get _strokeWidth {
+    final box = _captureKeys[_index].currentContext?.findRenderObject();
+    if (box is RenderBox && box.hasSize) {
+      return annotationStrokeWidth(box.size);
+    }
     final side = MediaQuery.sizeOf(context).shortestSide;
     return annotationStrokeWidth(Size(side, side));
   }
 
   void _onDrawStart(int page, Offset local) {
     if (!_annotateMode || page != _index) return;
-    setState(() {
-      _cursorLocal = local;
-      _cursorOver = true;
-      _draft = ImageMarkDraft(
-        tool: _tool,
-        start: local,
-        color: _ink,
-        strokeWidth: _strokeWidth,
-      );
-    });
+    _cursorLocal = local;
+    _cursorOver = true;
+    _draft = ImageMarkDraft(
+      tool: _tool,
+      start: local,
+      color: _ink,
+      strokeWidth: _strokeWidth,
+    );
+    _bumpDraft();
+    _bumpCursor();
   }
 
   void _onDrawUpdate(int page, Offset local) {
     if (_draft == null || page != _index) return;
-    setState(() {
-      _cursorLocal = local;
-      _draft!.update(local);
-    });
+    _cursorLocal = local;
+    _draft!.update(local);
+    _bumpDraft();
+    _bumpCursor();
   }
 
   void _onDrawEnd(int page) {
     if (_draft == null || page != _index) return;
     final committed = _draft!.commit();
-    setState(() {
-      if (committed != null) _marks[page].add(committed);
-      _draft = null;
-    });
+    _draft = null;
+    if (committed != null) {
+      _marks[page].add(committed);
+      _hasCommittedMarks = true;
+      setState(() {});
+    }
+    _bumpDraft();
+  }
+
+  void _showExportError([String message = 'Could not add annotated image']) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger != null) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(message),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+    // Dialog routes sometimes sit above the root messenger — show in-dialog.
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Uint8List _pngBytes(ByteData data) =>
+      data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+
+  Future<Uint8List?> _captureViaBoundary() async {
+    final boundary = _captureKeys[_index].currentContext?.findRenderObject()
+        as RenderRepaintBoundary?;
+    if (boundary == null || !boundary.hasSize || boundary.size.isEmpty) {
+      return null;
+    }
+    final dpr = MediaQuery.devicePixelRatioOf(context).clamp(1.0, 2.5);
+    // Wait until the layer is painted; toImage throws if still dirty.
+    for (var i = 0; i < 3; i++) {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return null;
+      if (!boundary.debugNeedsPaint) break;
+    }
+    final image = await boundary.toImage(pixelRatio: dpr);
+    try {
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) return null;
+      return _pngBytes(byteData);
+    } finally {
+      image.dispose();
+    }
+  }
+
+  Future<ui.Image> _decodeNetworkImage(String url) async {
+    final completer = Completer<ui.Image>();
+    final stream = NetworkImage(url).resolve(const ImageConfiguration());
+    late final ImageStreamListener listener;
+    listener = ImageStreamListener(
+      (info, _) {
+        stream.removeListener(listener);
+        completer.complete(info.image.clone());
+      },
+      onError: (error, stack) {
+        stream.removeListener(listener);
+        completer.completeError(error, stack);
+      },
+    );
+    stream.addListener(listener);
+    return completer.future;
+  }
+
+  Future<Uint8List?> _captureViaComposite() async {
+    final box = _captureKeys[_index].currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.hasSize || box.size.isEmpty) return null;
+
+    final displaySize = box.size;
+    final src = await _decodeNetworkImage(_url);
+    try {
+      final scaleX = src.width / displaySize.width;
+      final scaleY = src.height / displaySize.height;
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      paintImage(
+        canvas: canvas,
+        rect: Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble()),
+        image: src,
+        fit: BoxFit.fill,
+        filterQuality: FilterQuality.medium,
+      );
+      canvas.save();
+      canvas.scale(scaleX, scaleY);
+      for (final mark in _currentMarks) {
+        mark.paint(canvas);
+      }
+      canvas.restore();
+
+      final picture = recorder.endRecording();
+      final out = await picture.toImage(src.width, src.height);
+      picture.dispose();
+      try {
+        final byteData = await out.toByteData(format: ui.ImageByteFormat.png);
+        if (byteData == null) return null;
+        return _pngBytes(byteData);
+      } finally {
+        out.dispose();
+      }
+    } finally {
+      src.dispose();
+    }
   }
 
   Future<void> _addAnnotatedToMessage() async {
-    if (!_canAddToMessage) return;
+    if (!_canAddToMessage) {
+      if (!composerMediaAttachAvailable) {
+        _showExportError('Composer is not ready — open a chat and try again');
+      }
+      return;
+    }
     setState(() => _exporting = true);
     try {
       if (_draft != null) {
         final committed = _draft!.commit();
-        if (committed != null) _currentMarks.add(committed);
+        if (committed != null) {
+          _currentMarks.add(committed);
+          _hasCommittedMarks = true;
+        }
         _draft = null;
+        _bumpDraft();
       }
       _transforms[_index].value = Matrix4.identity();
-      _zoomed = false;
-      setState(() {});
+      if (_zoomed) {
+        setState(() => _zoomed = false);
+      } else {
+        setState(() {});
+      }
       await WidgetsBinding.instance.endOfFrame;
 
-      final boundary = _captureKeys[_index].currentContext?.findRenderObject()
-          as RenderRepaintBoundary?;
-      if (boundary == null || !mounted) return;
-
-      final dpr = MediaQuery.devicePixelRatioOf(context).clamp(1.0, 3.0);
-      final image = await boundary.toImage(pixelRatio: dpr);
-      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-      image.dispose();
-      if (byteData == null || !mounted) return;
+      Uint8List? bytes;
+      try {
+        bytes = await _captureViaBoundary();
+      } catch (_) {
+        bytes = null;
+      }
+      if (bytes == null || bytes.isEmpty) {
+        bytes = await _captureViaComposite();
+      }
+      if (bytes == null || bytes.isEmpty || !mounted) {
+        _showExportError();
+        return;
+      }
 
       final base = _downloadName.contains('.')
           ? _downloadName.replaceFirst(RegExp(r'\.[^.]+$'), '')
           : _downloadName;
+      if (!composerMediaAttachAvailable) {
+        _showExportError('Composer is not ready — open a chat and try again');
+        return;
+      }
       attachMediaToComposer(
         PickedBytes(
-          bytes: byteData.buffer.asUint8List(),
+          bytes: bytes,
           filename: '${base}_annotated.png',
           mimeType: 'image/png',
         ),
       );
       if (mounted) _close();
     } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(
-          content: Text('Could not add annotated image'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      _showExportError();
     } finally {
       if (mounted) setState(() => _exporting = false);
     }
@@ -380,7 +556,6 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
 
   Widget _buildImagePage(int i) {
     final marks = _marks[i];
-    final draft = i == _index ? _draft : null;
     return Center(
       child: GestureDetector(
         onTap: () {
@@ -400,6 +575,8 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
           child: Stack(
             fit: StackFit.passthrough,
             children: [
+              // Capture image + marks together. Paint ticks only rebuild the
+              // CustomPaint sibling so Image.network is not reconstructed.
               RepaintBoundary(
                 key: _captureKeys[i],
                 child: Stack(
@@ -408,6 +585,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                     Image.network(
                       widget.urls[i],
                       fit: BoxFit.contain,
+                      gaplessPlayback: true,
                       errorBuilder: (_, error, stack) => Padding(
                         padding: const EdgeInsets.all(32),
                         child: Text(
@@ -417,12 +595,18 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                       ),
                     ),
                     Positioned.fill(
-                      child: CustomPaint(
-                        painter: ImageAnnotationPainter(
-                          marks: marks,
-                          draft: draft,
-                        ),
-                        child: const SizedBox.expand(),
+                      child: ValueListenableBuilder<int>(
+                        valueListenable: _draftTick,
+                        builder: (context, _, child) {
+                          final draft = i == _index ? _draft : null;
+                          return CustomPaint(
+                            painter: ImageAnnotationPainter(
+                              marks: marks,
+                              draft: draft,
+                            ),
+                            child: const SizedBox.expand(),
+                          );
+                        },
                       ),
                     ),
                   ],
@@ -433,17 +617,18 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                   ignoring: !_annotateMode,
                   child: MouseRegion(
                     cursor: SystemMouseCursors.none,
+                    onEnter: (_) => setPrivetAnnotHover(true),
                     onHover: (event) {
-                      setState(() {
-                        _cursorLocal = event.localPosition;
-                        _cursorOver = true;
-                      });
+                      setPrivetAnnotHover(true);
+                      _cursorLocal = event.localPosition;
+                      _cursorOver = true;
+                      _bumpCursor();
                     },
                     onExit: (_) {
-                      setState(() {
-                        _cursorOver = false;
-                        _cursorLocal = null;
-                      });
+                      setPrivetAnnotHover(false);
+                      _cursorOver = false;
+                      _cursorLocal = null;
+                      _bumpCursor();
                     },
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque,
@@ -452,12 +637,19 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                       onPanUpdate: (details) =>
                           _onDrawUpdate(i, details.localPosition),
                       onPanEnd: (_) => _onDrawEnd(i),
-                      onPanCancel: () => setState(() => _draft = null),
+                      onPanCancel: () {
+                        _draft = null;
+                        _bumpDraft();
+                      },
                       child: Stack(
                         fit: StackFit.expand,
                         children: [
                           const SizedBox.expand(),
-                          if (i == _index) _toolCursor(),
+                          if (i == _index)
+                            ValueListenableBuilder<int>(
+                              valueListenable: _cursorTick,
+                              builder: (context, _, child) => _toolCursor(),
+                            ),
                         ],
                       ),
                     ),
@@ -472,48 +664,57 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   }
 
   Widget _addToMessageButton() {
-    return Material(
-      color: _canAddToMessage
-          ? PrivetTheme.signal.withValues(alpha: 0.95)
-          : Colors.black.withValues(alpha: 0.35),
-      borderRadius: BorderRadius.circular(22),
-      child: InkWell(
+    return MouseRegion(
+      cursor: _canAddToMessage
+          ? SystemMouseCursors.click
+          : SystemMouseCursors.basic,
+      onEnter: (_) => setPrivetAnnotHover(false),
+      child: Material(
+        color: _canAddToMessage
+            ? PrivetTheme.signal.withValues(alpha: 0.95)
+            : Colors.black.withValues(alpha: 0.35),
         borderRadius: BorderRadius.circular(22),
-        onTap: _canAddToMessage ? _addAnnotatedToMessage : null,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (_exporting)
-                SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: PrivetTheme.onAccent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(22),
+          mouseCursor: _canAddToMessage
+              ? SystemMouseCursors.click
+              : SystemMouseCursors.basic,
+          onTap: _canAddToMessage ? _addAnnotatedToMessage : null,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_exporting)
+                  SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: PrivetTheme.onAccent,
+                    ),
+                  )
+                else
+                  Icon(
+                    Icons.add_photo_alternate_outlined,
+                    size: 20,
+                    color: _canAddToMessage
+                        ? PrivetTheme.onAccent
+                        : PrivetTheme.paper.withValues(alpha: 0.4),
                   ),
-                )
-              else
-                Icon(
-                  Icons.add_photo_alternate_outlined,
-                  size: 20,
-                  color: _canAddToMessage
-                      ? PrivetTheme.onAccent
-                      : PrivetTheme.paper.withValues(alpha: 0.4),
+                const SizedBox(width: 8),
+                Text(
+                  'Add to message',
+                  style: TextStyle(
+                    color: _canAddToMessage
+                        ? PrivetTheme.onAccent
+                        : PrivetTheme.paper.withValues(alpha: 0.4),
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                  ),
                 ),
-              const SizedBox(width: 8),
-              Text(
-                'Add to message',
-                style: TextStyle(
-                  color: _canAddToMessage
-                      ? PrivetTheme.onAccent
-                      : PrivetTheme.paper.withValues(alpha: 0.4),
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13,
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -686,12 +887,16 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
               onPageChanged: _onPageChanged,
               itemBuilder: (context, i) => _buildImagePage(i),
             ),
+            // Chrome overlays only — middle stays pass-through so drawing and
+            // tool buttons are not fighting a full-screen hit target.
             SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
-                child: Column(
-                  children: [
-                    Row(
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+                  child: MouseRegion(
+                    onEnter: (_) => setPrivetAnnotHover(false),
+                    child: Row(
                       children: [
                         if (_gallery)
                           Padding(
@@ -729,12 +934,21 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                         ),
                       ],
                     ),
-                    const Spacer(),
-                    if (_annotateMode)
-                      _annotateToolbar()
-                    else
-                      _viewToolbar(canPrev: canPrev, canNext: canNext),
-                  ],
+                  ),
+                ),
+              ),
+            ),
+            SafeArea(
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                  child: MouseRegion(
+                    onEnter: (_) => setPrivetAnnotHover(false),
+                    child: _annotateMode
+                        ? _annotateToolbar()
+                        : _viewToolbar(canPrev: canPrev, canNext: canNext),
+                  ),
                 ),
               ),
             ),
@@ -773,6 +987,9 @@ class _ChromeIconButton extends StatelessWidget {
       child: IconButton(
         tooltip: tooltip,
         onPressed: onPressed,
+        mouseCursor: enabled
+            ? SystemMouseCursors.click
+            : SystemMouseCursors.basic,
         icon: Icon(icon, color: fg),
       ),
     );
@@ -832,6 +1049,7 @@ class _InkSwatchButton extends StatelessWidget {
       child: IconButton(
         tooltip: 'Color',
         onPressed: onPressed,
+        mouseCursor: SystemMouseCursors.click,
         icon: Container(
           width: 18,
           height: 18,

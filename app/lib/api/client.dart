@@ -316,7 +316,7 @@ class ApiClient {
     _decode(res);
   }
 
-  Future<ChatMessage> forwardMessage({
+  Future<({ChatMessage message, ChatMessage? sourceMessage})> forwardMessage({
     required String conversationId,
     required String messageId,
   }) async {
@@ -326,7 +326,12 @@ class ApiClient {
       body: jsonEncode({'messageId': messageId}),
     );
     final data = _decode(res);
-    return ChatMessage.fromJson(data['message'] as Map<String, dynamic>);
+    final message =
+        ChatMessage.fromJson(data['message'] as Map<String, dynamic>);
+    final sourceRaw = data['sourceMessage'] as Map<String, dynamic>?;
+    final sourceMessage =
+        sourceRaw == null ? null : ChatMessage.fromJson(sourceRaw);
+    return (message: message, sourceMessage: sourceMessage);
   }
 
   Future<Map<String, dynamic>> markRead(

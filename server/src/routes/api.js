@@ -569,6 +569,14 @@ export async function registerRoutes(app) {
         soundOnce: true,
       });
       noteConversationMessage(id);
+      // Source chat sees "Forwarded to …" on the original bubble.
+      const sourceMessage = getMessage(messageId);
+      if (sourceMessage) {
+        broadcastToUsers(memberIds(sourceMessage.conversationId), {
+          type: 'message.updated',
+          message: sourceMessage,
+        });
+      }
       // Inline notify (same as WS path).
       const title = message.sender.displayName || message.sender.handle || 'Privet';
       const body =
@@ -593,7 +601,7 @@ export async function registerRoutes(app) {
           });
         }
       }
-      return { message };
+      return { message, sourceMessage: sourceMessage || null };
     } catch (err) {
       return reply.code(400).send({ error: err.message || 'forward failed' });
     }

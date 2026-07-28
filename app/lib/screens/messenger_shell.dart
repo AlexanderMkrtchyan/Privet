@@ -24,6 +24,7 @@ import '../util/app_clipboard.dart';
 import '../util/app_update.dart';
 import '../util/clipboard_files.dart';
 import '../util/ai_turn.dart';
+import '../util/call_history.dart';
 import '../util/composer_autocomplete.dart';
 import '../util/emoticon_expand.dart';
 import '../util/composer_autocorrect.dart';
@@ -604,7 +605,13 @@ class InboxPane extends StatelessWidget {
                                     )
                                   else
                                     Text(
-                                      c.lastMessage?.body ?? 'No messages yet',
+                                      c.lastMessage == null
+                                          ? 'No messages yet'
+                                          : c.lastMessage!.kind == 'call'
+                                              ? CallHistoryPayload.preview(
+                                                  c.lastMessage!.body,
+                                                )
+                                              : c.lastMessage!.body,
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
@@ -620,7 +627,11 @@ class InboxPane extends StatelessWidget {
                                       c.peer!.handle.isNotEmpty &&
                                       c.lastMessage != null)
                                     Text(
-                                      c.lastMessage!.body,
+                                      c.lastMessage!.kind == 'call'
+                                          ? CallHistoryPayload.preview(
+                                              c.lastMessage!.body,
+                                            )
+                                          : c.lastMessage!.body,
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
@@ -2594,6 +2605,10 @@ class _ConversationPaneState extends State<ConversationPane>
   Timer? _searchDebounce;
   final List<PickedBytes> _draftMedia = [];
   ChatMessage? _replyingTo;
+  /// Own message currently being edited in the composer (no popup).
+  ChatMessage? _editingMessage;
+  /// Composer draft stashed while editing so Cancel restores it.
+  String? _composerDraftBeforeEdit;
   List<ComposerSuggestion> _acSuggestions = [];
   int _acIndex = 0;
   int _acReplaceStart = 0;
@@ -2609,6 +2624,7 @@ class _ConversationPaneState extends State<ConversationPane>
   bool _showTasks = false;
   String? _folderConversationId;
   String? _draftConversationId;
+  int? _composerMediaAttachId;
   /// Optimistic until a real call/getUserMedia — never block chat open on
   /// enumerateDevices (Linux WebRTC ADM stall).
   MediaPermissionStatus _mediaPerms = const MediaPermissionStatus(
@@ -2642,7 +2658,8 @@ class _ConversationPaneState extends State<ConversationPane>
       });
       _syncComposerHasContent();
     });
-    registerComposerMediaAttach(_onAnnotatedImageFromLightbox);
+    _composerMediaAttachId =
+        registerComposerMediaAttach(_onAnnotatedImageFromLightbox);
     // Do NOT enumerateDevices / init WebRTC ADM on chat open — on Linux+NVIDIA
     // that stalls frame presentation for many seconds (isolate stays alive,
     // fps→0). Probe lazily when the user taps mic or call controls.
@@ -3645,12 +3662,42 @@ class _ConversationPaneState extends State<ConversationPane>
     // Listener refreshes / clears suggestions from the new text.
   }
 
-  /// Composer key handling: autocomplete, Backspace-undo for autocorrect, Enter-to-send.
+  /// Insert a line break at the composer caret (Shift/Alt+Enter).
+  void _insertComposerNewline() {
+    final value = _controller.value;
+    final sel = value.selection;
+    final text = value.text;
+    final start = sel.isValid ? sel.start : text.length;
+    final end = sel.isValid ? sel.end : text.length;
+    final next = text.replaceRange(start, end, '\n');
+    _controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: start + 1),
+    );
+    widget.state.notifyTyping();
+  }
+
+  /// Composer key handling: autocomplete, edit-last (↑), Backspace-undo, Enter-to-send.
   KeyEventResult _handleComposerKeyEvent(KeyEvent event) {
     if (_handleComposerAutocompleteKey(event)) {
       return KeyEventResult.handled;
     }
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+    if (event.logicalKey == LogicalKeyboardKey.escape) {
+      if (_editingMessage != null) {
+        _cancelEditMessage();
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+      if (_tryBeginEditLastOwnMessage()) {
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
 
     if (event.logicalKey == LogicalKeyboardKey.backspace) {
       if (_controller.tryUndoWithBackspace()) {
@@ -3665,10 +3712,17 @@ class _ConversationPaneState extends State<ConversationPane>
         event.logicalKey == LogicalKeyboardKey.enter ||
         event.logicalKey == LogicalKeyboardKey.numpadEnter;
     if (!isEnter) return KeyEventResult.ignored;
-    if (HardwareKeyboard.instance.isShiftPressed) {
-      return KeyEventResult.ignored;
+    final keys = HardwareKeyboard.instance;
+    // Shift+Enter (macOS/Linux) and Alt+Enter (Windows) insert a newline.
+    if (keys.isShiftPressed || keys.isAltPressed) {
+      _insertComposerNewline();
+      return KeyEventResult.handled;
     }
     if (_recording) return KeyEventResult.ignored;
+    if (_editingMessage != null) {
+      unawaited(_commitEditMessage());
+      return KeyEventResult.handled;
+    }
     _send();
     return KeyEventResult.handled;
   }
@@ -3703,7 +3757,8 @@ class _ConversationPaneState extends State<ConversationPane>
     }
     if (key == LogicalKeyboardKey.enter ||
         key == LogicalKeyboardKey.numpadEnter) {
-      if (HardwareKeyboard.instance.isShiftPressed) return false;
+      final keys = HardwareKeyboard.instance;
+      if (keys.isShiftPressed || keys.isAltPressed) return false;
       _acceptComposerAutocomplete();
       return true;
     }
@@ -3734,6 +3789,8 @@ class _ConversationPaneState extends State<ConversationPane>
   void _persistDraft() {
     final id = _draftConversationId;
     if (id == null) return;
+    // Don't overwrite the real draft with in-progress edit text.
+    if (_editingMessage != null) return;
     widget.state.saveDraft(id, _controller.text);
   }
 
@@ -3789,7 +3846,7 @@ class _ConversationPaneState extends State<ConversationPane>
     _scroll.removeListener(_onScrollForOlder);
     _searchDebounce?.cancel();
     unbindImagePaste(_pasteBindId);
-    registerComposerMediaAttach(null);
+    unregisterComposerMediaAttach(_composerMediaAttachId);
     _controller.dispose();
     _composerFocus.dispose();
     _scroll.dispose();
@@ -3980,6 +4037,10 @@ class _ConversationPaneState extends State<ConversationPane>
     final chat = _chat;
     final messages = state.messagesByChat[state.activeConversationId] ?? [];
     final mediaBase = state.api.baseUrl;
+    final taskMessageIds = <String>{
+      for (final t in state.tasksFor(state.activeConversationId))
+        if (t.messageId != null && t.messageId!.isNotEmpty) t.messageId!,
+    };
     final desktopActions = _buildDesktopChatHeaderActions(state, chat);
 
     return ColoredBox(
@@ -4321,43 +4382,64 @@ class _ConversationPaneState extends State<ConversationPane>
                           seenByLabel: mine && chat?.isGroup == true
                               ? _seenByShort(chat!, m, state)
                               : null,
-                          onReply: (msg, {selectedText}) {
-                            final snippet =
-                                (selectedText != null &&
-                                    selectedText.trim().isNotEmpty)
-                                ? selectedText.trim()
-                                : null;
-                            setState(() {
-                              _replyingTo = msg;
-                              _replySnippet = snippet;
-                              _showEmoji = false;
-                            });
-                            // Selection belongs only in the reply bar, not the draft.
-                            if (snippet != null) {
-                              _controller.clear();
-                            }
-                            WidgetsBinding.instance.addPostFrameCallback((_) {
-                              if (mounted) _composerFocus.requestFocus();
-                            });
-                          },
-                          onForward: (msg, {selectedText}) =>
-                              _forwardMessage(context, msg),
+                          addedToTask: taskMessageIds.contains(m.id),
+                          onReply: m.isCallHistory
+                              ? null
+                              : (msg, {selectedText}) {
+                                  final snippet =
+                                      (selectedText != null &&
+                                          selectedText.trim().isNotEmpty)
+                                      ? selectedText.trim()
+                                      : null;
+                                  setState(() {
+                                    _replyingTo = msg;
+                                    _replySnippet = snippet;
+                                    _showEmoji = false;
+                                  });
+                                  // Selection belongs only in the reply bar, not the draft.
+                                  if (snippet != null) {
+                                    _controller.clear();
+                                  }
+                                  WidgetsBinding.instance.addPostFrameCallback((
+                                    _,
+                                  ) {
+                                    if (mounted) {
+                                      _composerFocus.requestFocus();
+                                    }
+                                  });
+                                },
+                          onForward: m.isCallHistory
+                              ? null
+                              : (msg, {selectedText}) =>
+                                  _forwardMessage(context, msg),
                           onSeenBy: chat?.isGroup == true
                               ? (msg) => _showSeenBy(context, chat!, msg)
                               : null,
-                          onReact: (msg, emoji) =>
-                              state.toggleReaction(msg.id, emoji),
-                          onAddToTask: (msg) async {
-                            await state.addMessageToTask(msg);
-                            if (!mounted) return;
-                            setState(() {
-                              _mediaFolder = null;
-                              _showTasks = true;
-                            });
-                          },
+                          onReact: m.isCallHistory
+                              ? null
+                              : (msg, emoji) =>
+                                  state.toggleReaction(msg.id, emoji),
+                          onAddToTask: m.isCallHistory
+                              ? null
+                              : (msg) async {
+                                  await state.addMessageToTask(msg);
+                                  if (!mounted) return;
+                                  setState(() {
+                                    _mediaFolder = null;
+                                    _showTasks = true;
+                                  });
+                                },
+                          onOpenTasks: () => setState(() {
+                            _mediaFolder = null;
+                            _showTasks = true;
+                          }),
                           aiActive: state.aiActive,
-                          onAskAi: (msg) => _askAiAboutMessage(context, msg),
-                          onEdit: mine ? (msg) => _editMessage(msg) : null,
+                          onAskAi: m.isCallHistory
+                              ? null
+                              : (msg) => _askAiAboutMessage(context, msg),
+                          onEdit: mine && !m.isCallHistory
+                              ? (msg) => _editMessage(msg)
+                              : null,
                           onDelete: mine ? (msg) => _deleteMessage(msg) : null,
                         );
                         return KeyedSubtree(
@@ -4431,6 +4513,7 @@ class _ConversationPaneState extends State<ConversationPane>
                     : null,
               ),
             if (_draftMedia.isNotEmpty) _buildDraftPreview(),
+            if (_editingMessage != null) _buildEditBar(),
             if (_replyingTo != null) _buildReplyBar(),
             if (_acSuggestions.isNotEmpty)
               Padding(
@@ -4489,11 +4572,12 @@ class _ConversationPaneState extends State<ConversationPane>
                                             horizontal: 8,
                                             vertical: 12,
                                           ),
-                                      hintText:
-                                          _draftMedia.isEmpty &&
-                                              _draftVoice == null
-                                          ? state.composerPlaceholder
-                                          : 'Add a caption…',
+                                      hintText: _editingMessage != null
+                                          ? 'Edit message…'
+                                          : (_draftMedia.isEmpty &&
+                                                    _draftVoice == null
+                                                ? state.composerPlaceholder
+                                                : 'Add a caption…'),
                                       prefixIcon: IconButton(
                                         tooltip: 'Emoji',
                                         onPressed: _toggleEmoji,
@@ -4553,7 +4637,9 @@ class _ConversationPaneState extends State<ConversationPane>
                                       width: 48,
                                       height: 48,
                                       child: Icon(
-                                        Icons.arrow_upward_rounded,
+                                        _editingMessage != null
+                                            ? Icons.check_rounded
+                                            : Icons.arrow_upward_rounded,
                                         color: PrivetTheme.onAccent,
                                       ),
                                     ),
@@ -4613,11 +4699,12 @@ class _ConversationPaneState extends State<ConversationPane>
                                     state: state,
                                     compact: false,
                                     decoration: InputDecoration(
-                                      hintText:
-                                          _draftMedia.isEmpty &&
-                                              _draftVoice == null
-                                          ? state.composerPlaceholder
-                                          : 'Add a caption…',
+                                      hintText: _editingMessage != null
+                                          ? 'Edit message…'
+                                          : (_draftMedia.isEmpty &&
+                                                    _draftVoice == null
+                                                ? state.composerPlaceholder
+                                                : 'Add a caption…'),
                                     ),
                                   ),
                                 ),
@@ -4654,7 +4741,9 @@ class _ConversationPaneState extends State<ConversationPane>
                                 width: 48,
                                 height: 48,
                                 child: Icon(
-                                  Icons.arrow_upward_rounded,
+                                  _editingMessage != null
+                                      ? Icons.check_rounded
+                                      : Icons.arrow_upward_rounded,
                                   color: _recording
                                       ? PrivetTheme.onAccent.withValues(alpha: 0.35)
                                       : PrivetTheme.onAccent,
@@ -4680,6 +4769,62 @@ class _ConversationPaneState extends State<ConversationPane>
     );
   }
 
+  Widget _buildEditBar() {
+    final preview = _editingMessage!.body;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      padding: const EdgeInsets.fromLTRB(12, 10, 4, 10),
+      decoration: BoxDecoration(
+        color: PrivetTheme.panelElevated,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: PrivetTheme.line),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: 36,
+            decoration: BoxDecoration(
+              color: PrivetTheme.signal,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Icon(Icons.edit_outlined, size: 18, color: PrivetTheme.signal),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Editing message',
+                  style: GoogleFonts.syne(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: PrivetTheme.signal,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  preview,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: PrivetTheme.mist, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Cancel edit',
+            onPressed: _cancelEditMessage,
+            icon: const Icon(Icons.close_rounded, size: 18),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildReplyBar() {
     final reply = _replyingTo!;
     final name = reply.sender.handle.isNotEmpty
@@ -4688,6 +4833,8 @@ class _ConversationPaneState extends State<ConversationPane>
     final snippet = _replySnippet?.trim();
     final preview = (snippet != null && snippet.isNotEmpty)
         ? snippet
+        : reply.kind == 'call'
+        ? CallHistoryPayload.preview(reply.body)
         : reply.body.isNotEmpty
         ? reply.body
         : switch (reply.kind) {
@@ -4787,7 +4934,10 @@ class _ConversationPaneState extends State<ConversationPane>
       contextMenuBuilder: (context, editableTextState) =>
           const SizedBox.shrink(),
       onTapOutside: _onComposerTapOutside,
-      onChanged: (value) => state.notifyTypingIfComposing(value),
+      onChanged: (value) {
+        if (_editingMessage != null) return;
+        state.notifyTypingIfComposing(value);
+      },
       onTap: _onComposerTap,
       decoration: decoration,
     );
@@ -5659,6 +5809,9 @@ class _ConversationPaneState extends State<ConversationPane>
 
   static String _messageAiSnippet(ChatMessage message) {
     if (message.isDeleted) return '(deleted message)';
+    if (message.isCallHistory) {
+      return CallHistoryPayload.preview(message.body);
+    }
     if (message.kind == 'ai' || message.aiLocal) {
       final payload = AiTurnPayload.tryParse(message.body);
       if (payload != null) {
@@ -5976,6 +6129,10 @@ class _ConversationPaneState extends State<ConversationPane>
   }
 
   Future<void> _send() async {
+    if (_editingMessage != null) {
+      await _commitEditMessage();
+      return;
+    }
     final drafts = List<PickedBytes>.from(_draftMedia);
     final voice = _draftVoice;
     final text = _controller.text;
@@ -6066,38 +6223,126 @@ class _ConversationPaneState extends State<ConversationPane>
     _scrollToEnd();
   }
 
-  Future<void> _editMessage(ChatMessage message) async {
-    final ctrl = TextEditingController(text: message.body);
-    final next = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: PrivetTheme.panel,
-        title: Text(
-          'Edit message',
-          style: GoogleFonts.syne(fontWeight: FontWeight.w700),
-        ),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          maxLines: 5,
-          minLines: 2,
-          decoration: const InputDecoration(hintText: 'Message'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
+  bool _messageIsEditable(ChatMessage message) {
+    if (message.isDeleted || message.isCallHistory) return false;
+    return message.kind == 'text' ||
+        message.body.trim().isNotEmpty ||
+        message.kind == 'image' ||
+        message.kind == 'video' ||
+        message.kind == 'file' ||
+        message.kind == 'album' ||
+        message.kind == 'audio';
+  }
+
+  ChatMessage? _findLastEditableOwnMessage() {
+    final uid = widget.state.user?.id;
+    if (uid == null) return null;
+    final chatId = widget.state.activeConversationId;
+    if (chatId == null) return null;
+    final list = widget.state.messagesByChat[chatId];
+    if (list == null || list.isEmpty) return null;
+    for (var i = list.length - 1; i >= 0; i--) {
+      final m = list[i];
+      if (m.sender.id != uid) continue;
+      if (!_messageIsEditable(m)) continue;
+      // Prefer messages that have text to put back in the composer.
+      if (m.body.isEmpty && m.kind != 'text') continue;
+      return m;
+    }
+    return null;
+  }
+
+  /// ↑ with empty composer → edit last own message inline (Telegram-style).
+  bool _tryBeginEditLastOwnMessage() {
+    if (_editingMessage != null) return false;
+    if (_recording || _draftVoice != null || _draftMedia.isNotEmpty) {
+      return false;
+    }
+    if (_controller.text.isNotEmpty) return false;
+    final target = _findLastEditableOwnMessage();
+    if (target == null) return false;
+    _beginEditMessage(target);
+    return true;
+  }
+
+  void _beginEditMessage(ChatMessage message) {
+    widget.state.stopOutgoingTyping();
+    _clearComposerAutocomplete();
+    _controller.clearMarks();
+    final stashed = _editingMessage == null ? _controller.text : _composerDraftBeforeEdit;
+    final body = message.body;
+    _controller.removeListener(_onComposerTextChanged);
+    _controller.value = TextEditingValue(
+      text: body,
+      selection: TextSelection.collapsed(offset: body.length),
     );
-    ctrl.dispose();
-    if (next == null || next.isEmpty || !mounted) return;
+    _controller.addListener(_onComposerTextChanged);
+    _lastAutocorrectText = body;
+    setState(() {
+      _editingMessage = message;
+      _composerDraftBeforeEdit = stashed;
+      _replyingTo = null;
+      _replySnippet = null;
+      _draftMedia.clear();
+      _draftVoice = null;
+      _showEmoji = false;
+    });
+    _syncComposerHasContent();
+    _composerFocus.requestFocus();
+  }
+
+  void _cancelEditMessage() {
+    final restore = _composerDraftBeforeEdit ?? '';
+    _clearComposerAutocomplete();
+    _controller.clearMarks();
+    _controller.removeListener(_onComposerTextChanged);
+    _controller.value = TextEditingValue(
+      text: restore,
+      selection: TextSelection.collapsed(offset: restore.length),
+    );
+    _controller.addListener(_onComposerTextChanged);
+    _lastAutocorrectText = restore;
+    setState(() {
+      _editingMessage = null;
+      _composerDraftBeforeEdit = null;
+    });
+    _syncComposerHasContent();
+    _composerFocus.requestFocus();
+  }
+
+  Future<void> _commitEditMessage() async {
+    final message = _editingMessage;
+    if (message == null) return;
+    final next = _controller.text.trim();
+    if (next.isEmpty) return;
+    // Unchanged — just leave edit mode without a round-trip.
+    if (next == message.body.trim()) {
+      _cancelEditMessage();
+      return;
+    }
+    widget.state.stopOutgoingTyping();
+    _clearComposerAutocomplete();
+    _controller.clearMarks();
+    final restore = _composerDraftBeforeEdit ?? '';
+    _controller.removeListener(_onComposerTextChanged);
+    _controller.value = TextEditingValue(
+      text: restore,
+      selection: TextSelection.collapsed(offset: restore.length),
+    );
+    _controller.addListener(_onComposerTextChanged);
+    _lastAutocorrectText = restore;
+    setState(() {
+      _editingMessage = null;
+      _composerDraftBeforeEdit = null;
+    });
+    _syncComposerHasContent();
     await widget.state.editMessage(message.id, next);
+    if (!mounted) return;
+    _composerFocus.requestFocus();
+  }
+
+  void _editMessage(ChatMessage message) {
+    _beginEditMessage(message);
   }
 
   Future<void> _deleteMessage(ChatMessage message) async {

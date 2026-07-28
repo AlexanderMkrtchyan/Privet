@@ -9,6 +9,8 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'desktop_single_instance_io.dart' show shutdown;
+import 'web_notifications_io.dart'
+    show ensureDesktopFocusHooks, setDesktopWindowVisible;
 
 bool get isSupported =>
     !kIsWeb && (Platform.isLinux || Platform.isWindows);
@@ -19,6 +21,7 @@ Future<void> initDesktopTray() async {
   // setSkipTaskbar (used when hiding/showing) needs ITaskbarList3 on Windows.
   await windowManager.waitUntilReadyToShow();
   await windowManager.setPreventClose(true);
+  ensureDesktopFocusHooks();
   _DesktopTrayHost.instance.attach();
   await _DesktopTrayHost.instance.ensureTray();
 }
@@ -198,6 +201,7 @@ class _DesktopTrayHost with WindowListener, TrayListener {
     }
     await windowManager.show();
     await windowManager.focus();
+    setDesktopWindowVisible(true);
   }
 
   Future<void> hideToTray() async {
@@ -211,6 +215,7 @@ class _DesktopTrayHost with WindowListener, TrayListener {
         debugPrint('DesktopTray: setSkipTaskbar(true) failed: $e\n$st');
       }
     }
+    setDesktopWindowVisible(false);
     await windowManager.hide();
   }
 

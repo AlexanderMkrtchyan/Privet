@@ -299,12 +299,15 @@ class _MiniCallBar extends StatelessWidget {
         session.camOn &&
         !sharing &&
         session.localRenderer.srcObject != null;
-    final remoteVideo = session.remoteHasVideo && !session.showShareStopped;
-    // Control host: no nested local screen preview in the mini bar.
+    final remoteVideo = session.remoteHasVideo &&
+        !session.showShareStopped &&
+        !sharing &&
+        session.remoteRenderer.srcObject != null;
+    // While I share / control host: status chrome only — no capture tile,
+    // no stale peer last-frame.
     final showLocalPreview =
-        !hostingControl && (sharing || (!remoteVideo && localCamLive));
-    final showVideo =
-        (!hostingControl && sharing) || remoteVideo || localCamLive;
+        !hostingControl && !sharing && !remoteVideo && localCamLive;
+    final showVideo = remoteVideo || showLocalPreview;
     final videoRenderer =
         (showLocalPreview) ? session.localRenderer : session.remoteRenderer;
     final videoIsScreen =
@@ -316,7 +319,7 @@ class _MiniCallBar extends StatelessWidget {
             : session.remoteControlActive
                 ? 'Controlling'
                 : session.showShareStopped
-                    ? 'Control ended'
+                    ? 'Share stopped'
                     : 'Remote control')
         : mode == 'screen'
             ? (sharing
@@ -428,50 +431,97 @@ class _MiniCallBar extends StatelessWidget {
       ],
     );
 
-    final preview = showVideo
-        ? ClipRRect(
-            borderRadius: BorderRadius.circular(10),
-            child: ColoredBox(
-              color: Colors.black,
-              child: SizedBox(
-                height: videoH,
-                width: double.infinity,
-                child: RTCVideoView(
-                  videoRenderer,
-                  mirror: showLocalPreview && !sharing,
-                  objectFit: videoIsScreen
-                      ? RTCVideoViewObjectFit.RTCVideoViewObjectFitContain
-                      : RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                ),
-              ),
-            ),
-          )
-        : Container(
+    final preview = sharing && !hostingControl
+        ? Container(
             height: videoH,
             width: double.infinity,
             decoration: BoxDecoration(
-              color: PrivetTheme.panel,
               borderRadius: BorderRadius.circular(10),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  PrivetTheme.signal.withValues(alpha: 0.18),
+                  PrivetTheme.panel,
+                ],
+              ),
+              border: Border.all(
+                color: PrivetTheme.signal.withValues(alpha: 0.35),
+              ),
             ),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                PrivetAvatar(
-                  name: session.peer.displayName,
-                  hue: session.peer.avatarHue,
-                  size: (videoH * 0.35).clamp(28.0, 56.0),
+                Icon(
+                  Icons.screen_share_rounded,
+                  color: PrivetTheme.signal,
+                  size: (videoH * 0.28).clamp(22.0, 36.0),
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  session.showShareStopped ? 'Share stopped' : label,
+                  'Presenting',
+                  style: GoogleFonts.syne(
+                    color: PrivetTheme.paper,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                Text(
+                  'to ${session.peer.displayName}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: PrivetTheme.mist,
-                    fontSize: 11,
+                    fontSize: 10.5,
                   ),
                 ),
               ],
             ),
-          );
+          )
+        : showVideo
+            ? ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: ColoredBox(
+                  color: Colors.black,
+                  child: SizedBox(
+                    height: videoH,
+                    width: double.infinity,
+                    child: RTCVideoView(
+                      videoRenderer,
+                      mirror: showLocalPreview,
+                      objectFit: videoIsScreen
+                          ? RTCVideoViewObjectFit.RTCVideoViewObjectFitContain
+                          : RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                    ),
+                  ),
+                ),
+              )
+            : Container(
+                height: videoH,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: PrivetTheme.panel,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    PrivetAvatar(
+                      name: session.peer.displayName,
+                      hue: session.peer.avatarHue,
+                      size: (videoH * 0.35).clamp(28.0, 56.0),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      session.showShareStopped ? 'Share stopped' : label,
+                      style: TextStyle(
+                        color: PrivetTheme.mist,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              );
 
     return Material(
       elevation: 16,
@@ -1000,24 +1050,27 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
         session.camOn &&
         !sharing &&
         session.localRenderer.srcObject != null;
-    final remoteVideo = session.remoteHasVideo && !shareStopped;
+    // Require a live srcObject — a null/detached renderer paints black on
+    // native OpenGL (and a frozen last frame on web) if we keep RTCVideoView.
+    // While presenting, never stage peer video — leftover last-share frames
+    // looked like "watching them" under a tiny "you are sharing" label.
+    final remoteVideo = session.remoteHasVideo &&
+        !shareStopped &&
+        !sharing &&
+        session.remoteRenderer.srcObject != null;
     final remoteIsScreen = isScreenCall || session.peerSharingScreen;
 
     // Hosting control: never stage our own capture — it nests in the stream.
     final hostingControl = session.isRemoteHost ||
         (session.isControlCall && sharing);
-    // Stage priority: my share → remote video → my camera (self-preview) → avatar.
-    final stageIsLocalScreen = sharing && !hostingControl;
-    final stageIsRemote = !stageIsLocalScreen && remoteVideo;
+    final stageIsRemote = !hostingControl && remoteVideo;
     final stageIsLocalCam =
-        !stageIsLocalScreen && !remoteVideo && localCamLive;
-    final hasStageVideo = stageIsLocalScreen || stageIsRemote || stageIsLocalCam;
+        !hostingControl && !sharing && !remoteVideo && localCamLive;
+    final hasStageVideo = stageIsRemote || stageIsLocalCam;
 
-    // Self-view PiP: always visible when my camera isn't already the stage.
+    // Camera PiP only when we actually have a live camera on a video stage.
     final showSelfPip = localCamLive && stageIsRemote;
-    // While I share my screen, keep the peer's camera visible in the corner.
-    final showRemotePip = stageIsLocalScreen && remoteVideo;
-    final showPip = showSelfPip || showRemotePip;
+    final showPip = showSelfPip;
 
     // Re-bind renderers when the PiP (re)appears — flutter_webrtc reuses one
     // <video> element per renderer and can leave a frozen/black frame on web;
@@ -1035,11 +1088,7 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
     RTCVideoRenderer stageRenderer;
     bool stageMirror;
     bool stageContain;
-    if (stageIsLocalScreen) {
-      stageRenderer = session.localRenderer;
-      stageMirror = false;
-      stageContain = true;
-    } else if (stageIsRemote) {
+    if (stageIsRemote) {
       stageRenderer = session.remoteRenderer;
       stageMirror = false;
       stageContain = remoteIsScreen;
@@ -1064,26 +1113,35 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
             (session.isRemoteController || session.isRemoteHost));
 
     // ── Stage ──
-    final stage = hasStageVideo
-        ? RTCVideoView(
-            stageRenderer,
-            mirror: stageMirror,
-            objectFit: stageContain
-                ? RTCVideoViewObjectFit.RTCVideoViewObjectFitContain
-                : RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-            placeholderBuilder: (_) => _StagePlaceholder(
-              session: session,
-              status: statusText,
-              shareStopped: shareStopped,
-            ),
-          )
-        : _StagePlaceholder(
-            session: session,
-            status: statusText,
-            shareStopped: shareStopped,
-          );
+    final Widget stage;
+    if (sharing && !hostingControl) {
+      // Presenting status — stop control lives only in the bottom dock.
+      stage = _PresentingStage(
+        session: session,
+        elapsed: _elapsedLabel,
+      );
+    } else if (hasStageVideo) {
+      stage = RTCVideoView(
+        stageRenderer,
+        mirror: stageMirror,
+        objectFit: stageContain
+            ? RTCVideoViewObjectFit.RTCVideoViewObjectFitContain
+            : RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+        placeholderBuilder: (_) => _StagePlaceholder(
+          session: session,
+          status: statusText,
+          shareStopped: shareStopped,
+        ),
+      );
+    } else {
+      stage = _StagePlaceholder(
+        session: session,
+        status: statusText,
+        shareStopped: shareStopped,
+      );
+    }
 
-    // ── Self / remote PiP ──
+    // ── Self PiP (live camera only) ──
     final pipW = compact ? 104.0 : 150.0;
     final pipH = compact ? 148.0 : 210.0;
     final defaultPip = Offset(
@@ -1099,10 +1157,6 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
 
     Widget? pip;
     if (showPip && !immersive) {
-      final pipRenderer =
-          showSelfPip ? session.localRenderer : session.remoteRenderer;
-      final pipMirror = showSelfPip;
-      final pipLabel = showSelfPip ? 'You' : session.peer.displayName;
       pip = Positioned(
         left: pipPos.dx,
         top: pipPos.dy,
@@ -1120,9 +1174,9 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
           child: MouseRegion(
             cursor: SystemMouseCursors.move,
             child: _PipTile(
-              renderer: pipRenderer,
-              mirror: pipMirror,
-              label: pipLabel,
+              renderer: session.localRenderer,
+              mirror: true,
+              label: 'You',
               width: pipW,
               height: pipH,
             ),
@@ -1264,18 +1318,14 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
     required bool remoteVideo,
   }) {
     if (shareStopped) {
-      return session.everSharedLocally && !remoteVideo
-          ? 'You stopped sharing'
-          : 'Screen share stopped';
+      return 'Share stopped';
     }
     if (sharing) {
       return session.isControlCall
           ? (session.ready
-              ? 'Remote control active'
+              ? 'You are sharing — remote control active'
               : 'Starting remote control…')
-          : (session.ready
-              ? 'You are sharing your screen'
-              : 'Starting screen share…');
+          : (session.ready ? "You're sharing" : 'Starting share…');
     }
     if (session.isControlCall) {
       if (session.remoteControlActive) {
@@ -1285,7 +1335,9 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
           ? 'Connected — waiting for control…'
           : 'Waiting for their screen…';
     }
-    if (isScreenCall) return 'Waiting for screen…';
+    if (isScreenCall) {
+      return remoteVideo ? 'Watching their screen' : 'Waiting for screen…';
+    }
     if (mode == 'video') {
       if (session.joinedAudioOnly) {
         return 'On audio — tap the camera to go live';
@@ -1323,7 +1375,7 @@ class _CallHeader extends StatelessWidget {
         : sharing
             ? 'You are sharing • $elapsed'
             : session.peerSharingScreen && session.remoteHasVideo
-                ? 'Watching screen • $elapsed'
+                ? 'Watching share • $elapsed'
                 : '${_modeLabel(mode)} • $elapsed';
 
     return Row(
@@ -1394,6 +1446,158 @@ class _CallHeader extends StatelessWidget {
   }
 }
 
+/// Presenter's stage while local share is active: status + who can see it.
+/// Stop sharing lives in the bottom control dock only (no duplicate CTA).
+class _PresentingStage extends StatelessWidget {
+  const _PresentingStage({
+    required this.session,
+    required this.elapsed,
+  });
+
+  final CallSession session;
+  final String elapsed;
+
+  @override
+  Widget build(BuildContext context) {
+    final peer = session.peer.displayName;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const _AmbientBackdrop(),
+        DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: RadialGradient(
+              center: const Alignment(0, -0.15),
+              radius: 0.95,
+              colors: [
+                PrivetTheme.signal.withValues(alpha: 0.14),
+                Colors.transparent,
+              ],
+            ),
+          ),
+        ),
+        Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 28),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: PrivetTheme.signal.withValues(alpha: 0.16),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(
+                        color: PrivetTheme.signal.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            color: PrivetTheme.signal,
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color:
+                                    PrivetTheme.signal.withValues(alpha: 0.55),
+                                blurRadius: 8,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          'LIVE · $elapsed',
+                          style: GoogleFonts.syne(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.4,
+                            color: PrivetTheme.paper,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 28),
+                  Container(
+                    width: 88,
+                    height: 88,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: PrivetTheme.panel.withValues(alpha: 0.85),
+                      border: Border.all(
+                        color: PrivetTheme.signal.withValues(alpha: 0.35),
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Icon(
+                      Icons.screen_share_rounded,
+                      size: 40,
+                      color: PrivetTheme.signal,
+                    ),
+                  ),
+                  const SizedBox(height: 22),
+                  Text(
+                    "You're sharing",
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.syne(
+                      fontSize: 26,
+                      fontWeight: FontWeight.w800,
+                      color: PrivetTheme.paper,
+                      height: 1.15,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Screen, window, or tab — $peer can see what you picked',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: PrivetTheme.mist,
+                      fontSize: 14.5,
+                      height: 1.35,
+                    ),
+                  ),
+                  const SizedBox(height: 26),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      PrivetAvatar(
+                        name: session.peer.displayName,
+                        hue: session.peer.avatarHue,
+                        size: 36,
+                      ),
+                      const SizedBox(width: 10),
+                      Flexible(
+                        child: Text(
+                          'Sharing with $peer',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: PrivetTheme.paper.withValues(alpha: 0.9),
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 /// Placeholder shown on the stage when there's no live video (audio call,
 /// connecting, or a stopped share).
 class _StagePlaceholder extends StatelessWidget {
@@ -1414,52 +1618,54 @@ class _StagePlaceholder extends StatelessWidget {
       children: [
         const _AmbientBackdrop(),
         Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (shareStopped)
-                Padding(
-                  padding: EdgeInsets.only(bottom: 18),
-                  child: Icon(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (shareStopped) ...[
+                  Icon(
                     Icons.stop_screen_share_rounded,
-                    size: 44,
-                    color: PrivetTheme.mist,
+                    size: 40,
+                    color: PrivetTheme.mist.withValues(alpha: 0.85),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                Container(
+                  padding: const EdgeInsets.all(5),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: LinearGradient(
+                      colors: [
+                        PrivetTheme.signal.withValues(alpha: 0.28),
+                        PrivetTheme.signal.withValues(alpha: 0.0),
+                      ],
+                    ),
+                  ),
+                  child: PrivetAvatar(
+                    name: session.peer.displayName,
+                    hue: session.peer.avatarHue,
+                    size: 96,
                   ),
                 ),
-              Container(
-                padding: const EdgeInsets.all(5),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: LinearGradient(
-                    colors: [
-                      PrivetTheme.signal.withValues(alpha: 0.28),
-                      PrivetTheme.signal.withValues(alpha: 0.0),
-                    ],
+                const SizedBox(height: 18),
+                Text(
+                  session.peer.displayName,
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.syne(
+                    fontSize: 24,
+                    fontWeight: FontWeight.w800,
+                    color: PrivetTheme.paper,
                   ),
                 ),
-                child: PrivetAvatar(
-                  name: session.peer.displayName,
-                  hue: session.peer.avatarHue,
-                  size: 96,
+                const SizedBox(height: 8),
+                Text(
+                  status,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: PrivetTheme.mist, fontSize: 14.5),
                 ),
-              ),
-              const SizedBox(height: 18),
-              Text(
-                session.peer.displayName,
-                textAlign: TextAlign.center,
-                style: GoogleFonts.syne(
-                  fontSize: 24,
-                  fontWeight: FontWeight.w800,
-                  color: PrivetTheme.paper,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                status,
-                textAlign: TextAlign.center,
-                style: TextStyle(color: PrivetTheme.mist, fontSize: 14),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ],

@@ -1,6 +1,7 @@
 import { v4 as uuid } from 'uuid';
 import {
   createMessage,
+  callHistoryLabel,
   editMessage,
   listMembers,
   listMessages,
@@ -48,6 +49,9 @@ const typingLastSent = new Map();
 let presenceTimer = null;
 
 function notifyMessage(message, { excludeUserId } = {}) {
+  // Call history is written after the live call; no second push.
+  if (message.kind === 'call') return;
+
   const title = message.sender.displayName || message.sender.handle || 'Privet';
   const body =
     message.kind === 'text'
@@ -74,7 +78,9 @@ function notifyMessage(message, { excludeUserId } = {}) {
                 ? '🎵 Audio'
                 : message.kind === 'album'
                   ? '📎 Album'
-                  : message.fileName || '📎 File';
+                  : message.kind === 'call'
+                    ? callHistoryLabel(message.body)
+                    : message.fileName || '📎 File';
 
   const recipients = memberIds(message.conversationId).filter(
     (id) => id !== excludeUserId && id !== message.sender.id,
@@ -125,6 +131,7 @@ async function maybeAttachLinkPreview(message) {
  *   fromUserId: string,
  *   toUserId: string,
  *   createdAt: number,
+ *   acceptedAt?: number | null,
  *   status: 'ringing' | 'active',
  *   fromSocket?: import('ws').WebSocket,
  *   toSocket?: import('ws').WebSocket,
@@ -166,6 +173,56 @@ function clearControl(call) {
   if (call) call.controlGrantedTo = null;
 }
 
+/** Persist a Teams-style call history row in the conversation. */
+function persistCallHistory(call, reason) {
+  if (!call?.conversationId || !call.fromUserId) return;
+  const wasActive = call.status === 'active' && call.acceptedAt;
+  let outcome = 'canceled';
+  let durationSec = 0;
+  if (wasActive) {
+    outcome = 'completed';
+    durationSec = Math.max(
+      0,
+      Math.round((Date.now() - call.acceptedAt) / 1000),
+    );
+  } else if (reason === 'timeout') {
+    outcome = 'missed';
+  } else if (reason === 'rejected') {
+    outcome = 'declined';
+  } else {
+    outcome = 'canceled';
+  }
+
+  const body = JSON.stringify({
+    v: 1,
+    mode: call.mode || 'video',
+    outcome,
+    durationSec,
+    callId: call.id,
+  });
+
+  try {
+    const message = createMessage({
+      conversationId: call.conversationId,
+      senderId: call.fromUserId,
+      body,
+      kind: 'call',
+    });
+    broadcastToUsers(
+      memberIds(call.conversationId),
+      {
+        type: 'message',
+        message,
+        playSound: false,
+      },
+      null,
+    );
+    noteConversationMessage(call.conversationId);
+  } catch (err) {
+    console.error('call history message failed', err?.message || err);
+  }
+}
+
 function endCallForBoth(call, reason) {
   if (!call) return;
   clearRingTimer(call.id);
@@ -174,6 +231,7 @@ function endCallForBoth(call, reason) {
   const ended = { type: 'call.ended', callId: call.id, reason };
   sendToUserPreferred(call.fromUserId, call.fromSocket, ended);
   sendToUserPreferred(call.toUserId, call.toSocket, ended);
+  persistCallHistory(call, reason);
 }
 
 export function registerWebsocket(app) {
@@ -251,6 +309,11 @@ export function registerWebsocket(app) {
           } = msg;
           if (!conversationId || !userInConversation(conversationId, userId)) {
             socket.send(JSON.stringify({ type: 'error', error: 'forbidden' }));
+            return;
+          }
+          // Call history rows are server-authored only.
+          if (kind === 'call' || kind === 'deleted') {
+            socket.send(JSON.stringify({ type: 'error', error: 'invalid kind' }));
             return;
           }
           const text = String(body || '').trim();
@@ -332,6 +395,15 @@ export function registerWebsocket(app) {
             );
             noteConversationMessage(conversationId);
             notifyMessage(message, { excludeUserId: userId });
+            if (forwardFromId) {
+              const sourceMessage = getMessage(String(forwardFromId));
+              if (sourceMessage) {
+                broadcastToUsers(memberIds(sourceMessage.conversationId), {
+                  type: 'message.updated',
+                  message: sourceMessage,
+                });
+              }
+            }
             // Teams-style: deliver text first, then unfurl OG metadata.
             void maybeAttachLinkPreview(message);
           } catch (err) {
@@ -494,6 +566,7 @@ export function registerWebsocket(app) {
             fromUserId: userId,
             toUserId,
             createdAt: Date.now(),
+            acceptedAt: null,
             status: 'ringing',
             fromSocket: socket,
             toSocket: undefined,
@@ -528,6 +601,7 @@ export function registerWebsocket(app) {
           if (!call || call.toUserId !== userId) return;
           if (call.status !== 'ringing') return;
           call.status = 'active';
+          call.acceptedAt = Date.now();
           call.toSocket = socket;
           clearRingTimer(call.id);
           const accepted = {
