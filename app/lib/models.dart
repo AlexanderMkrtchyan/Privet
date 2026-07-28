@@ -1,3 +1,5 @@
+import 'util/server_time.dart';
+
 class PrivetUser {
   PrivetUser({
     required this.id,
@@ -20,20 +22,15 @@ class PrivetUser {
   final DateTime? lastReadAt;
 
   factory PrivetUser.fromJson(Map<String, dynamic> json) {
-    DateTime? parseTs(dynamic v) {
-      if (v == null) return null;
-      return DateTime.tryParse('$v'.replaceFirst(' ', 'T'));
-    }
-
     return PrivetUser(
       id: json['id'] as String,
       handle: json['handle'] as String,
       displayName: json['displayName'] as String,
       avatarHue: (json['avatarHue'] as num?)?.toInt() ?? 160,
       avatarUrl: json['avatarUrl'] as String?,
-      lastSeenAt: parseTs(json['lastSeenAt']),
+      lastSeenAt: parseServerUtc(json['lastSeenAt']),
       online: json['online'] == true,
-      lastReadAt: parseTs(json['lastReadAt']),
+      lastReadAt: parseServerUtc(json['lastReadAt']),
     );
   }
 
@@ -70,14 +67,9 @@ class MemberRead {
   final String? lastReadMessageId;
 
   factory MemberRead.fromJson(Map<String, dynamic> json) {
-    DateTime? parseTs(dynamic v) {
-      if (v == null) return null;
-      return DateTime.tryParse('$v'.replaceFirst(' ', 'T'));
-    }
-
     return MemberRead(
       userId: json['userId'] as String,
-      lastReadAt: parseTs(json['lastReadAt']),
+      lastReadAt: parseServerUtc(json['lastReadAt']),
       lastReadMessageId: json['lastReadMessageId'] as String?,
     );
   }
@@ -237,10 +229,8 @@ class TaskItem {
         createdBy: json['createdBy'] is Map<String, dynamic>
             ? PrivetUser.fromJson(json['createdBy'] as Map<String, dynamic>)
             : null,
-        createdAt: DateTime.tryParse('${json['createdAt']}') ?? DateTime.now(),
-        updatedAt: json['updatedAt'] != null
-            ? DateTime.tryParse('${json['updatedAt']}')
-            : null,
+        createdAt: parseServerUtc(json['createdAt']) ?? DateTime.now(),
+        updatedAt: parseServerUtc(json['updatedAt']),
       );
 
   TaskItem copyWith({
@@ -473,10 +463,6 @@ class ChatMessage {
     final linkRaw = json['linkPreview'] as Map<String, dynamic>?;
     final reactionsRaw = (json['reactions'] as List?) ?? const [];
     final attachmentsRaw = (json['attachments'] as List?) ?? const [];
-    DateTime? parseTs(dynamic v) {
-      if (v == null) return null;
-      return DateTime.tryParse('$v'.replaceFirst(' ', 'T'));
-    }
 
     return ChatMessage(
       id: json['id'] as String,
@@ -500,9 +486,9 @@ class ChatMessage {
       reactions: reactionsRaw
           .map((e) => MessageReaction.fromJson(e as Map<String, dynamic>))
           .toList(),
-      createdAt: parseTs(json['createdAt']) ?? DateTime.now(),
-      editedAt: parseTs(json['editedAt']),
-      deletedAt: parseTs(json['deletedAt']),
+      createdAt: parseServerUtc(json['createdAt']) ?? DateTime.now(),
+      editedAt: parseServerUtc(json['editedAt']),
+      deletedAt: parseServerUtc(json['deletedAt']),
       sender: PrivetUser.fromJson(Map<String, dynamic>.from(sender)),
       conversationTitle: json['conversationTitle'] as String?,
       conversationIsGroup: json['conversationIsGroup'] == true,
@@ -603,11 +589,6 @@ class Conversation {
 
   factory Conversation.fromJson(Map<String, dynamic> json) {
     final last = json['lastMessage'] as Map<String, dynamic>?;
-    DateTime? parseTs(dynamic v) {
-      if (v == null) return null;
-      return DateTime.tryParse('$v'.replaceFirst(' ', 'T'));
-    }
-
     final readsRaw = (json['memberReads'] as List?) ?? const [];
 
     return Conversation(
@@ -619,8 +600,8 @@ class Conversation {
       muted: json['muted'] == true,
       pinned: json['pinned'] == true,
       unreadCount: (json['unreadCount'] as num?)?.toInt() ?? 0,
-      lastReadAt: parseTs(json['lastReadAt']),
-      peerLastReadAt: parseTs(json['peerLastReadAt']),
+      lastReadAt: parseServerUtc(json['lastReadAt']),
+      peerLastReadAt: parseServerUtc(json['peerLastReadAt']),
       memberReads: readsRaw
           .whereType<Map>()
           .map((e) => MemberRead.fromJson(Map<String, dynamic>.from(e)))
@@ -636,7 +617,7 @@ class Conversation {
               body: (last['body'] as String?) ?? '',
               kind: (last['kind'] as String?) ?? 'text',
               mediaUrl: last['mediaUrl'] as String?,
-              createdAt: parseTs(last['createdAt']) ?? DateTime.now(),
+              createdAt: parseServerUtc(last['createdAt']) ?? DateTime.now(),
               sender: PrivetUser(
                 id: last['senderId'] as String? ?? '',
                 handle: '',

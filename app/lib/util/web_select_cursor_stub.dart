@@ -14,3 +14,6 @@ void setPrivetMessageLinkHover(bool hovering) {}
 
 /// No-op on non-web.
 void setPrivetDragHover(bool hovering) {}
+
+/// No-op on non-web.
+void setPrivetAnnotHover(bool hovering) {}

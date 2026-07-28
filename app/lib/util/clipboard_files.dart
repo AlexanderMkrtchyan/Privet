@@ -1,7 +1,8 @@
 import 'dart:typed_data';
 
 import 'clipboard_files_stub.dart'
-    if (dart.library.html) 'clipboard_files_web.dart' as impl;
+    if (dart.library.html) 'clipboard_files_web.dart'
+    if (dart.library.io) 'clipboard_files_io.dart' as impl;
 
 class PickedBytes {
   PickedBytes({

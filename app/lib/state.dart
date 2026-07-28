@@ -14,19 +14,25 @@ import 'api/realtime.dart';
 import 'models.dart';
 import 'remote_control/control_channel.dart';
 import 'remote_control/protocol.dart';
+import 'util/agent_debug_log.dart';
 import 'util/ai_turn.dart';
 import 'util/display_capture.dart';
 import 'util/emoticon_expand.dart';
+import 'util/gpu_capability.dart';
 import 'util/mobile_push.dart';
 import 'util/page_title.dart';
 import 'util/page_uri.dart';
 import 'util/media_ui_wake.dart';
 import 'util/remote_input.dart';
+import 'util/server_time.dart';
 import 'util/sounds.dart';
 import 'util/low_resource.dart';
 import 'util/throttle.dart';
 import 'util/ui_overlay_pause.dart';
+import 'util/recv_media_stream.dart';
+import 'util/remote_call_audio.dart';
 import 'util/webrtc_safe.dart';
+import 'util/desktop_tray.dart';
 import 'util/web_notifications.dart';
 
 /// How Privet AI replies are delivered once the user enables AI.
@@ -103,6 +109,8 @@ class CallSession extends ChangeNotifier {
   RTCPeerConnection? _pc;
   MediaStream? _local;
   MediaStream? _display;
+  /// Video-only wrapper for local screen preview (not the capture stream).
+  MediaStream? _localPreview;
   String? _displaySourceId;
 
   /// Set by [disposeSession] so a hangup racing [init] cannot leave live tracks.
@@ -287,10 +295,11 @@ class CallSession extends ChangeNotifier {
     }
 
     _pc!.onIceCandidate = (c) {
-      if (c.candidate == null) return;
+      if (_disposed || c.candidate == null) return;
       rt.sendIce(callId: call.id, toUserId: peerId, candidate: c.toMap());
     };
     _pc!.onTrack = (event) {
+      if (_disposed) return;
       _attachRemoteTrack(event);
     };
 
@@ -374,7 +383,7 @@ class CallSession extends ChangeNotifier {
       // camera may have failed (denied/not found/busy) while mic succeeded.
       camOn = withCamera && _local!.getVideoTracks().isNotEmpty;
       localRenderer.srcObject = _local;
-      // Local preview must be muted or autoplay is blocked (black / frozen).
+      // Local preview must not echo; never disable the shared capture track.
       unawaited(muteLocalRenderer(localRenderer));
       for (final track in _local!.getTracks()) {
         final sender = await _pc!.addTrack(track, _local!);
@@ -472,13 +481,11 @@ class CallSession extends ChangeNotifier {
       // Video-only preview: never attach display audio to the local
       // renderer — tab/system capture can loop ringback through its
       // HTMLAudioElement after accept.
-      final preview = await createLocalMediaStream('screen-preview');
-      await preview.addTrack(screenTrack);
-      localRenderer.srcObject = preview;
-      unawaited(muteLocalRenderer(localRenderer));
+      await _setLocalPreview(screenTrack);
     }
     _scheduleRendererRebind();
     screenTrack.onEnded = () {
+      if (_disposed) return;
       _stopScreenShare();
     };
     await _announceShareStarted();
@@ -584,6 +591,7 @@ class CallSession extends ChangeNotifier {
 
   /// Browsers often fire onTrack with an empty [streams] list under unified-plan.
   Future<void> _attachRemoteTrack(RTCTrackEvent event) async {
+    if (_disposed) return;
     try {
       event.track.enabled = true;
 
@@ -591,9 +599,14 @@ class CallSession extends ChangeNotifier {
       if (event.streams.isNotEmpty) {
         stream = event.streams.first;
       } else {
-        stream = await createLocalMediaStream('remote-${event.track.id}');
+        stream = await createRecvMediaStream('remote-${event.track.id}');
+        if (_disposed) {
+          await _releaseStream(stream);
+          return;
+        }
         await stream.addTrack(event.track);
       }
+      if (_disposed) return;
 
       if (event.track.kind == 'video') {
         await _bindRemoteVideoStream(event.track, stream);
@@ -603,6 +616,7 @@ class CallSession extends ChangeNotifier {
       if (event.track.kind == 'audio') {
         event.track.enabled = true;
         final current = remoteRenderer.srcObject;
+        var target = stream;
         if (current != null) {
           final already = current.getAudioTracks().any(
             (t) => t.id == event.track.id,
@@ -618,12 +632,29 @@ class CallSession extends ChangeNotifier {
               } catch (_) {}
             }
           }
-        } else {
-          remoteRenderer.srcObject = stream;
+          target = current;
         }
-        notifyListeners();
+        if (_disposed) return;
+        // Web: HTMLAudioElement is built inside the srcObject setter — addTrack
+        // alone leaves desktop browsers silent. Native: null↔set thrash
+        // re-registers Flutter textures and janks Linux/NVIDIA after calls.
+        if (kIsWeb) {
+          remoteRenderer.srcObject = null;
+          remoteRenderer.srcObject = target;
+        } else if (!identical(remoteRenderer.srcObject, target)) {
+          remoteRenderer.srcObject = target;
+        }
+        event.track.onUnMute = () {
+          if (_disposed) return;
+          unawaited(
+            ensureRemoteCallAudioPlaying(remoteRenderer: remoteRenderer),
+          );
+        };
+        await ensureRemoteCallAudioPlaying(remoteRenderer: remoteRenderer);
+        if (!_disposed) notifyListeners();
       }
     } catch (e) {
+      if (_disposed) return;
       error = 'Remote media error: $e';
       notifyListeners();
     }
@@ -636,6 +667,7 @@ class CallSession extends ChangeNotifier {
     MediaStreamTrack track,
     MediaStream stream,
   ) async {
+    if (_disposed) return;
     _remoteVideoMuteTimer?.cancel();
     track.enabled = true;
     // Muted leftover after peer stop must not resurrect the presenter lock
@@ -651,8 +683,15 @@ class CallSession extends ChangeNotifier {
           }
         }
       }
+      if (_disposed) return;
       remoteRenderer.srcObject = stream;
       remoteHasVideo = true;
+      // Force unmute/play after video bind — desktop browsers otherwise stay silent.
+      if (stream.getAudioTracks().isNotEmpty) {
+        unawaited(
+          ensureRemoteCallAudioPlaying(remoteRenderer: remoteRenderer),
+        );
+      }
       // Only dedicated screen/control calls treat any remote video as "peer sharing".
       // Mid-call share on video/audio is gated by call.share_started — marking
       // every camera track as a share locked the receiver's Share button.
@@ -684,7 +723,9 @@ class CallSession extends ChangeNotifier {
         }
       } catch (_) {}
     }
+    if (_disposed) return;
     track.onEnded = () {
+      if (_disposed) return;
       _remoteVideoMuteTimer?.cancel();
       _onRemoteVideoEnded(track);
     };
@@ -692,11 +733,13 @@ class CallSession extends ChangeNotifier {
     // Treat only a sustained mute as ended; otherwise clearing srcObject here
     // leaves mobile/PWA renderers permanently white.
     track.onMute = () {
+      if (_disposed) return;
       if (call.mode == 'screen' ||
           call.mode == 'control' ||
           peerSharingScreen) {
         _remoteVideoMuteTimer?.cancel();
         _remoteVideoMuteTimer = Timer(const Duration(milliseconds: 900), () {
+          if (_disposed) return;
           if (track.muted == true && !remoteShareStopped) {
             _onRemoteVideoEnded(track);
           }
@@ -704,6 +747,7 @@ class CallSession extends ChangeNotifier {
       }
     };
     track.onUnMute = () {
+      if (_disposed) return;
       _remoteVideoMuteTimer?.cancel();
       // Ignore unmute after an explicit share_stopped / local clear.
       if (remoteShareStopped) return;
@@ -728,11 +772,13 @@ class CallSession extends ChangeNotifier {
   /// and [onTrack] often never re-fires — so also honor pending [getDirection]
   /// and arm unmute watchers on still-SendOnly receivers.
   Future<void> _bindReceivingVideoTracks() async {
-    if (_pc == null) return;
+    if (_disposed || _pc == null) return;
     var bound = false;
     try {
       final list = await _pc!.getTransceivers();
+      if (_disposed) return;
       for (final t in list) {
+        if (_disposed) return;
         if (t.stoped) continue;
         TransceiverDirection? currentDir;
         TransceiverDirection? desiredDir;
@@ -786,10 +832,15 @@ class CallSession extends ChangeNotifier {
         if (ok) bound = true;
       }
     } catch (_) {}
-    if (bound) {
+    if (bound && !_disposed) {
       // Web reuses one <video> element per renderer; a fresh bind can leave a
       // frozen frame until srcObject is rebound after the frame is laid out.
-      SchedulerBinding.instance.addPostFrameCallback((_) => rebindRenderers());
+      // Native texture rebind is expensive — only needed on web DOM remounts.
+      if (kIsWeb) {
+        SchedulerBinding.instance.addPostFrameCallback((_) {
+          if (!_disposed) rebindRenderers();
+        });
+      }
     }
   }
 
@@ -808,23 +859,26 @@ class CallSession extends ChangeNotifier {
       } catch (_) {}
     }
 
+    // Prefer the existing remote stream so web keeps a non-"local" ownerTag.
+    // createLocalMediaStream tags ownerTag=local → HTMLAudioElement muted.
+    if (current != null) {
+      try {
+        await scrubZombie(current);
+        if (!current.getVideoTracks().any((v) => v.id == track.id)) {
+          await current.addTrack(track);
+        }
+        await _bindRemoteVideoStream(track, current);
+        return true;
+      } catch (_) {}
+    }
     try {
-      final wrapper = await createLocalMediaStream('recv-${track.id}');
+      final wrapper = await createRecvMediaStream('recv-${track.id}');
       await wrapper.addTrack(track);
       await _bindRemoteVideoStream(track, wrapper);
       return true;
     } catch (_) {}
     try {
-      if (current != null) {
-        await scrubZombie(current);
-        await current.addTrack(track);
-        remoteRenderer.srcObject = null;
-        remoteRenderer.srcObject = current;
-        remoteHasVideo = true;
-        notifyListeners();
-        return true;
-      }
-      final wrapper = await createLocalMediaStream('recv-fb-${track.id}');
+      final wrapper = await createRecvMediaStream('recv-fb-${track.id}');
       await wrapper.addTrack(track);
       remoteRenderer.srcObject = wrapper;
       remoteHasVideo = true;
@@ -838,16 +892,17 @@ class CallSession extends ChangeNotifier {
   /// When a previously send-only m-line starts receiving, [onTrack] may not
   /// re-fire; the receiver track simply unmutes. Re-run the bind scan then.
   void _armReceiverUnmuteBind(MediaStreamTrack track) {
-    if (track.kind != 'video') return;
+    if (_disposed || track.kind != 'video') return;
     track.onUnMute = () {
-      if (remoteShareStopped) return;
+      if (_disposed || remoteShareStopped) return;
       unawaited(_bindReceivingVideoTracks());
     };
     // Some engines report the placeholder receiver as already unmuted while
     // still SendOnly — also re-scan when mute clears after being muted.
     track.onMute = () {
+      if (_disposed) return;
       track.onUnMute = () {
-        if (remoteShareStopped) return;
+        if (_disposed || remoteShareStopped) return;
         unawaited(_bindReceivingVideoTracks());
       };
     };
@@ -992,6 +1047,8 @@ class CallSession extends ChangeNotifier {
     for (final t in _local?.getAudioTracks() ?? []) {
       t.enabled = micOn;
     }
+    // User gesture: retry remote HTML audio play (desktop autoplay).
+    unawaited(ensureRemoteCallAudioPlaying(remoteRenderer: remoteRenderer));
     notifyListeners();
   }
 
@@ -1363,12 +1420,10 @@ class CallSession extends ChangeNotifier {
       _displaySourceId = sourceId ?? lastDesktopCaptureSourceId;
       sharingScreen = true;
       everSharedLocally = true;
-      final preview = await createLocalMediaStream('screen-preview');
-      await preview.addTrack(screenTrack);
-      localRenderer.srcObject = preview;
-      unawaited(muteLocalRenderer(localRenderer));
+      await _setLocalPreview(screenTrack);
       _scheduleRendererRebind();
       screenTrack.onEnded = () {
+        if (_disposed) return;
         _stopScreenShare();
       };
       // Signal first so the peer unlocks / shows "peer sharing", then SDP.
@@ -1421,6 +1476,7 @@ class CallSession extends ChangeNotifier {
   }
 
   void _onRemoteVideoEnded(MediaStreamTrack track) {
+    if (_disposed) return;
     // Drop the renderer stream so the UI cannot keep painting a frozen frame.
     final current = remoteRenderer.srcObject;
     if (current != null) {
@@ -1487,6 +1543,38 @@ class CallSession extends ChangeNotifier {
     );
   }
 
+  /// Video-only local screen preview. Never attach the capture stream (it may
+  /// include display audio that loops through the renderer's HTMLAudioElement).
+  Future<void> _setLocalPreview(MediaStreamTrack screenTrack) async {
+    final old = _localPreview;
+    final preview = await createLocalMediaStream('screen-preview');
+    await preview.addTrack(screenTrack);
+    _localPreview = preview;
+    localRenderer.srcObject = preview;
+    unawaited(muteLocalRenderer(localRenderer));
+    if (old != null && !identical(old, preview)) {
+      try {
+        // Don't stop the shared video track — only dispose the wrapper stream.
+        await old.dispose();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _clearLocalPreview() async {
+    final old = _localPreview;
+    _localPreview = null;
+    if (old == null) return;
+    try {
+      if (identical(localRenderer.srcObject, old)) {
+        localRenderer.srcObject = null;
+      }
+    } catch (_) {}
+    // Don't stop tracks — they belong to [_display] / the sender.
+    try {
+      await old.dispose();
+    } catch (_) {}
+  }
+
   Future<void> _stopScreenShare() async {
     if (_disposed || !sharingScreen) return;
     // Explicit signal — browsers often leave a frozen last frame when the
@@ -1549,6 +1637,7 @@ class CallSession extends ChangeNotifier {
     if (isScreenCall) {
       remoteShareStopped = true;
     }
+    await _clearLocalPreview();
     localRenderer.srcObject = _local;
     _scheduleRendererRebind();
     notifyListeners();
@@ -1558,6 +1647,7 @@ class CallSession extends ChangeNotifier {
   /// flutter_webrtc reuses a fixed video element id per renderer — remounts can
   /// leave a stale DOM node and a frozen frame until srcObject is rebound.
   void rebindRenderers() {
+    if (_disposed) return;
     final local = localRenderer.srcObject;
     final remote = remoteRenderer.srcObject;
     localRenderer.srcObject = null;
@@ -1568,12 +1658,18 @@ class CallSession extends ChangeNotifier {
     }
     if (remote != null) {
       remoteRenderer.srcObject = remote;
+      unawaited(ensureRemoteCallAudioPlaying(remoteRenderer: remoteRenderer));
     }
     notifyListeners();
   }
 
   void _scheduleRendererRebind() {
+    if (_disposed) return;
+    // Native texture null↔set is expensive on Linux/NVIDIA; web needs it for
+    // DOM remounts after minimize/maximize.
+    if (!kIsWeb) return;
     SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (_disposed) return;
       rebindRenderers();
       wakeUiAfterMediaDialog();
     });
@@ -1647,11 +1743,9 @@ class CallSession extends ChangeNotifier {
       }
       _display = next;
       _displaySourceId = sourceId;
-      final preview = await createLocalMediaStream('screen-preview');
-      await preview.addTrack(screenTrack);
-      localRenderer.srcObject = preview;
-      unawaited(muteLocalRenderer(localRenderer));
+      await _setLocalPreview(screenTrack);
       screenTrack.onEnded = () {
+        if (_disposed) return;
         _stopScreenShare();
       };
       final settings = screenTrack.getSettings();
@@ -1765,18 +1859,66 @@ class CallSession extends ChangeNotifier {
   Future<void> disposeSession() async {
     if (_disposed) return;
     _disposed = true;
+    // #region agent log
+    agentDebugLog(
+      hypothesisId: 'H4',
+      location: 'state.dart:disposeSession',
+      message: 'disposeSession begin',
+      data: {'callId': call.id, 'mode': call.mode},
+    );
+    final disposeSw = Stopwatch()..start();
+    // #endregion
     ready = false;
     _remoteVideoMuteTimer?.cancel();
     _remoteVideoMuteTimer = null;
 
+    // Capture renderer streams before detaching — remote wrappers are not
+    // always held in [_local]/[_display] and must still be released.
+    MediaStream? remoteStream;
+    MediaStream? localAttached;
+    try {
+      remoteStream = remoteRenderer.srcObject;
+    } catch (_) {}
+    try {
+      localAttached = localRenderer.srcObject;
+    } catch (_) {}
+
     // Detach HTML/native video elements first — flutter_webrtc web dispose()
     // does not clear srcObject, which can keep the tab's recording indicator.
+    // Also stops GPU texture updates on Linux before PC teardown finishes.
     try {
       localRenderer.srcObject = null;
     } catch (_) {}
     try {
       remoteRenderer.srcObject = null;
     } catch (_) {}
+
+    // Drop PC/track callbacks so late ICE/track events cannot re-attach media
+    // or notifyListeners into the messenger after hangup.
+    final pc = _pc;
+    if (pc != null) {
+      try {
+        pc.onTrack = null;
+      } catch (_) {}
+      try {
+        pc.onIceCandidate = null;
+      } catch (_) {}
+      try {
+        pc.onDataChannel = null;
+      } catch (_) {}
+      try {
+        for (final sender in await pc.getSenders()) {
+          _clearTrackCallbacks(sender.track);
+        }
+      } catch (_) {}
+      try {
+        for (final receiver in await pc.getReceivers()) {
+          _clearTrackCallbacks(receiver.track);
+          final track = receiver.track;
+          if (track != null) await _stopTrack(track);
+        }
+      } catch (_) {}
+    }
 
     try {
       await remoteControl?.dispose();
@@ -1790,7 +1932,6 @@ class CallSession extends ChangeNotifier {
 
     // Sender tracks can outlive the MediaStream wrapper (replaceTrack, etc.).
     try {
-      final pc = _pc;
       if (pc != null) {
         for (final sender in await pc.getSenders()) {
           final track = sender.track;
@@ -1804,17 +1945,70 @@ class CallSession extends ChangeNotifier {
       }
     } catch (_) {}
 
+    await _clearLocalPreview();
     await _releaseStream(_local);
     _local = null;
     // preparedLocal may equal _local; _releaseStream is idempotent on stopped tracks.
     await _releaseStream(preparedLocal);
     await _releaseStream(preparedDisplay);
 
+    // Only dispose Dart-created recv wrappers — never MediaStreams that came
+    // from onTrack (event.streams). On Linux, disposing those erases tracks
+    // from the native registry while the PC is still closing.
+    if (remoteStream != null &&
+        !identical(remoteStream, _local) &&
+        !identical(remoteStream, _display) &&
+        !identical(remoteStream, preparedLocal) &&
+        !identical(remoteStream, preparedDisplay)) {
+      final id = remoteStream.id;
+      if (id.startsWith('remote-') ||
+          id.startsWith('recv-') ||
+          id.startsWith('recv-fb-')) {
+        try {
+          await remoteStream.dispose();
+        } catch (_) {}
+      }
+    }
+    if (localAttached != null &&
+        !identical(localAttached, remoteStream) &&
+        !identical(localAttached, _local) &&
+        !identical(localAttached, _display) &&
+        !identical(localAttached, _localPreview)) {
+      try {
+        await localAttached.dispose();
+      } catch (_) {}
+    }
+
     await _releasePeerConnection();
     await _releaseRenderers();
     micOn = false;
     camOn = false;
     sharingScreen = false;
+    // #region agent log
+    agentDebugSetHasCall(false);
+    agentDebugLog(
+      hypothesisId: 'H4',
+      location: 'state.dart:disposeSession',
+      message: 'disposeSession end',
+      data: {
+        'callId': call.id,
+        'elapsedMs': disposeSw.elapsedMilliseconds,
+      },
+    );
+    // #endregion
+  }
+
+  static void _clearTrackCallbacks(MediaStreamTrack? track) {
+    if (track == null) return;
+    try {
+      track.onMute = null;
+    } catch (_) {}
+    try {
+      track.onUnMute = null;
+    } catch (_) {}
+    try {
+      track.onEnded = null;
+    } catch (_) {}
   }
 
   Future<void> _releaseDisplayCapture({required bool announce}) async {
@@ -1915,6 +2109,9 @@ class PrivetState extends ChangeNotifier {
   /// refreshes are not dropped (matched 2s/2s used to lag ~3–4s).
   final _typingThrottle = Throttle(const Duration(milliseconds: 800));
   String? _typingThrottleChatId;
+  /// conversationId:userId → when we last applied a message from that peer.
+  /// Used to drop late typing pulses that race after their send.
+  final Map<String, DateTime> _lastPeerMessageAt = {};
   String? _lastDraftText;
 
   /// Scoped UI ticks — listeners rebuild only the regions that care.
@@ -2003,8 +2200,8 @@ class PrivetState extends ChangeNotifier {
   bool notificationsEnabled = true;
 
   /// Prefer lower RAM/CPU: static emoji, no UI motion, capped image decode.
-  /// Manual opt-in only (Profile). Never auto-enabled — cold boot jank on a
-  /// fast GPU is not a reason to strip animations.
+  /// Manual Profile toggle, or one-shot GPU probe when preference is unset.
+  /// Capable GPUs (e.g. RTX) stay animated; software GL gets cheap mode.
   bool lowResourceMode = false;
 
   /// Legacy toast flag (auto-detect removed; kept so old builds don't break).
@@ -2111,8 +2308,8 @@ class PrivetState extends ChangeNotifier {
     if (callMinimized == value) return;
     callMinimized = value;
     notifyCall();
-    // Web: remounting RTCVideoView needs a post-frame srcObject rebind or the
-    // camera/remote video stays on a frozen/black frame.
+    // Remounting RTCVideoView (mini ↔ full) needs a post-frame srcObject rebind
+    // or the camera/remote video stays on a frozen/black frame — web and native.
     final session = callSession;
     if (session == null) return;
     SchedulerBinding.instance.addPostFrameCallback((_) {
@@ -2187,11 +2384,26 @@ class PrivetState extends ChangeNotifier {
     if (_pauseInbox) {
       _pauseInbox = false;
       _bump(inboxTick);
+      _syncDesktopTrayUnread();
     }
     if (_pauseChat) {
       _pauseChat = false;
       _bump(chatTick);
     }
+  }
+
+  int get totalUnreadCount {
+    var n = 0;
+    for (final c in conversations) {
+      n += c.unreadCount;
+    }
+    return n;
+  }
+
+  /// Linux / Windows tray: red-dot icon when there are unread messages.
+  void _syncDesktopTrayUnread() {
+    if (!DesktopTray.isSupported) return;
+    unawaited(DesktopTray.setUnreadCount(totalUnreadCount));
   }
 
   void notifySession() {
@@ -2211,6 +2423,12 @@ class PrivetState extends ChangeNotifier {
   }
 
   void notifyInbox() {
+    // #region agent log
+    agentDebugCountNotify('inbox');
+    // #endregion
+    // Tray lives outside Flutter overlays — keep the badge current even when
+    // inbox UI rebuilds are paused.
+    _syncDesktopTrayUnread();
     if (UiOverlayPause.active) {
       _pauseInbox = true;
       _armOverlayResume();
@@ -2221,6 +2439,9 @@ class PrivetState extends ChangeNotifier {
   }
 
   void notifyChat() {
+    // #region agent log
+    agentDebugCountNotify('chat');
+    // #endregion
     if (UiOverlayPause.active) {
       _pauseChat = true;
       _armOverlayResume();
@@ -2231,17 +2452,24 @@ class PrivetState extends ChangeNotifier {
   }
 
   void notifyTypingOnly() {
+    // #region agent log
+    agentDebugCountNotify('typing');
+    // #endregion
     if (UiOverlayPause.active) return;
     _bump(typingTick);
   }
 
   void notifyCall() {
+    // #region agent log
+    agentDebugCountNotify('call');
+    // #endregion
     _bump(callTick);
     super.notifyListeners();
     _syncBrowserTabIndicator();
   }
 
   void notifyChatAndInbox() {
+    _syncDesktopTrayUnread();
     if (UiOverlayPause.active) {
       _pauseChat = true;
       _pauseInbox = true;
@@ -2255,6 +2483,10 @@ class PrivetState extends ChangeNotifier {
 
   @override
   void notifyListeners() {
+    // #region agent log
+    agentDebugCountNotify('all');
+    // #endregion
+    _syncDesktopTrayUnread();
     if (UiOverlayPause.active) {
       _pauseInbox = true;
       _pauseChat = true;
@@ -2320,12 +2552,33 @@ class PrivetState extends ChangeNotifier {
     themeMode = _themeModeFromStorage(prefs.getString('privet_theme_mode'));
     final accentValue = prefs.getInt('privet_accent');
     if (accentValue != null) accent = Color(accentValue);
-    // Manual only. Boot-frame auto-detect falsely enabled this on fast NVIDIA
-    // boxes (first-paint jank ≠ weak GPU) and stuck via prefs — wipe that.
+    // Manual Profile preference wins. Otherwise one GPU check: capable (RTX)
+    // keeps full animated Privet; software GL / weak boxes get cheap mode.
     await prefs.remove('privet_low_resource');
     final storedLow = prefs.getBool('privet_low_resource_user');
-    lowResourceMode = storedLow ?? false;
+    if (storedLow != null) {
+      lowResourceMode = storedLow;
+      lowResourceAutoHint = false;
+    } else {
+      final cheap = await LowResourceAutoDetect.shouldEnableCheapMode();
+      lowResourceMode = cheap;
+      lowResourceAutoHint = cheap;
+    }
     setPrivetLowResource(lowResourceMode);
+    // #region agent log
+    final capable = await hasCapableGpu();
+    agentDebugLog(
+      hypothesisId: 'H3',
+      location: 'state.dart:bootstrap',
+      message: 'gpu/lowResource decision',
+      data: {
+        'storedLow': storedLow,
+        'lowResourceMode': lowResourceMode,
+        'lowResourceAutoHint': lowResourceAutoHint,
+        'capableGpu': capable,
+      },
+    );
+    // #endregion
     LowResourceAutoDetect.cancel();
     aiScope = AiUsageScopeX.fromStorage(prefs.getString('privet_ai_scope'));
     if (aiEnabled && !aiActive) {
@@ -2376,7 +2629,6 @@ class PrivetState extends ChangeNotifier {
     if (lowResourceMode == value) return;
     lowResourceMode = value;
     setPrivetLowResource(value);
-    // [auto] kept for API compat; auto-detect is disabled (false positives).
     if (auto && value) lowResourceAutoHint = true;
     if (!value) lowResourceAutoHint = false;
     LowResourceAutoDetect.cancel();
@@ -2392,7 +2644,10 @@ class PrivetState extends ChangeNotifier {
     _syncBrowserTabIndicator();
     final prefs = await _prefs();
     await prefs.remove('privet_low_resource');
-    await prefs.setBool('privet_low_resource_user', value);
+    // Persist only explicit user choice — auto GPU probe re-runs next launch.
+    if (!auto) {
+      await prefs.setBool('privet_low_resource_user', value);
+    }
   }
 
   void clearLowResourceAutoHint() {
@@ -2888,6 +3143,9 @@ class PrivetState extends ChangeNotifier {
   Future<void> ensureHistory(String id) async {
     if (historyLoaded.contains(id) || _historyLoading.contains(id)) return;
     _historyLoading.add(id);
+    // #region agent log
+    final sw = Stopwatch()..start();
+    // #endregion
     try {
       final remote = await _api.messages(id, limit: messagePageSize);
       final existing = messagesByChat[id] ?? const <ChatMessage>[];
@@ -2896,6 +3154,18 @@ class PrivetState extends ChangeNotifier {
       historyLoaded.add(id);
       _applyPendingMessages(id);
       notifyListeners();
+      // #region agent log
+      agentDebugLog(
+        hypothesisId: 'H6',
+        location: 'state.dart:ensureHistory',
+        message: 'history loaded',
+        data: {
+          'id': id,
+          'elapsedMs': sw.elapsedMilliseconds,
+          'count': messagesByChat[id]?.length ?? 0,
+        },
+      );
+      // #endregion
     } catch (e) {
       // Keep key absent so a later open/WS retry can load history.
       if (!historyLoaded.contains(id)) {
@@ -2958,6 +3228,18 @@ class PrivetState extends ChangeNotifier {
   ) => _api.searchInConversation(conversationId, query);
 
   Future<void> openConversation(String id) async {
+    // Opening a chat is intentional presence so attachChatSurface can mark-read.
+    _lastUserPresence = DateTime.now();
+    unlockNotificationAudio();
+    // #region agent log
+    final sw = Stopwatch()..start();
+    agentDebugLog(
+      hypothesisId: 'H6',
+      location: 'state.dart:openConversation',
+      message: 'openConversation begin',
+      data: {'id': id},
+    );
+    // #endregion
     activeConversationId = id;
     typingUserId = typingByChat[id];
     final idx = conversations.indexWhere((c) => c.id == id);
@@ -2994,6 +3276,18 @@ class PrivetState extends ChangeNotifier {
     if (_canMarkReadNow) {
       _markRead(id, reason: 'openConversation');
     }
+    // #region agent log
+    agentDebugLog(
+      hypothesisId: 'H6',
+      location: 'state.dart:openConversation',
+      message: 'openConversation end',
+      data: {
+        'id': id,
+        'elapsedMs': sw.elapsedMilliseconds,
+        'msgCount': messagesByChat[id]?.length ?? 0,
+      },
+    );
+    // #endregion
   }
 
   void attachChatSurface(String conversationId) {
@@ -3015,9 +3309,14 @@ class PrivetState extends ChangeNotifier {
   }
 
   /// Call from UI pointer/keyboard activity so idle windows don't eat unread.
+  ///
+  /// When the user returns to an open chat that accumulated unread while AFK,
+  /// clear the badge and sync the read cursor immediately (debounced) — otherwise
+  /// the count sticks until the next message / tab-focus event.
   void noteUserPresence() {
     _lastUserPresence = DateTime.now();
     unlockNotificationAudio();
+    _clearUnreadIfViewingPresent();
   }
 
   bool get _userRecentlyPresent =>
@@ -3029,6 +3328,17 @@ class PrivetState extends ChangeNotifier {
       !documentHidden &&
       documentHasFocus &&
       _userRecentlyPresent;
+
+  /// Drop the inbox badge for the open chat once the user is present again.
+  void _clearUnreadIfViewingPresent() {
+    final id = activeConversationId;
+    if (id == null || !_canMarkReadNow) return;
+    final idx = conversations.indexWhere((c) => c.id == id);
+    if (idx < 0 || conversations[idx].unreadCount <= 0) return;
+    conversations[idx] = conversations[idx].copyWith(unreadCount: 0);
+    notifyInbox();
+    _scheduleFocusedRead();
+  }
 
   void _scheduleFocusedRead() {
     _focusedReadTimer?.cancel();
@@ -3184,7 +3494,17 @@ class PrivetState extends ChangeNotifier {
 
   bool isTypingIn(String conversationId) => typingByChat.containsKey(conversationId);
 
+  static String _peerMessageKey(String conversationId, String userId) =>
+      '$conversationId:$userId';
+
   void _setPeerTyping(String conversationId, String typerId) {
+    // A trailing typing pulse can arrive after their message on the wire.
+    // Ignore briefly so the dots do not reappear after the bubble.
+    final lastMsg = _lastPeerMessageAt[_peerMessageKey(conversationId, typerId)];
+    if (lastMsg != null &&
+        DateTime.now().difference(lastMsg) < const Duration(milliseconds: 2000)) {
+      return;
+    }
     typingByChat[conversationId] = typerId;
     if (conversationId == activeConversationId) {
       typingUserId = typerId;
@@ -3220,6 +3540,11 @@ class PrivetState extends ChangeNotifier {
     }
     notifyTypingOnly();
     notifyInbox();
+  }
+
+  /// Drop any pending trailing typing pulse so send cannot re-announce typing.
+  void stopOutgoingTyping() {
+    _typingThrottle.cancel();
   }
 
   static String _formatLastSeen(DateTime at) {
@@ -3495,6 +3820,9 @@ class PrivetState extends ChangeNotifier {
     final text = expandEmoticons(body.trim());
     if (text.isEmpty) return;
 
+    // Cancel before the WS send so a trailing throttle cannot fire after.
+    stopOutgoingTyping();
+
     if (text.startsWith('#')) {
       unawaited(sendAiCommand(text));
       unawaited(clearDraft(chatId));
@@ -3758,6 +4086,7 @@ Examples:
     final me = user;
     if (chatId == null || me == null || files.isEmpty) return;
 
+    stopOutgoingTyping();
     uploading = true;
     error = null;
     notifyListeners();
@@ -3868,6 +4197,19 @@ Examples:
       _typingThrottle.reset();
     }
     _typingThrottle(() => _rt.typing(chatId));
+  }
+
+  /// Announce typing only while the composer still has content.
+  /// Clearing the field after send must not emit a trailing pulse.
+  void notifyTypingIfComposing(String text) {
+    // Keyboard activity counts as presence (pointer-only was leaving the
+    // open-chat badge climbing while the user was actively typing).
+    noteUserPresence();
+    if (text.trim().isEmpty) {
+      stopOutgoingTyping();
+      return;
+    }
+    notifyTyping();
   }
 
   Future<void> startCall({
@@ -4116,6 +4458,7 @@ Examples:
     // Clear before await so a racing call.ended cannot touch a half-disposed session.
     if (session != null) {
       callSession = null;
+      session.removeListener(notifyCall);
       _rt.hangupCall(session.call.id, toUserId: session.peerId);
     }
     if (ring != null && local) {
@@ -4135,6 +4478,45 @@ Examples:
       await session.disposeSession();
     }
     _clearPendingRemoteControl();
+    notifyListeners();
+  }
+
+  /// Peer/server hangup: release media before the messenger rebuilds over
+  /// live WebRTC textures (that hitch felt like Privet freezing on Linux).
+  Future<void> _handleCallEnded(String? callId) async {
+    // #region agent log
+    agentDebugLog(
+      hypothesisId: 'H4',
+      location: 'state.dart:_handleCallEnded',
+      message: 'call.ended begin',
+      data: {'callId': callId, 'hadSession': callSession != null},
+    );
+    final sw = Stopwatch()..start();
+    // #endregion
+    stopAllCallSounds();
+    allowCallTones();
+    if (callId == null || ringing?.call.id == callId) {
+      ringing = null;
+    }
+    final ended = callSession;
+    if (ended != null && (callId == null || ended.call.id == callId)) {
+      callSession = null;
+      ended.removeListener(notifyCall);
+      await ended.disposeSession();
+    }
+    await _discardPendingDisplay();
+    await _discardPendingLocal();
+    callMinimized = false;
+    resetMiniCallLayout();
+    _clearPendingRemoteControl();
+    // #region agent log
+    agentDebugLog(
+      hypothesisId: 'H4',
+      location: 'state.dart:_handleCallEnded',
+      message: 'call.ended end',
+      data: {'elapsedMs': sw.elapsedMilliseconds},
+    );
+    // #endregion
     notifyListeners();
   }
 
@@ -4195,6 +4577,15 @@ Examples:
       wantLocalVideo: sendVideo,
     );
     callSession = session;
+    // #region agent log
+    agentDebugSetHasCall(true);
+    agentDebugLog(
+      hypothesisId: 'H4',
+      location: 'state.dart:_beginSession',
+      message: 'call session started',
+      data: {'mode': call.mode, 'callId': call.id},
+    );
+    // #endregion
     session.addListener(notifyCall);
     notifyListeners();
     try {
@@ -4219,6 +4610,7 @@ Examples:
     } catch (e) {
       error = 'Could not start media: $e';
       _rt.hangupCall(call.id, toUserId: peer.id);
+      session.removeListener(notifyCall);
       await session.disposeSession();
       if (identical(callSession, session)) {
         callSession = null;
@@ -4343,25 +4735,30 @@ Examples:
         final active = activeConversationId == chatId;
         final fromSelf = message.sender.id == user?.id;
         if (!fromSelf) {
+          _lastPeerMessageAt[_peerMessageKey(chatId, message.sender.id)] =
+              DateTime.now();
           _clearPeerTyping(chatId, onlyUserId: message.sender.id);
         }
         final viewingHere =
             active && chatSurfaceMounted && !documentHidden && documentHasFocus;
         if (!fromSelf) {
-          if (viewingHere && _userRecentlyPresent) {
-            final idx = conversations.indexWhere((c) => c.id == chatId);
-            if (idx >= 0) {
+          final idx = conversations.indexWhere((c) => c.id == chatId);
+          if (idx >= 0) {
+            if (viewingHere && _userRecentlyPresent) {
               conversations[idx] = conversations[idx].copyWith(
                 unreadCount: 0,
                 lastMessage: message,
               );
-            }
-          } else {
-            final idx = conversations.indexWhere((c) => c.id == chatId);
-            if (idx >= 0) {
+            } else if (isNew) {
+              // Only bump on first delivery — duplicate WS events must not
+              // inflate the badge, or it later snaps to 0 and feels random.
               final c = conversations[idx];
               conversations[idx] = c.copyWith(
                 unreadCount: c.unreadCount + 1,
+                lastMessage: message,
+              );
+            } else {
+              conversations[idx] = conversations[idx].copyWith(
                 lastMessage: message,
               );
             }
@@ -4411,9 +4808,7 @@ Examples:
         final readAtRaw = event['lastReadAt'] as String?;
         final readMsgId = event['lastReadMessageId'] as String?;
         if (chatId == null || readerId == null) return;
-        final readAt = readAtRaw == null
-            ? null
-            : DateTime.tryParse(readAtRaw.replaceFirst(' ', 'T'));
+        final readAt = parseServerUtc(readAtRaw);
         final idx = conversations.indexWhere((c) => c.id == chatId);
         if (idx < 0) return;
         final c = conversations[idx];
@@ -4626,24 +5021,7 @@ Examples:
         unawaited(session.remoteControl?.onPeerRevoke());
         notifyCall();
       case 'call.ended':
-        final callId = event['callId'] as String?;
-        stopAllCallSounds();
-        allowCallTones();
-        if (callId == null || ringing?.call.id == callId) {
-          ringing = null;
-        }
-        final ended = callSession;
-        if (ended != null && (callId == null || ended.call.id == callId)) {
-          callSession = null;
-          // Must release mic/camera tracks — fire-and-forget but always start.
-          unawaited(ended.disposeSession());
-        }
-        // Pending preview streams can outlive ring UI if accept/hangup raced.
-        unawaited(_discardPendingDisplay());
-        unawaited(_discardPendingLocal());
-        callMinimized = false;
-        resetMiniCallLayout();
-        notifyListeners();
+        unawaited(_handleCallEnded(event['callId'] as String?));
       case 'call.offer':
         final session = callSession;
         if (session == null) return;
@@ -4689,7 +5067,7 @@ Examples:
   void _mergeLastSeen(dynamic raw) {
     if (raw is! Map) return;
     for (final entry in raw.entries) {
-      final at = DateTime.tryParse('${entry.value}'.replaceFirst(' ', 'T'));
+      final at = parseServerUtc(entry.value);
       if (at != null) lastSeen['${entry.key}'] = at;
     }
   }
@@ -4703,6 +5081,7 @@ Examples:
       t.cancel();
     }
     _typingClearTimers.clear();
+    _lastPeerMessageAt.clear();
     _disposeVisibility?.call();
     _disposeVisibility = null;
     callSession?.disposeSession();

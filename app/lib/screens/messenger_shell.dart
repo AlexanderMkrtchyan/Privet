@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -18,12 +19,18 @@ import '../api/client.dart';
 import '../models.dart';
 import '../state.dart';
 import '../theme.dart';
+import '../util/agent_debug_log.dart';
 import '../util/app_clipboard.dart';
 import '../util/app_update.dart';
 import '../util/clipboard_files.dart';
 import '../util/ai_turn.dart';
+import '../util/composer_autocomplete.dart';
+import '../util/composer_autocorrect.dart';
+import '../util/composer_media_attach.dart';
+import '../util/desktop_tray.dart';
 import '../util/media_permissions.dart';
 import '../util/media_ui_wake.dart';
+import '../util/people_search.dart';
 import '../util/privet_sheet.dart';
 import '../util/low_resource.dart';
 import '../util/recording_bytes.dart';
@@ -34,6 +41,9 @@ import '../widgets/avatar.dart';
 import '../widgets/chat_media_folder.dart';
 import '../widgets/chat_task_pane.dart';
 import '../widgets/compact_emoji_picker.dart';
+import '../widgets/composer_autocomplete_popup.dart';
+import '../widgets/composer_spell_layer.dart';
+import '../widgets/composer_autocorrect_controller.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/user_name.dart';
@@ -271,6 +281,50 @@ class _MessengerShellState extends State<MessengerShell> {
   }
 }
 
+/// Active AI model badge — lives in the left sidebar under the signed-in line.
+class AiModelChip extends StatelessWidget {
+  const AiModelChip({super.key, required this.state});
+
+  final PrivetState state;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!state.aiActive) return const SizedBox.shrink();
+    return Tooltip(
+      message: '${state.aiModelLabel} · # shared · #me private',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: PrivetTheme.signal.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: PrivetTheme.signal.withValues(alpha: 0.35),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.auto_awesome_rounded,
+              size: 12,
+              color: PrivetTheme.signal,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              state.aiModelLabel,
+              style: GoogleFonts.ibmPlexSans(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: PrivetTheme.signal,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class InboxPane extends StatelessWidget {
   const InboxPane({super.key, required this.state});
 
@@ -418,6 +472,24 @@ class InboxPane extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(color: PrivetTheme.mist, fontSize: 13),
               ),
+            ),
+            ListenableBuilder(
+              listenable: state,
+              builder: (context, _) {
+                if (!state.aiActive) return const SizedBox.shrink();
+                return Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 16 : 20,
+                    6,
+                    compact ? 16 : 20,
+                    0,
+                  ),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: AiModelChip(state: state),
+                  ),
+                );
+              },
             ),
             const SizedBox(height: 12),
             Expanded(
@@ -582,7 +654,7 @@ class InboxPane extends StatelessWidget {
                                 if (c.lastMessage != null)
                                   Text(
                                     DateFormat.Hm().format(
-                                      c.lastMessage!.createdAt,
+                                      c.lastMessage!.createdAt.toLocal(),
                                     ),
                                     style: TextStyle(
                                       color: PrivetTheme.mist,
@@ -1034,9 +1106,9 @@ class InboxPane extends StatelessWidget {
   Future<void> _showPeople(BuildContext context) async {
     final pasteCtrl = TextEditingController();
     var lookingUp = false;
-    String? filterHandle;
     PrivetUser? resolved;
     String? resolveError;
+    var queryText = '';
     Timer? debounce;
 
     void disposeSheet() {
@@ -1052,16 +1124,7 @@ class InboxPane extends StatelessWidget {
       builder: (sheetContext) {
         return StatefulBuilder(
           builder: (sheetContext, setModal) {
-            Future<void> resolveHandle(String? handle) async {
-              if (handle == null || handle.isEmpty) {
-                setModal(() {
-                  filterHandle = null;
-                  resolved = null;
-                  resolveError = null;
-                  lookingUp = false;
-                });
-                return;
-              }
+            Future<void> resolveExactHandle(String handle) async {
               // Prefer local directory match first.
               PrivetUser? local;
               for (final u in state.directory) {
@@ -1072,7 +1135,6 @@ class InboxPane extends StatelessWidget {
               }
               if (local != null) {
                 setModal(() {
-                  filterHandle = handle;
                   resolved = local;
                   resolveError = null;
                   lookingUp = false;
@@ -1080,7 +1142,6 @@ class InboxPane extends StatelessWidget {
                 return;
               }
               setModal(() {
-                filterHandle = handle;
                 resolved = null;
                 resolveError = null;
                 lookingUp = true;
@@ -1120,21 +1181,44 @@ class InboxPane extends StatelessWidget {
               }
             }
 
-            void onPasteChanged(String _) {
+            void onQueryChanged(String _) {
               debounce?.cancel();
-              final handle = PrivetState.parseInviteHandle(pasteCtrl.text);
-              if (handle == null) {
-                unawaited(resolveHandle(null));
+              final raw = pasteCtrl.text;
+              setModal(() {
+                queryText = raw;
+                resolveError = null;
+                // Keep a prior exact resolve only while the field still
+                // matches that handle / invite paste.
+                if (resolved != null) {
+                  final q = normalizePeopleQuery(raw);
+                  final still =
+                      looksLikeInviteUrl(raw) ||
+                      q == resolved!.handle.toLowerCase();
+                  if (!still) resolved = null;
+                }
+              });
+              // Exact remote lookup only for invite links or explicit @handle.
+              final trimmed = raw.trim();
+              final wantsExact =
+                  looksLikeInviteUrl(trimmed) || trimmed.startsWith('@');
+              if (!wantsExact) {
+                setModal(() => lookingUp = false);
+                return;
+              }
+              final handle = PrivetState.parseInviteHandle(trimmed);
+              if (handle == null || handle.isEmpty) {
+                setModal(() {
+                  resolved = null;
+                  lookingUp = false;
+                });
                 return;
               }
               debounce = Timer(const Duration(milliseconds: 200), () {
-                unawaited(resolveHandle(handle));
+                unawaited(resolveExactHandle(handle));
               });
             }
 
-            Future<void> openResolved() async {
-              final peer = resolved;
-              if (peer == null || lookingUp) return;
+            Future<void> openPeer(PrivetUser peer) async {
               try {
                 Navigator.pop(sheetContext);
                 await state.openDm(peer);
@@ -1145,11 +1229,39 @@ class InboxPane extends StatelessWidget {
               }
             }
 
-            final filtering = filterHandle != null;
-            final matches = filtering
-                ? <PrivetUser>[if (resolved != null) resolved!]
-                : state.directory;
+            Future<void> onSubmitted() async {
+              if (lookingUp) return;
+              if (resolved != null) {
+                await openPeer(resolved!);
+                return;
+              }
+              final matches = filterPeople(state.directory, queryText);
+              if (matches.isNotEmpty) {
+                await openPeer(matches.first);
+                return;
+              }
+              final handle = PrivetState.parseInviteHandle(queryText);
+              if (handle == null || handle.isEmpty) return;
+              await resolveExactHandle(handle);
+              if (!sheetContext.mounted) return;
+              if (resolved != null) await openPeer(resolved!);
+            }
+
+            final filtering = normalizePeopleQuery(queryText).isNotEmpty;
+            final localMatches = filterPeople(state.directory, queryText);
+            // Exact invite/@resolve may surface someone not yet in directory.
+            final matches = <PrivetUser>[
+              if (resolved != null &&
+                  !localMatches.any((u) => u.id == resolved!.id))
+                resolved!,
+              ...localMatches,
+            ];
             final blocked = filtering ? const <PrivetUser>[] : state.blocked;
+            final showEmpty =
+                filtering &&
+                !lookingUp &&
+                matches.isEmpty &&
+                resolveError == null;
 
             return Padding(
               padding: EdgeInsets.only(
@@ -1175,11 +1287,11 @@ class InboxPane extends StatelessWidget {
                         child: TextField(
                           controller: pasteCtrl,
                           textInputAction: TextInputAction.go,
-                          onChanged: onPasteChanged,
-                          onSubmitted: (_) => openResolved(),
+                          onChanged: onQueryChanged,
+                          onSubmitted: (_) => onSubmitted(),
                           decoration: InputDecoration(
-                            hintText: 'Paste invite link or @handle',
-                            prefixIcon: const Icon(Icons.link_rounded),
+                            hintText: 'Search people, @handle, or invite link',
+                            prefixIcon: const Icon(Icons.search_rounded),
                             suffixIcon: lookingUp
                                 ? const Padding(
                                     padding: EdgeInsets.all(12),
@@ -1196,7 +1308,7 @@ class InboxPane extends StatelessWidget {
                                           tooltip: 'Clear',
                                           onPressed: () {
                                             pasteCtrl.clear();
-                                            onPasteChanged('');
+                                            onQueryChanged('');
                                           },
                                           icon: const Icon(Icons.close_rounded),
                                         )
@@ -1229,14 +1341,16 @@ class InboxPane extends StatelessWidget {
                       const SliverToBoxAdapter(
                         child: Divider(height: 1),
                       ),
-                    if (filtering && lookingUp)
+                    if (filtering && lookingUp && matches.isEmpty)
                       const SliverToBoxAdapter(
                         child: Padding(
                           padding: EdgeInsets.all(24),
                           child: Center(child: CircularProgressIndicator()),
                         ),
                       )
-                    else if (filtering && resolveError != null)
+                    else if (filtering &&
+                        resolveError != null &&
+                        matches.isEmpty)
                       SliverToBoxAdapter(
                         child: Padding(
                           padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
@@ -1249,11 +1363,28 @@ class InboxPane extends StatelessWidget {
                           ),
                         ),
                       )
+                    else if (showEmpty)
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 24, 20, 12),
+                          child: Text(
+                            'No people match “${normalizePeopleQuery(queryText)}”',
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.ibmPlexSans(
+                              color: PrivetTheme.mist,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ),
+                      )
                     else
                       SliverList(
                         delegate: SliverChildBuilderDelegate(
                           (context, i) {
                             final u = matches[i];
+                            final exact = resolved?.id == u.id ||
+                                u.handle.toLowerCase() ==
+                                    normalizePeopleQuery(queryText);
                             return ListTile(
                               leading: PrivetAvatar(
                                 name: u.displayName,
@@ -1269,16 +1400,13 @@ class InboxPane extends StatelessWidget {
                                     ? '@${u.handle}'
                                     : state.presenceLabel(u.id),
                               ),
-                              trailing: filtering
+                              trailing: exact && filtering
                                   ? TextButton(
-                                      onPressed: openResolved,
+                                      onPressed: () => openPeer(u),
                                       child: const Text('Chat'),
                                     )
                                   : null,
-                              onTap: () async {
-                                Navigator.pop(sheetContext);
-                                await state.openDm(u);
-                              },
+                              onTap: () => openPeer(u),
                             );
                           },
                           childCount: matches.length,
@@ -1728,8 +1856,8 @@ class InboxPane extends StatelessWidget {
                           title: const Text('Low RAM & CPU mode'),
                           subtitle: Text(
                             'Turns off UI motion, uses static emoji, smaller '
-                            'images. Leave off on a GPU PC (e.g. RTX) — this '
-                            'never auto-enables.',
+                            'images. On a GPU PC (e.g. RTX) this stays off '
+                            'unless you flip it — one check at startup.',
                             style: TextStyle(
                               color: PrivetTheme.mist,
                               fontSize: 12,
@@ -1845,6 +1973,20 @@ class InboxPane extends StatelessWidget {
                             label: const Text('Sign out'),
                           ),
                         ),
+                        if (DesktopTray.isSupported) ...[
+                          const SizedBox(height: 4),
+                          SizedBox(
+                            width: double.infinity,
+                            child: TextButton.icon(
+                              onPressed: () {
+                                Navigator.pop(ctx);
+                                unawaited(DesktopTray.quit());
+                              },
+                              icon: const Icon(Icons.power_settings_new_rounded),
+                              label: const Text('Quit Privet'),
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 4),
                         Text(
                           versionLabel.isEmpty
@@ -2062,7 +2204,8 @@ class InboxPane extends StatelessWidget {
   Future<void> _showNewGroup(BuildContext context) async {
     final selected = <String>{};
     final titleCtrl = TextEditingController();
-    final directory = state.directory;
+    final searchCtrl = TextEditingController();
+    var peopleQuery = '';
     await showPrivetSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -2072,6 +2215,7 @@ class InboxPane extends StatelessWidget {
         return StatefulBuilder(
           builder: (context, setModal) {
             final sheetH = MediaQuery.sizeOf(context).height * 0.75;
+            final directory = filterPeople(state.directory, peopleQuery);
             return Padding(
               padding: EdgeInsets.only(
                 bottom: MediaQuery.viewInsetsOf(context).bottom,
@@ -2100,8 +2244,41 @@ class InboxPane extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 8),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        child: TextField(
+                          controller: searchCtrl,
+                          decoration: InputDecoration(
+                            hintText: 'Search people',
+                            prefixIcon: const Icon(Icons.search_rounded),
+                            suffixIcon: peopleQuery.isEmpty
+                                ? null
+                                : IconButton(
+                                    tooltip: 'Clear',
+                                    onPressed: () {
+                                      searchCtrl.clear();
+                                      setModal(() => peopleQuery = '');
+                                    },
+                                    icon: const Icon(Icons.close_rounded),
+                                  ),
+                          ),
+                          onChanged: (v) => setModal(() => peopleQuery = v),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
                       Expanded(
-                        child: ListView.builder(
+                        child: directory.isEmpty
+                            ? Center(
+                                child: Text(
+                                  peopleQuery.trim().isEmpty
+                                      ? 'No people yet'
+                                      : 'No people match “${normalizePeopleQuery(peopleQuery)}”',
+                                  style: GoogleFonts.ibmPlexSans(
+                                    color: PrivetTheme.mist,
+                                  ),
+                                ),
+                              )
+                            : ListView.builder(
                           itemCount: directory.length,
                           addAutomaticKeepAlives: false,
                           itemBuilder: (context, i) {
@@ -2124,6 +2301,7 @@ class InboxPane extends StatelessWidget {
                                 online: state.online.contains(u.id),
                               ),
                               title: UserNameBlock.fromUser(u, titleSize: 15),
+                              subtitle: Text('@${u.handle}'),
                             );
                           },
                         ),
@@ -2157,6 +2335,7 @@ class InboxPane extends StatelessWidget {
       },
     );
     titleCtrl.dispose();
+    searchCtrl.dispose();
   }
 }
 
@@ -2244,7 +2423,7 @@ class _SearchSheetState extends State<_SearchSheet> {
                 autofocus: true,
                 style: GoogleFonts.ibmPlexSans(),
                 decoration: InputDecoration(
-                  hintText: 'Search chats…',
+                  hintText: 'Search people and chats…',
                   prefixIcon: const Icon(Icons.search_rounded),
                   suffixIcon: _busy
                       ? const Padding(
@@ -2286,6 +2465,26 @@ class _SearchSheetState extends State<_SearchSheet> {
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(8, 0, 8, 24),
                 children: [
+                  if (_results.people.isNotEmpty) ...[
+                    _sectionLabel('People'),
+                    for (final u in _results.people)
+                      ListTile(
+                        leading: PrivetAvatar(
+                          name: u.displayName,
+                          hue: u.avatarHue,
+                          avatarUrl: u.avatarUrl == null
+                              ? null
+                              : widget.state.api.absoluteMediaUrl(u.avatarUrl),
+                          online: widget.state.online.contains(u.id),
+                        ),
+                        title: UserNameBlock.fromUser(u, titleSize: 15),
+                        subtitle: Text('@${u.handle}'),
+                        onTap: () async {
+                          Navigator.pop(context);
+                          await widget.state.openDm(u);
+                        },
+                      ),
+                  ],
                   if (_results.chats.isNotEmpty) ...[
                     _sectionLabel('Chats'),
                     for (final hit in _results.chats)
@@ -2319,11 +2518,12 @@ class _SearchSheetState extends State<_SearchSheet> {
                   ],
                   if (!_busy &&
                       _controller.text.trim().isNotEmpty &&
-                      _results.chats.isEmpty)
+                      _results.chats.isEmpty &&
+                      _results.people.isEmpty)
                     Padding(
                       padding: EdgeInsets.all(24),
                       child: Text(
-                        'No chats found',
+                        'No results',
                         textAlign: TextAlign.center,
                         style: TextStyle(color: PrivetTheme.mist),
                       ),
@@ -2364,8 +2564,10 @@ class ConversationPane extends StatefulWidget {
   State<ConversationPane> createState() => _ConversationPaneState();
 }
 
-class _ConversationPaneState extends State<ConversationPane> {
-  final _controller = TextEditingController();
+class _ConversationPaneState extends State<ConversationPane>
+    with SingleTickerProviderStateMixin {
+  final _controller = ComposerAutocorrectController();
+  final _composerFieldKey = GlobalKey();
   final _composerFocus = FocusNode();
   final _scroll = ScrollController();
   final _recorder = AudioRecorder();
@@ -2374,6 +2576,7 @@ class _ConversationPaneState extends State<ConversationPane> {
   final _composerHasContent = ValueNotifier<bool>(false);
   final _draftDebounce = Debouncer(const Duration(milliseconds: 400));
   OverlayEntry? _composerCtxMenu;
+  OverlayEntry? _spellingMenu;
   bool _showEmoji = false;
   bool _recording = false;
   bool _showJumpToBottom = false;
@@ -2384,6 +2587,13 @@ class _ConversationPaneState extends State<ConversationPane> {
   Timer? _searchDebounce;
   final List<PickedBytes> _draftMedia = [];
   ChatMessage? _replyingTo;
+  List<ComposerSuggestion> _acSuggestions = [];
+  int _acIndex = 0;
+  int _acReplaceStart = 0;
+  int _acReplaceEnd = 0;
+
+  /// Last text seen for autocorrect — skip re-check on fade paint ticks.
+  String _lastAutocorrectText = '';
 
   /// Selected snippet when replying to part of a message (quote preview).
   String? _replySnippet;
@@ -2392,12 +2602,15 @@ class _ConversationPaneState extends State<ConversationPane> {
   bool _showTasks = false;
   String? _folderConversationId;
   String? _draftConversationId;
+  /// Optimistic until a real call/getUserMedia — never block chat open on
+  /// enumerateDevices (Linux WebRTC ADM stall).
   MediaPermissionStatus _mediaPerms = const MediaPermissionStatus(
-    hasMicrophone: false,
-    hasCamera: false,
-    micGranted: false,
-    cameraGranted: false,
+    hasMicrophone: true,
+    hasCamera: true,
+    micGranted: true,
+    cameraGranted: true,
     canQuery: false,
+    hasDisplayCapture: true,
   );
 
   @override
@@ -2405,9 +2618,15 @@ class _ConversationPaneState extends State<ConversationPane> {
     super.initState();
     _folderConversationId = widget.state.activeConversationId;
     _draftConversationId = widget.state.activeConversationId;
+    _controller.attachTicker(this);
     _controller.addListener(_onComposerTextChanged);
     _scroll.addListener(_onScrollForOlder);
     HardwareKeyboard.instance.addHandler(_onGlobalKey);
+    unawaited(
+      ComposerAutocorrectDictionary.instance.ensureLoaded().then((_) {
+        if (mounted) _controller.refreshSpelling();
+      }),
+    );
     _pasteBindId = bindImagePaste((file) {
       if (!mounted || widget.state.activeConversationId == null) return;
       setState(() {
@@ -2416,8 +2635,10 @@ class _ConversationPaneState extends State<ConversationPane> {
       });
       _syncComposerHasContent();
     });
-    _refreshMediaPermissions();
-    listenMediaDeviceChanges(_refreshMediaPermissions);
+    registerComposerMediaAttach(_onAnnotatedImageFromLightbox);
+    // Do NOT enumerateDevices / init WebRTC ADM on chat open — on Linux+NVIDIA
+    // that stalls frame presentation for many seconds (isolate stays alive,
+    // fps→0). Probe lazily when the user opens call controls.
     _restoreDraft();
     final surfaceId = widget.state.activeConversationId;
     if (surfaceId != null) widget.state.attachChatSurface(surfaceId);
@@ -2471,6 +2692,7 @@ class _ConversationPaneState extends State<ConversationPane> {
   /// so message-body select doesn't leave a blinking phantom caret, and so a
   /// later click can re-attach the web TextInput connection.
   void _onComposerTapOutside(PointerDownEvent event) {
+    _dismissSpellingMenu();
     final sel = _controller.selection;
     if (sel.isValid && !sel.isCollapsed) {
       _ensureComposerSelectionFocus();
@@ -2486,6 +2708,10 @@ class _ConversationPaneState extends State<ConversationPane> {
     if (!_composerFocus.hasFocus) {
       _composerFocus.requestFocus();
     }
+    // Caret may have moved without a text change.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _refreshComposerAutocomplete();
+    });
   }
 
   void _dismissComposerCtxMenu() {
@@ -2493,10 +2719,28 @@ class _ConversationPaneState extends State<ConversationPane> {
     _composerCtxMenu = null;
   }
 
+  void _dismissSpellingMenu() {
+    _spellingMenu?.remove();
+    _spellingMenu = null;
+  }
+
   void _openComposerCtxMenu(Offset globalPos) {
+    _dismissSpellingMenu();
+    _dismissComposerCtxMenu();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _openComposerCtxMenuAt(globalPos);
+    });
+  }
+
+  void _openComposerCtxMenuAt(Offset globalPos) {
     _dismissComposerCtxMenu();
     final overlay = Overlay.maybeOf(context);
     if (overlay == null) return;
+
+    final hasSelection =
+        _controller.selection.isValid && !_controller.selection.isCollapsed;
+
     final media = MediaQuery.sizeOf(context);
     const menuW = 180.0;
     const menuH = 160.0;
@@ -2544,16 +2788,13 @@ class _ConversationPaneState extends State<ConversationPane> {
       _dismissComposerCtxMenu();
     }
 
-    final hasSelection =
-        _controller.selection.isValid && !_controller.selection.isCollapsed;
-
     _composerCtxMenu = OverlayEntry(
       builder: (ctx) {
         return Stack(
           children: [
             Positioned.fill(
               child: Listener(
-                behavior: HitTestBehavior.translucent,
+                behavior: HitTestBehavior.opaque,
                 onPointerDown: (_) => _dismissComposerCtxMenu(),
               ),
             ),
@@ -2590,6 +2831,242 @@ class _ConversationPaneState extends State<ConversationPane> {
     overlay.insert(_composerCtxMenu!);
   }
 
+  void _openSpellingMenu(Offset globalPos, SpellIssue issue) {
+    _dismissComposerCtxMenu();
+    _dismissSpellingMenu();
+    if (issue.suggestions.isEmpty) return;
+    final overlay = Overlay.maybeOf(context);
+    if (overlay == null) return;
+
+    final media = MediaQuery.sizeOf(context);
+    const menuW = 200.0;
+    final menuH = 36.0 + issue.suggestions.length * 40.0 + 8;
+    final left = globalPos.dx.clamp(8.0, media.width - menuW - 8);
+    final top = globalPos.dy.clamp(8.0, media.height - menuH - 8);
+
+    void applySpell(String suggestion) {
+      // Snapshot before any overlay teardown / web click-through.
+      final snapshot = _controller.text;
+      SpellIssue? live;
+      for (final e in _controller.spellIssues) {
+        if (e.start == issue.start && e.word == issue.word) {
+          live = e;
+          break;
+        }
+      }
+      live ??= (snapshot.contains(issue.word) &&
+              issue.start >= 0 &&
+              issue.end <= snapshot.length &&
+              snapshot.substring(issue.start, issue.end) == issue.word)
+          ? issue
+          : null;
+      if (live == null) {
+        _dismissSpellingMenu();
+        return;
+      }
+
+      if (!_composerFocus.hasFocus) {
+        _composerFocus.requestFocus();
+      }
+      var editable = _composerEditableState();
+
+      // Flutter web: clicking the menu can wipe the DOM input under the
+      // overlay. Put the draft back, then replace the typo.
+      if (_controller.text != snapshot) {
+        final restore = TextEditingValue(
+          text: snapshot,
+          selection: TextSelection.collapsed(offset: snapshot.length),
+        );
+        if (editable != null) {
+          editable.userUpdateTextEditingValue(
+            restore,
+            SelectionChangedCause.toolbar,
+          );
+        } else {
+          _controller.value = restore;
+        }
+        editable = _composerEditableState();
+      }
+
+      _controller.applySpellSuggestion(
+        live,
+        suggestion,
+        editable: editable,
+      );
+      _lastAutocorrectText = _controller.text;
+      _controller.setHoveredSpellIssue(null);
+      widget.state.notifyTyping();
+      // Dismiss after this frame so the pointer event doesn't hit the field.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _dismissSpellingMenu();
+      });
+    }
+
+    _spellingMenu = OverlayEntry(
+      builder: (ctx) {
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: Listener(
+                // Opaque: on web, translucent lets the click reach the
+                // composer under the overlay and wipe the draft.
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: (_) => _dismissSpellingMenu(),
+              ),
+            ),
+            Positioned(
+              left: left,
+              top: top,
+              child: TextFieldTapRegion(
+                child: Material(
+                  elevation: 8,
+                  color: const Color(0xFF2C2C30),
+                  borderRadius: BorderRadius.circular(8),
+                  clipBehavior: Clip.antiAlias,
+                  child: SizedBox(
+                    width: menuW,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const Padding(
+                          padding: EdgeInsets.fromLTRB(16, 10, 16, 4),
+                          child: Text(
+                            'Spelling',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF9A9AA0),
+                              letterSpacing: 0.3,
+                            ),
+                          ),
+                        ),
+                        for (final s in issue.suggestions)
+                          _ComposerMenuItem(
+                            label: s,
+                            onPressed: () => applySpell(s),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    overlay.insert(_spellingMenu!);
+  }
+
+  /// Flutter web needs [EditableTextState.userUpdateTextEditingValue] for
+  /// reliable composer edits from overlays.
+  EditableTextState? _composerEditableState() {
+    final ctx = _composerFieldKey.currentContext;
+    if (ctx == null) return null;
+    EditableTextState? found;
+    void walk(Element el) {
+      if (found != null) return;
+      if (el is StatefulElement && el.state is EditableTextState) {
+        found = el.state as EditableTextState;
+        return;
+      }
+      el.visitChildren(walk);
+    }
+
+    ctx.visitChildElements(walk);
+    return found;
+  }
+
+  void _onComposerHover(PointerHoverEvent event) {
+    final issue = spellIssueAtGlobal(
+      fieldKey: _composerFieldKey,
+      controller: _controller,
+      globalPos: event.position,
+    );
+    _controller.setHoveredSpellIssue(issue);
+  }
+
+  SpellIssue? _spellClickArmed;
+
+  void _onComposerPointerDown(PointerDownEvent event) {
+    if (event.buttons == kSecondaryMouseButton) {
+      _spellClickArmed = null;
+      _dismissSpellingMenu();
+      _controller.setHoveredSpellIssue(null);
+      _openComposerCtxMenu(event.position);
+      return;
+    }
+    if (event.buttons != kPrimaryMouseButton) return;
+
+    _dismissComposerCtxMenu();
+    // Arm on down; open on up so the TextField (and web DOM input) finish
+    // handling the click first — stacking overlays on the glyphs wiped drafts.
+    final issue = spellIssueAtGlobal(
+      fieldKey: _composerFieldKey,
+      controller: _controller,
+      globalPos: event.position,
+    );
+    if (issue != null && issue.suggestions.isNotEmpty) {
+      _spellClickArmed = issue;
+      _controller.setHoveredSpellIssue(issue);
+    } else {
+      _spellClickArmed = null;
+      _dismissSpellingMenu();
+      _controller.setHoveredSpellIssue(null);
+    }
+  }
+
+  void _onComposerPointerUp(PointerUpEvent event) {
+    _ensureComposerSelectionFocus();
+    final armed = _spellClickArmed;
+    _spellClickArmed = null;
+    if (armed == null || armed.suggestions.isEmpty) return;
+    // Still the same typo under the pointer?
+    final again = spellIssueAtGlobal(
+      fieldKey: _composerFieldKey,
+      controller: _controller,
+      globalPos: event.position,
+    );
+    if (again == null ||
+        again.start != armed.start ||
+        again.word != armed.word) {
+      return;
+    }
+    if (_controller.text.isEmpty) return;
+    _openSpellingMenu(event.position, again);
+  }
+
+  Widget _wrapComposerPointerLayer({required Widget child}) {
+    return ListenableBuilder(
+      listenable: _controller,
+      builder: (context, _) {
+        return MouseRegion(
+          cursor: _controller.hoveredSpellIssue != null
+              ? SystemMouseCursors.click
+              : SystemMouseCursors.text,
+          onHover: _onComposerHover,
+          onExit: (_) {
+            _spellClickArmed = null;
+            if (_spellingMenu == null) {
+              _controller.setHoveredSpellIssue(null);
+            }
+          },
+          child: Listener(
+            behavior: HitTestBehavior.translucent,
+            onPointerDown: _onComposerPointerDown,
+            onPointerUp: _onComposerPointerUp,
+            onPointerCancel: (_) {
+              _spellClickArmed = null;
+              _ensureComposerSelectionFocus();
+            },
+            child: child,
+          ),
+        );
+      },
+    );
+  }
+
   void _toggleEmoji() {
     final compact = PrivetTheme.isCompact(context);
     if (!compact) {
@@ -2623,47 +3100,6 @@ class _ConversationPaneState extends State<ConversationPane> {
     ).whenComplete(() {
       if (mounted) setState(() => _showEmoji = false);
     });
-  }
-
-  Widget _buildAiChip(PrivetState state) {
-    return Tooltip(
-      message: state.aiActive
-          ? '${state.aiModelLabel} · # shared · #me private'
-          : 'No active AI — enable it in Profile & settings',
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(
-          color: state.aiActive
-              ? PrivetTheme.signal.withValues(alpha: 0.12)
-              : PrivetTheme.panelElevated,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: state.aiActive
-                ? PrivetTheme.signal.withValues(alpha: 0.35)
-                : PrivetTheme.line,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.auto_awesome_rounded,
-              size: 12,
-              color: state.aiActive ? PrivetTheme.signal : PrivetTheme.mist,
-            ),
-            const SizedBox(width: 4),
-            Text(
-              state.aiActive ? state.aiModelLabel : 'No AI',
-              style: GoogleFonts.ibmPlexSans(
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                color: state.aiActive ? PrivetTheme.signal : PrivetTheme.mist,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   Widget _buildChatTitleColumn(PrivetState state, Conversation? chat) {
@@ -2869,13 +3305,6 @@ class _ConversationPaneState extends State<ConversationPane> {
                       _deleteGroup();
                     },
                   ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: _buildAiChip(state),
-                  ),
-                ),
               ],
             ),
           ),
@@ -3041,8 +3470,203 @@ class _ConversationPaneState extends State<ConversationPane> {
       _recording;
 
   void _onComposerTextChanged() {
+    if (_controller.isApplying) return;
     _syncComposerHasContent();
     _draftDebounce(_persistDraft);
+    _controller.syncAfterEdit();
+    _refreshComposerAutocomplete();
+    final text = _controller.text;
+    if (text != _lastAutocorrectText) {
+      _dismissSpellingMenu();
+    }
+    if (text == _lastAutocorrectText) return;
+    // Apply after this frame so Flutter web has a settled caret/selection.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _controller.isApplying) return;
+      if (_controller.text != text) return; // newer edit superseded this
+      _lastAutocorrectText = _controller.text;
+      _maybeApplyAutocorrect();
+    });
+  }
+
+  void _maybeApplyAutocorrect() {
+    if (_controller.isApplying) return;
+    // Curated typos work immediately; frequency list loads in background.
+    if (!ComposerAutocorrectDictionary.instance.isReady) {
+      unawaited(
+        ComposerAutocorrectDictionary.instance.ensureLoaded().then((_) {
+          if (mounted) _maybeApplyAutocorrect();
+        }),
+      );
+    }
+    final value = _controller.value;
+    final text = value.text;
+    final sel = value.selection;
+    // Flutter web sometimes reports an invalid selection right after a key.
+    // If the buffer ends on a word boundary, treat the caret as at the end.
+    final int cursor;
+    if (sel.isValid && sel.isCollapsed) {
+      cursor = sel.baseOffset;
+    } else if (text.isNotEmpty && _looksLikeWordBoundary(text[text.length - 1])) {
+      cursor = text.length;
+    } else {
+      return;
+    }
+    // Emoticon / AI typeahead owns this token — don't fight it.
+    if (_acSuggestions.isNotEmpty) return;
+    final attempt = ComposerAutocorrectDictionary.instance.tryAutocorrect(
+      text,
+      cursor,
+    );
+    if (attempt == null) return;
+    _controller.applyCorrection(attempt, caretAfter: cursor);
+    _lastAutocorrectText = _controller.text;
+    widget.state.notifyTyping();
+  }
+
+  bool _looksLikeWordBoundary(String ch) {
+    return ch == ' ' ||
+        ch == '\n' ||
+        ch == '\t' ||
+        ch == '.' ||
+        ch == ',' ||
+        ch == '!' ||
+        ch == '?' ||
+        ch == ';' ||
+        ch == ':';
+  }
+
+  void _clearComposerAutocomplete() {
+    if (_acSuggestions.isEmpty) return;
+    setState(() {
+      _acSuggestions = [];
+      _acIndex = 0;
+    });
+  }
+
+  void _refreshComposerAutocomplete() {
+    final value = _controller.value;
+    final sel = value.selection;
+    if (!sel.isValid || !sel.isCollapsed) {
+      _clearComposerAutocomplete();
+      return;
+    }
+    final match = matchComposerAutocomplete(
+      value.text,
+      sel.baseOffset,
+      aiEnabled: widget.state.aiActive,
+    );
+    if (match == null || match.suggestions.isEmpty) {
+      _clearComposerAutocomplete();
+      return;
+    }
+    final same =
+        _acSuggestions.length == match.suggestions.length &&
+        _acReplaceStart == match.replaceStart &&
+        _acReplaceEnd == match.replaceEnd &&
+        _listEqualsSuggestions(_acSuggestions, match.suggestions);
+    if (same) return;
+    setState(() {
+      _acSuggestions = match.suggestions;
+      _acReplaceStart = match.replaceStart;
+      _acReplaceEnd = match.replaceEnd;
+      _acIndex = 0;
+    });
+  }
+
+  bool _listEqualsSuggestions(
+    List<ComposerSuggestion> a,
+    List<ComposerSuggestion> b,
+  ) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].label != b[i].label || a[i].insert != b[i].insert) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void _acceptComposerAutocomplete([int? index]) {
+    final i = index ?? _acIndex;
+    if (i < 0 || i >= _acSuggestions.length) return;
+    final suggestion = _acSuggestions[i];
+    final text = _controller.text;
+    final start = _acReplaceStart.clamp(0, text.length);
+    final end = _acReplaceEnd.clamp(start, text.length);
+    final next = text.replaceRange(start, end, suggestion.insert);
+    final caret = start + suggestion.insert.length;
+    _controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: caret),
+    );
+    _composerFocus.requestFocus();
+    widget.state.notifyTyping();
+    // Listener refreshes / clears suggestions from the new text.
+  }
+
+  /// Composer key handling: autocomplete, Backspace-undo for autocorrect, Enter-to-send.
+  KeyEventResult _handleComposerKeyEvent(KeyEvent event) {
+    if (_handleComposerAutocompleteKey(event)) {
+      return KeyEventResult.handled;
+    }
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+    if (event.logicalKey == LogicalKeyboardKey.backspace) {
+      if (_controller.tryUndoWithBackspace()) {
+        _lastAutocorrectText = _controller.text;
+        widget.state.notifyTyping();
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
+
+    final isEnter =
+        event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.numpadEnter;
+    if (!isEnter) return KeyEventResult.ignored;
+    if (HardwareKeyboard.instance.isShiftPressed) {
+      return KeyEventResult.ignored;
+    }
+    _send();
+    return KeyEventResult.handled;
+  }
+
+  /// Handles Tab / arrows / Enter / Escape while the autocomplete popup is open.
+  /// Returns true when the key was consumed.
+  bool _handleComposerAutocompleteKey(KeyEvent event) {
+    if (_acSuggestions.isEmpty) return false;
+    if (event is! KeyDownEvent) return false;
+
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.escape) {
+      _clearComposerAutocomplete();
+      return true;
+    }
+    if (key == LogicalKeyboardKey.arrowDown) {
+      setState(() {
+        _acIndex = (_acIndex + 1) % _acSuggestions.length;
+      });
+      return true;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      setState(() {
+        _acIndex =
+            (_acIndex - 1 + _acSuggestions.length) % _acSuggestions.length;
+      });
+      return true;
+    }
+    if (key == LogicalKeyboardKey.tab) {
+      _acceptComposerAutocomplete();
+      return true;
+    }
+    if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      if (HardwareKeyboard.instance.isShiftPressed) return false;
+      _acceptComposerAutocomplete();
+      return true;
+    }
+    return false;
   }
 
   void _syncComposerHasContent() {
@@ -3108,10 +3732,12 @@ class _ConversationPaneState extends State<ConversationPane> {
     _draftDebounce.flush(_persistDraft);
     HardwareKeyboard.instance.removeHandler(_onGlobalKey);
     _dismissComposerCtxMenu();
+    _dismissSpellingMenu();
     _controller.removeListener(_onComposerTextChanged);
     _scroll.removeListener(_onScrollForOlder);
     _searchDebounce?.cancel();
     unbindImagePaste(_pasteBindId);
+    registerComposerMediaAttach(null);
     _controller.dispose();
     _composerFocus.dispose();
     _scroll.dispose();
@@ -3119,6 +3745,14 @@ class _ConversationPaneState extends State<ConversationPane> {
     _composerHasContent.dispose();
     _recorder.dispose();
     super.dispose();
+  }
+
+  void _onAnnotatedImageFromLightbox(PickedBytes file) {
+    if (!mounted || widget.state.activeConversationId == null) return;
+    _applyPickedFile(file);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _composerFocus.requestFocus();
+    });
   }
 
   void _onScrollForOlder() {
@@ -3339,10 +3973,6 @@ class _ConversationPaneState extends State<ConversationPane> {
                           constraints: const BoxConstraints(maxWidth: 200),
                           child: _buildChatTitleColumn(state, chat),
                         ),
-                        if (state.aiActive) ...[
-                          const SizedBox(width: 8),
-                          _buildAiChip(state),
-                        ],
                         const Spacer(),
                         ...desktopActions,
                       ],
@@ -3760,6 +4390,22 @@ class _ConversationPaneState extends State<ConversationPane> {
               ),
             if (_draftMedia.isNotEmpty) _buildDraftPreview(),
             if (_replyingTo != null) _buildReplyBar(),
+            if (_acSuggestions.isNotEmpty)
+              Padding(
+                padding: EdgeInsets.fromLTRB(
+                  compact ? 6 : 8,
+                  0,
+                  compact ? 6 : 8,
+                  4,
+                ),
+                child: TextFieldTapRegion(
+                  child: ComposerAutocompletePopup(
+                    suggestions: _acSuggestions,
+                    selectedIndex: _acIndex,
+                    onSelect: _acceptComposerAutocomplete,
+                  ),
+                ),
+              ),
             SafeArea(
               top: false,
               child: Padding(
@@ -3775,24 +4421,8 @@ class _ConversationPaneState extends State<ConversationPane> {
                         children: [
                           Expanded(
                             child: Focus(
-                              onKeyEvent: (node, event) {
-                                if (event is! KeyDownEvent) {
-                                  return KeyEventResult.ignored;
-                                }
-                                final isEnter =
-                                    event.logicalKey ==
-                                        LogicalKeyboardKey.enter ||
-                                    event.logicalKey ==
-                                        LogicalKeyboardKey.numpadEnter;
-                                if (!isEnter) {
-                                  return KeyEventResult.ignored;
-                                }
-                                if (HardwareKeyboard.instance.isShiftPressed) {
-                                  return KeyEventResult.ignored;
-                                }
-                                _send();
-                                return KeyEventResult.handled;
-                              },
+                              onKeyEvent: (node, event) =>
+                                  _handleComposerKeyEvent(event),
                               child: GestureDetector(
                                 onLongPress: () {
                                   final box = context.findRenderObject();
@@ -3806,32 +4436,23 @@ class _ConversationPaneState extends State<ConversationPane> {
                                     _openComposerCtxMenu(center);
                                   }
                                 },
-                                child: Listener(
-                                  onPointerDown: (event) {
-                                    if (event.buttons ==
-                                        kSecondaryMouseButton) {
-                                      _openComposerCtxMenu(event.position);
-                                    } else {
-                                      _dismissComposerCtxMenu();
-                                    }
-                                  },
-                                  onPointerUp: (_) =>
-                                      _ensureComposerSelectionFocus(),
-                                  onPointerCancel: (_) =>
-                                      _ensureComposerSelectionFocus(),
+                                child: _wrapComposerPointerLayer(
                                   child: TextField(
+                                    key: _composerFieldKey,
                                     controller: _controller,
                                     focusNode: _composerFocus,
                                     minLines: 1,
                                     maxLines: 5,
                                     keyboardType: TextInputType.multiline,
                                     textInputAction: TextInputAction.newline,
+                                    autocorrect: false,
+                                    enableSuggestions: false,
                                     contextMenuBuilder:
                                         (context, editableTextState) =>
                                             const SizedBox.shrink(),
                                     onTapOutside: _onComposerTapOutside,
-                                    onChanged: (_) {
-                                      state.notifyTyping();
+                                    onChanged: (value) {
+                                      state.notifyTypingIfComposing(value);
                                     },
                                     onTap: _onComposerTap,
                                     decoration: InputDecoration(
@@ -3847,6 +4468,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                                       prefixIcon: IconButton(
                                         tooltip: 'Emoji',
                                         onPressed: _toggleEmoji,
+
                                         icon: Icon(
                                           _showEmoji
                                               ? Icons.keyboard_rounded
@@ -3878,6 +4500,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                                   borderRadius: BorderRadius.circular(14),
                                   child: InkWell(
                                     onTap: _recording ? _toggleVoice : _send,
+                                    mouseCursor: SystemMouseCursors.click,
                                     borderRadius: BorderRadius.circular(14),
                                     child: SizedBox(
                                       width: 48,
@@ -3925,24 +4548,8 @@ class _ConversationPaneState extends State<ConversationPane> {
                           ),
                           Expanded(
                             child: Focus(
-                              onKeyEvent: (node, event) {
-                                if (event is! KeyDownEvent) {
-                                  return KeyEventResult.ignored;
-                                }
-                                final isEnter =
-                                    event.logicalKey ==
-                                        LogicalKeyboardKey.enter ||
-                                    event.logicalKey ==
-                                        LogicalKeyboardKey.numpadEnter;
-                                if (!isEnter) {
-                                  return KeyEventResult.ignored;
-                                }
-                                if (HardwareKeyboard.instance.isShiftPressed) {
-                                  return KeyEventResult.ignored;
-                                }
-                                _send();
-                                return KeyEventResult.handled;
-                              },
+                              onKeyEvent: (node, event) =>
+                                  _handleComposerKeyEvent(event),
                               child: GestureDetector(
                                 onLongPress: () {
                                   final box = context.findRenderObject();
@@ -3956,31 +4563,23 @@ class _ConversationPaneState extends State<ConversationPane> {
                                     _openComposerCtxMenu(center);
                                   }
                                 },
-                                child: Listener(
-                                  onPointerDown: (event) {
-                                    if (event.buttons ==
-                                        kSecondaryMouseButton) {
-                                      _openComposerCtxMenu(event.position);
-                                    } else {
-                                      _dismissComposerCtxMenu();
-                                    }
-                                  },
-                                  onPointerUp: (_) =>
-                                      _ensureComposerSelectionFocus(),
-                                  onPointerCancel: (_) =>
-                                      _ensureComposerSelectionFocus(),
+                                child: _wrapComposerPointerLayer(
                                   child: TextField(
+                                    key: _composerFieldKey,
                                     controller: _controller,
                                     focusNode: _composerFocus,
                                     minLines: 1,
                                     maxLines: 6,
                                     keyboardType: TextInputType.multiline,
                                     textInputAction: TextInputAction.newline,
+                                    autocorrect: false,
+                                    enableSuggestions: false,
                                     contextMenuBuilder:
                                         (context, editableTextState) =>
                                             const SizedBox.shrink(),
                                     onTapOutside: _onComposerTapOutside,
-                                    onChanged: (_) => state.notifyTyping(),
+                                    onChanged: (value) =>
+                                        state.notifyTypingIfComposing(value),
                                     onTap: _onComposerTap,
                                     decoration: InputDecoration(
                                       hintText: _draftMedia.isEmpty
@@ -4010,6 +4609,7 @@ class _ConversationPaneState extends State<ConversationPane> {
                             borderRadius: BorderRadius.circular(14),
                             child: InkWell(
                               onTap: _send,
+                              mouseCursor: SystemMouseCursors.click,
                               borderRadius: BorderRadius.circular(14),
                               child: SizedBox(
                                 width: 48,
@@ -4221,6 +4821,14 @@ class _ConversationPaneState extends State<ConversationPane> {
   }
 
   Future<void> _startCall(String mode) async {
+    // #region agent log
+    agentDebugLog(
+      hypothesisId: 'H8',
+      location: 'messenger_shell.dart:_startCall',
+      message: 'startCall begin',
+      data: {'mode': mode},
+    );
+    // #endregion
     final needsCamera = mode == 'video';
     final isScreen = mode == 'screen';
     final isControl = mode == 'control';
@@ -4473,50 +5081,149 @@ class _ConversationPaneState extends State<ConversationPane> {
                           onPressed: candidates.isEmpty
                               ? null
                               : () async {
+                                  final searchCtrl = TextEditingController();
+                                  var peopleQuery = '';
                                   final picked =
                                       await showPrivetSheet<PrivetUser>(
                                         context: context,
                                         backgroundColor:
                                             PrivetTheme.panelElevated,
                                         showDragHandle: true,
-                                        builder: (ctx) => ListView(
-                                          children: [
-                                            Padding(
-                                              padding:
-                                                  const EdgeInsets.fromLTRB(
-                                                    20,
-                                                    8,
-                                                    20,
-                                                    12,
+                                        isScrollControlled: true,
+                                        builder: (ctx) => StatefulBuilder(
+                                          builder: (ctx, setPick) {
+                                            final filtered = filterPeople(
+                                              candidates,
+                                              peopleQuery,
+                                            );
+                                            return SizedBox(
+                                              height:
+                                                  MediaQuery.sizeOf(ctx)
+                                                      .height *
+                                                  0.6,
+                                              child: Column(
+                                                children: [
+                                                  Padding(
+                                                    padding:
+                                                        const EdgeInsets.fromLTRB(
+                                                          20,
+                                                          8,
+                                                          20,
+                                                          8,
+                                                        ),
+                                                    child: Text(
+                                                      'Add to group',
+                                                      style: GoogleFonts.syne(
+                                                        fontSize: 18,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                      ),
+                                                    ),
                                                   ),
-                                              child: Text(
-                                                'Add to group',
-                                                style: GoogleFonts.syne(
-                                                  fontSize: 18,
-                                                  fontWeight: FontWeight.w700,
-                                                ),
-                                              ),
-                                            ),
-                                            ...candidates.map(
-                                              (u) => ListTile(
-                                                leading: PrivetAvatar(
-                                                  name: u.displayName,
-                                                  hue: u.avatarHue,
-                                                  online: state.online.contains(
-                                                    u.id,
+                                                  Padding(
+                                                    padding:
+                                                        const EdgeInsets.fromLTRB(
+                                                          20,
+                                                          0,
+                                                          20,
+                                                          8,
+                                                        ),
+                                                    child: TextField(
+                                                      controller: searchCtrl,
+                                                      autofocus: true,
+                                                      decoration:
+                                                          InputDecoration(
+                                                        hintText:
+                                                            'Search people',
+                                                        prefixIcon: const Icon(
+                                                          Icons.search_rounded,
+                                                        ),
+                                                        suffixIcon:
+                                                            peopleQuery.isEmpty
+                                                                ? null
+                                                                : IconButton(
+                                                                    tooltip:
+                                                                        'Clear',
+                                                                    onPressed:
+                                                                        () {
+                                                                      searchCtrl
+                                                                          .clear();
+                                                                      setPick(
+                                                                        () =>
+                                                                            peopleQuery =
+                                                                                '',
+                                                                      );
+                                                                    },
+                                                                    icon:
+                                                                        const Icon(
+                                                                      Icons
+                                                                          .close_rounded,
+                                                                    ),
+                                                                  ),
+                                                      ),
+                                                      onChanged: (v) => setPick(
+                                                        () => peopleQuery = v,
+                                                      ),
+                                                    ),
                                                   ),
-                                                ),
-                                                title: UserNameBlock.fromUser(
-                                                  u,
-                                                  titleSize: 15,
-                                                ),
-                                                onTap: () =>
-                                                    Navigator.pop(ctx, u),
+                                                  Expanded(
+                                                    child: filtered.isEmpty
+                                                        ? Center(
+                                                            child: Text(
+                                                              'No people match “${normalizePeopleQuery(peopleQuery)}”',
+                                                              style: GoogleFonts
+                                                                  .ibmPlexSans(
+                                                                color:
+                                                                    PrivetTheme
+                                                                        .mist,
+                                                              ),
+                                                            ),
+                                                          )
+                                                        : ListView.builder(
+                                                            itemCount:
+                                                                filtered.length,
+                                                            itemBuilder:
+                                                                (ctx, i) {
+                                                              final u =
+                                                                  filtered[i];
+                                                              return ListTile(
+                                                                leading:
+                                                                    PrivetAvatar(
+                                                                  name: u
+                                                                      .displayName,
+                                                                  hue: u
+                                                                      .avatarHue,
+                                                                  online: state
+                                                                      .online
+                                                                      .contains(
+                                                                    u.id,
+                                                                  ),
+                                                                ),
+                                                                title:
+                                                                    UserNameBlock
+                                                                        .fromUser(
+                                                                  u,
+                                                                  titleSize: 15,
+                                                                ),
+                                                                subtitle: Text(
+                                                                  '@${u.handle}',
+                                                                ),
+                                                                onTap: () =>
+                                                                    Navigator.pop(
+                                                                  ctx,
+                                                                  u,
+                                                                ),
+                                                              );
+                                                            },
+                                                          ),
+                                                  ),
+                                                ],
                                               ),
-                                            ),
-                                          ],
+                                            );
+                                          },
                                         ),
                                       );
+                                  searchCtrl.dispose();
                                   if (picked == null) return;
                                   try {
                                     members = await state.addGroupMember(
@@ -5125,9 +5832,14 @@ class _ConversationPaneState extends State<ConversationPane> {
     final replyPreview = reply == null
         ? null
         : ReplyPreview.fromMessage(reply, bodyOverride: replyQuote);
+    // Stop typing first — clear() would otherwise re-emit via onChanged, and a
+    // trailing throttle pulse must not outrun the message on the wire.
+    widget.state.stopOutgoingTyping();
     // PWA / compact: always dismiss IME after send so the OS keyboard does
     // not stick open or leave a white viewport gap.
     final dismissKeyboard = mounted && PrivetTheme.isCompact(context);
+    _clearComposerAutocomplete();
+    _controller.clearMarks();
     if (drafts.isNotEmpty) {
       final caption = text.trim();
       _controller.clear();
@@ -5384,27 +6096,43 @@ class _EmptyChat extends StatelessWidget {
 }
 
 /// Menu row that fires on pointer-down so overlay teardown can't cancel it.
-class _ComposerMenuItem extends StatelessWidget {
+class _ComposerMenuItem extends StatefulWidget {
   const _ComposerMenuItem({required this.label, required this.onPressed});
 
   final String label;
   final VoidCallback onPressed;
 
   @override
+  State<_ComposerMenuItem> createState() => _ComposerMenuItemState();
+}
+
+class _ComposerMenuItemState extends State<_ComposerMenuItem> {
+  bool _hovered = false;
+
+  @override
   Widget build(BuildContext context) {
-    return Listener(
-      onPointerDown: (_) => onPressed(),
-      child: Container(
-        width: double.infinity,
-        alignment: Alignment.centerLeft,
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-        color: Colors.transparent,
-        child: Text(
-          label,
-          style: const TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w400,
-            color: Color(0xFFF2F2F2),
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: Listener(
+        onPointerDown: (_) => widget.onPressed(),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 80),
+          curve: Curves.easeOut,
+          width: double.infinity,
+          alignment: Alignment.centerLeft,
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          color: _hovered
+              ? const Color(0xFF3F3F46)
+              : Colors.transparent,
+          child: Text(
+            widget.label,
+            style: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w400,
+              color: Color(0xFFF2F2F2),
+            ),
           ),
         ),
       ),

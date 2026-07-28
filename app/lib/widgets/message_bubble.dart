@@ -573,6 +573,7 @@ class MessageBubble extends StatelessWidget {
                                     const Spacer(),
                                     InkWell(
                                       borderRadius: BorderRadius.circular(8),
+                                      mouseCursor: SystemMouseCursors.click,
                                       onTap: () => close(),
                                       child: Padding(
                                         padding: EdgeInsets.all(4),
@@ -601,6 +602,7 @@ class MessageBubble extends StatelessWidget {
                                 const SizedBox(height: 2),
                                 InkWell(
                                   borderRadius: BorderRadius.circular(10),
+                                  mouseCursor: SystemMouseCursors.click,
                                   onTap: () => close('copy'),
                                   child: Padding(
                                     padding: const EdgeInsets.symmetric(
@@ -630,6 +632,7 @@ class MessageBubble extends StatelessWidget {
                                 ),
                                 InkWell(
                                   borderRadius: BorderRadius.circular(10),
+                                  mouseCursor: SystemMouseCursors.click,
                                   onTap: () => close('reply'),
                                   child: Padding(
                                     padding: const EdgeInsets.symmetric(
@@ -660,6 +663,7 @@ class MessageBubble extends StatelessWidget {
                                 if (onForward != null)
                                   InkWell(
                                     borderRadius: BorderRadius.circular(10),
+                                    mouseCursor: SystemMouseCursors.click,
                                     onTap: () => close('forward'),
                                     child: Padding(
                                       padding: const EdgeInsets.symmetric(
@@ -689,6 +693,7 @@ class MessageBubble extends StatelessWidget {
                                 if (onAddToTask != null)
                                   InkWell(
                                     borderRadius: BorderRadius.circular(10),
+                                    mouseCursor: SystemMouseCursors.click,
                                     onTap: () => close('task'),
                                     child: Padding(
                                       padding: const EdgeInsets.symmetric(
@@ -721,6 +726,9 @@ class MessageBubble extends StatelessWidget {
                                     opacity: aiActive ? 1 : 0.38,
                                     child: InkWell(
                                       borderRadius: BorderRadius.circular(10),
+                                      mouseCursor: aiActive
+                                          ? SystemMouseCursors.click
+                                          : SystemMouseCursors.basic,
                                       onTap: aiActive
                                           ? () => close('ask_ai')
                                           : null,
@@ -768,6 +776,7 @@ class MessageBubble extends StatelessWidget {
                                         message.kind == 'audio'))
                                   InkWell(
                                     borderRadius: BorderRadius.circular(10),
+                                    mouseCursor: SystemMouseCursors.click,
                                     onTap: () => close('edit'),
                                     child: Padding(
                                       padding: const EdgeInsets.symmetric(
@@ -797,6 +806,7 @@ class MessageBubble extends StatelessWidget {
                                 if (mine && onDelete != null)
                                   InkWell(
                                     borderRadius: BorderRadius.circular(10),
+                                    mouseCursor: SystemMouseCursors.click,
                                     onTap: () => close('delete'),
                                     child: Padding(
                                       padding: const EdgeInsets.symmetric(
@@ -1549,6 +1559,8 @@ class _ReactionChip extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
         child: InkWell(
           onTap: onTap,
+          mouseCursor: SystemMouseCursors.click,
+          hoverColor: PrivetTheme.paper.withValues(alpha: 0.08),
           borderRadius: BorderRadius.circular(8),
           child: SizedBox(
             width: 32,
@@ -2527,6 +2539,7 @@ class _MessageSelectionBar extends StatelessWidget {
     }) {
       return InkWell(
         borderRadius: BorderRadius.circular(8),
+        mouseCursor: SystemMouseCursors.click,
         onTap: onTap,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),

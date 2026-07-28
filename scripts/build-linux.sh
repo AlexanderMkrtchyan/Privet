@@ -35,6 +35,21 @@ case "$PRIVET_API_DEFINE" in
 esac
 
 cd "$ROOT/app"
+# tray_manager needs ayatana-appindicator3 headers. Prefer system -dev;
+# otherwise use the repo-local extract under .local-build-deps (no sudo).
+if ! pkg-config --exists ayatana-appindicator3-0.1 2>/dev/null && \
+   ! pkg-config --exists appindicator3-0.1 2>/dev/null; then
+  LOCAL_PC="$ROOT/.local-build-deps/pkgconfig"
+  if [[ -d "$LOCAL_PC" ]]; then
+    export PKG_CONFIG_PATH="$LOCAL_PC${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    echo "Using local ayatana-appindicator pkg-config at $LOCAL_PC"
+  else
+    echo "Missing ayatana-appindicator3 for tray_manager." >&2
+    echo "Install: sudo apt-get install -y libayatana-appindicator3-dev" >&2
+    echo "Or recreate .local-build-deps (see agent notes)." >&2
+    exit 1
+  fi
+fi
 flutter pub get
 
 # Linux flutter_webrtc: cache receiver tracks on getTransceivers/OnTrack so
@@ -299,10 +314,15 @@ fi
 if [[ -e /dev/nvidia0 ]]; then
   export __GLX_VENDOR_LIBRARY_NAME=nvidia
   export __EGL_VENDOR_LIBRARY_DIRS=/usr/share/glvnd/egl_vendor.d
-  export __GL_THREADED_OPTIMIZATIONS="${__GL_THREADED_OPTIMIZATIONS:-1}"
-  export __GL_SYNC_TO_VBLANK="${__GL_SYNC_TO_VBLANK:-1}"
-  export __GL_MaxFramesAllowed="${__GL_MaxFramesAllowed:-1}"
+  # Threaded GL opts + Flutter vsync double-wait (avgVsyncMs~30). Off by default.
+  export __GL_THREADED_OPTIMIZATIONS="${__GL_THREADED_OPTIMIZATIONS:-0}"
+  export __GL_SYNC_TO_VBLANK="${__GL_SYNC_TO_VBLANK:-0}"
+  unset __GL_MaxFramesAllowed
 fi
+# Flutter Linux OpenGL present (gdk_cairo_draw_from_gl) caps ~20fps on NVIDIA+X11.
+# Software compositor sustains ~60fps; WebRTC still uses pixel-buffer textures.
+# Animations stay on (not low-resource mode). Override: FLUTTER_LINUX_RENDERER=opengl.
+export FLUTTER_LINUX_RENDERER="${FLUTTER_LINUX_RENDERER:-software}"
 cd "$APP_DIR"
 exec "$APP_DIR/privet" "$@"
 EOF
@@ -334,10 +354,11 @@ Section: net
 Priority: optional
 Architecture: amd64
 Maintainer: Privet <privet@local>
-Depends: libgtk-3-0 | libgtk-3-0t64, libglib2.0-0 | libglib2.0-0t64, libstdc++6, libc6
+Depends: libgtk-3-0 | libgtk-3-0t64, libglib2.0-0 | libglib2.0-0t64, libstdc++6, libc6, libayatana-appindicator3-1 | libappindicator3-1
 Description: Privet messenger (native Linux desktop)
  Native Flutter/GTK client for Privet. Connects to
  https://messenger.banderdog.com by default.
+ Close hides to the system tray; use Quit Privet to exit.
 EOF
 
 # Ensure RPATH-friendly permissions on bundled libs
@@ -388,10 +409,15 @@ fi
 if [[ -e /dev/nvidia0 ]]; then
   export __GLX_VENDOR_LIBRARY_NAME=nvidia
   export __EGL_VENDOR_LIBRARY_DIRS=/usr/share/glvnd/egl_vendor.d
-  export __GL_THREADED_OPTIMIZATIONS="\${__GL_THREADED_OPTIMIZATIONS:-1}"
-  export __GL_SYNC_TO_VBLANK="\${__GL_SYNC_TO_VBLANK:-1}"
-  export __GL_MaxFramesAllowed="\${__GL_MaxFramesAllowed:-1}"
+  # Threaded GL opts + Flutter vsync double-wait (avgVsyncMs~30). Off by default.
+  export __GL_THREADED_OPTIMIZATIONS="\${__GL_THREADED_OPTIMIZATIONS:-0}"
+  export __GL_SYNC_TO_VBLANK="\${__GL_SYNC_TO_VBLANK:-0}"
+  unset __GL_MaxFramesAllowed
 fi
+# Flutter Linux OpenGL present (gdk_cairo_draw_from_gl) caps ~20fps on NVIDIA+X11.
+# Software compositor sustains ~60fps; WebRTC still uses pixel-buffer textures.
+# Animations stay on (not low-resource mode). Override: FLUTTER_LINUX_RENDERER=opengl.
+export FLUTTER_LINUX_RENDERER="\${FLUTTER_LINUX_RENDERER:-software}"
 exec "$INSTALL_DIR/privet" "\$@"
 EOF
 chmod +x "$INSTALL_DIR/privet-launch.sh"

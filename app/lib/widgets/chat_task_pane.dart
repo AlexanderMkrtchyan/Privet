@@ -44,77 +44,81 @@ class TaskHeaderChip extends StatelessWidget {
           : 'Open tasks — ${board.doneCount} of ${board.total} done',
       child: Material(
         color: Colors.transparent,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(12),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 180),
-            curve: Curves.easeOutCubic,
-            constraints: const BoxConstraints(minWidth: 128, maxWidth: 240),
-            padding: const EdgeInsets.fromLTRB(12, 7, 12, 7),
-            decoration: BoxDecoration(
+        child: Ink(
+          decoration: BoxDecoration(
+            color: active
+                ? PrivetTheme.panelElevated
+                : PrivetTheme.ink.withValues(alpha: 0.35),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
               color: active
-                  ? PrivetTheme.panelElevated
-                  : PrivetTheme.ink.withValues(alpha: 0.35),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: active
-                    ? fill.withValues(alpha: 0.7)
-                    : done
-                        ? PrivetTheme.signal.withValues(alpha: 0.45)
-                        : PrivetTheme.line,
-              ),
+                  ? fill.withValues(alpha: 0.7)
+                  : done
+                      ? PrivetTheme.signal.withValues(alpha: 0.45)
+                      : PrivetTheme.line,
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      done
-                          ? Icons.check_circle_rounded
-                          : Icons.checklist_rtl_rounded,
-                      size: 16,
-                      color: fill,
-                    ),
-                    const SizedBox(width: 6),
-                    Flexible(
-                      child: Text(
-                        label,
-                        overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.syne(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 13,
-                          color: done ? PrivetTheme.signal : PrivetTheme.paper,
+          ),
+          child: InkWell(
+            onTap: onTap,
+            mouseCursor: SystemMouseCursors.click,
+            borderRadius: BorderRadius.circular(12),
+            hoverColor: PrivetTheme.paper.withValues(alpha: 0.06),
+            splashColor: PrivetTheme.paper.withValues(alpha: 0.08),
+            child: Container(
+              constraints: const BoxConstraints(minWidth: 128, maxWidth: 240),
+              padding: const EdgeInsets.fromLTRB(12, 7, 12, 7),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        done
+                            ? Icons.check_circle_rounded
+                            : Icons.checklist_rtl_rounded,
+                        size: 16,
+                        color: fill,
+                      ),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          label,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.syne(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 13,
+                            color:
+                                done ? PrivetTheme.signal : PrivetTheme.paper,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  IgnorePointer(
+                    child: ExcludeSemantics(
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(99),
+                        child: TweenAnimationBuilder<double>(
+                          tween: Tween(begin: 0, end: board.progress),
+                          duration: const Duration(milliseconds: 280),
+                          curve: Curves.easeOutCubic,
+                          builder: (context, value, _) {
+                            return LinearProgressIndicator(
+                              value: value.clamp(0.0, 1.0),
+                              minHeight: 5,
+                              backgroundColor: track,
+                              color: fill,
+                            );
+                          },
                         ),
                       ),
                     ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                IgnorePointer(
-                  child: ExcludeSemantics(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(99),
-                      child: TweenAnimationBuilder<double>(
-                        tween: Tween(begin: 0, end: board.progress),
-                        duration: const Duration(milliseconds: 280),
-                        curve: Curves.easeOutCubic,
-                        builder: (context, value, _) {
-                          return LinearProgressIndicator(
-                            value: value.clamp(0.0, 1.0),
-                            minHeight: 5,
-                            backgroundColor: track,
-                            color: fill,
-                          );
-                        },
-                      ),
-                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),

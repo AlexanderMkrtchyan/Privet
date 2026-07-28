@@ -6,6 +6,7 @@ import 'dart:html' as html;
 import 'dart:typed_data';
 
 import 'clipboard_files.dart';
+import 'clipboard_read_web.dart';
 
 html.EventListener? _pasteListener;
 void Function(PickedBytes file)? _onImage;
@@ -267,16 +268,47 @@ String _mimeFromName(String name) {
   if (files != null && files.isNotEmpty) {
     final file = files[0];
     final type = file.type.isEmpty ? _mimeFromName(file.name) : file.type;
+    final attachable = type.startsWith('image/') ||
+        type.startsWith('video/') ||
+        type.startsWith('audio/') ||
+        type == 'application/pdf' ||
+        _mimeFromName(file.name) != 'application/octet-stream';
+    if (attachable) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      unawaited(
+        _fromBlob(file, type).then((picked) {
+          if (picked != null) _onImage?.call(picked);
+        }),
+      );
+      return (handled: true, tryClipboardApi: false);
+    }
+  }
+
+  // Image-only clipboards sometimes omit a usable File on DataTransferItem
+  // (getAsFile() null) or leave items empty — fall back during this paste
+  // gesture only when there is no text to insert.
+  final text = clipboard.getData('text/plain');
+  if (text == null || text.trim().isEmpty) {
     event.preventDefault();
     event.stopImmediatePropagation();
-    unawaited(
-      _fromBlob(file, type).then((picked) {
-        if (picked != null) _onImage?.call(picked);
-      }),
-    );
-    return (handled: true, tryClipboardApi: false);
+    return (handled: false, tryClipboardApi: true);
   }
   return (handled: false, tryClipboardApi: false);
+}
+
+/// Async Clipboard API fallback for image pastes where [DataTransferItem.getAsFile]
+/// returns null. Only call from a user paste gesture — never from polls/clicks
+/// (those trigger Chromium's Paste permission bubble and steal left-clicks).
+Future<void> _readClipboardApi() async {
+  final blobs = await readClipboardImageBlobs();
+  for (final entry in blobs) {
+    final picked = await _fromBlob(entry.blob, entry.mimeType);
+    if (picked != null) {
+      _onImage?.call(picked);
+      return;
+    }
+  }
 }
 
 int bindImagePaste(void Function(PickedBytes file) onImage) {
@@ -286,13 +318,15 @@ int bindImagePaste(void Function(PickedBytes file) onImage) {
 
   _pasteListener = (html.Event event) {
     if (id != _pasteBindId) return;
-    // Use only ClipboardEvent data — never navigator.clipboard.read()
-    // (Chrome Paste permission bubble steals left-clicks).
-    _tryClipboardEvent(event as html.ClipboardEvent);
+    final result = _tryClipboardEvent(event as html.ClipboardEvent);
+    if (result.tryClipboardApi) {
+      unawaited(_readClipboardApi());
+    }
   };
 
+  // Document capture only — also listening on window double-fires when the
+  // event is not stopped (and window→document order is redundant here).
   html.document.addEventListener('paste', _pasteListener, true);
-  html.window.addEventListener('paste', _pasteListener, true);
   return id;
 }
 
@@ -305,7 +339,6 @@ void unbindImagePaste([int? id]) {
 void _detachPasteListener() {
   if (_pasteListener != null) {
     html.document.removeEventListener('paste', _pasteListener, true);
-    html.window.removeEventListener('paste', _pasteListener, true);
     _pasteListener = null;
   }
 }

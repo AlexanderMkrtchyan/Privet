@@ -30,6 +30,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   if (!window.Create(L"Privet", origin, size)) {
     return EXIT_FAILURE;
   }
+  // Quit-on-close stays true for a real destroy. Dart `window_manager`
+  // intercepts WM_CLOSE when preventClose is set (close → hide to tray);
+  // Profile / tray "Quit Privet" clears preventClose and destroys.
   window.SetQuitOnClose(true);
 
   ::MSG msg;

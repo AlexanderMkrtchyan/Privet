@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 
@@ -114,6 +115,18 @@ Future<String?> getClipboardText() async {
   try {
     final text = await _channel.invokeMethod<String>('getClipboardText');
     return text;
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<Uint8List?> getClipboardImagePng() async {
+  try {
+    final raw = await _channel.invokeMethod<dynamic>('getClipboardImagePng');
+    if (raw == null) return null;
+    if (raw is Uint8List) return raw;
+    if (raw is List<int>) return Uint8List.fromList(raw);
+    return null;
   } catch (_) {
     return null;
   }

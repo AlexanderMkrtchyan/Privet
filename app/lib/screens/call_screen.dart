@@ -1020,7 +1020,8 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
     final showPip = showSelfPip || showRemotePip;
 
     // Re-bind renderers when the PiP (re)appears — flutter_webrtc reuses one
-    // <video> element per renderer and can leave a frozen/black frame on web.
+    // <video> element per renderer and can leave a frozen/black frame on web;
+    // native Texture remounts need the same one-shot srcObject rebind.
     if (showPip && !_pipShown) {
       _pipShown = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {

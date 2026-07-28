@@ -29,6 +29,8 @@ dependencies:
   animated_emoji: ^3.2.1
   web: ^1.1.1
   package_info_plus: ^9.0.1
+  window_manager: ^0.5.1
+  tray_manager: ^0.5.1
 
 dev_dependencies:
   flutter_test:
@@ -45,6 +47,11 @@ flutter:
     - assets/sounds/incoming_call.mp3
     - assets/sounds/incoming_call.wav
     - assets/sounds/outgoing/
+    - assets/dictionaries/en_words.txt
+    - assets/icons/tray.png
+    - assets/icons/tray.ico
+    - assets/icons/tray-unread.png
+    - assets/icons/tray-unread.ico
     # google_fonts matches assets by API filename prefix, e.g.
     # assets/google_fonts/DMSans-Regular.ttf (not the cache hash form).
     # Bundling these lets us disable runtime fetching (big Linux desktop

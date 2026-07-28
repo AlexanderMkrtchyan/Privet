@@ -1,6 +1,6 @@
 import { v4 as uuid } from 'uuid';
 import { db, publicUser } from '../db.js';
-import { getUserById } from '../auth/users.js';
+import { getUserById, listUsersExcept } from '../auth/users.js';
 
 function peerForDm(conversationId, selfId) {
   const row = db
@@ -1131,7 +1131,34 @@ export function searchAll(userId, query, { limit = 40 } = {}) {
     .slice(0, lim)
     .map(({ _rank, ...hit }) => hit);
 
-  return { chats, people: [], messages: [], media: [] };
+  const needle = q.replace(/[%_]/g, '').toLowerCase();
+  const people = listUsersExcept(userId)
+    .map((u) => {
+      const handle = String(u.handle || '').toLowerCase();
+      const name = String(u.displayName || '').toLowerCase();
+      let score = 99;
+      if (handle === needle) score = 0;
+      else if (handle.startsWith(needle)) score = 1;
+      else if (name.startsWith(needle)) score = 2;
+      else if (handle.includes(needle)) score = 3;
+      else if (name.includes(needle)) score = 4;
+      else {
+        for (const part of name.split(/[\s_\-]+/)) {
+          if (part.startsWith(needle)) {
+            score = 2;
+            break;
+          }
+          if (part.includes(needle)) score = Math.min(score, 4);
+        }
+      }
+      return score < 99 ? { user: u, score } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.score - b.score || String(a.user.displayName).localeCompare(String(b.user.displayName)))
+    .slice(0, Math.min(20, lim))
+    .map((row) => row.user);
+
+  return { chats, people, messages: [], media: [] };
 }
 
 /** Delete/leave depending on chat type and role. Returns affected user ids. */

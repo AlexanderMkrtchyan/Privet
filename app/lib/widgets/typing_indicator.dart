@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
+import '../util/agent_debug_log.dart';
 import '../util/low_resource.dart';
 
 /// Teams-style “someone is typing” row: pill bubble + bouncing dots.
@@ -56,10 +57,24 @@ class _TypingIndicatorBubbleState extends State<TypingIndicatorBubble>
         vsync: this,
         duration: const Duration(milliseconds: 1200),
       )..repeat();
+      // #region agent log
+      agentDebugLog(
+        hypothesisId: 'H5',
+        location: 'typing_indicator.dart:_applyReduceMotion',
+        message: 'typing AnimationController.repeat started',
+      );
+      // #endregion
       if (mounted) setState(() {});
     } else if (reduce && _controller != null) {
       _controller!.dispose();
       _controller = null;
+      // #region agent log
+      agentDebugLog(
+        hypothesisId: 'H5',
+        location: 'typing_indicator.dart:_applyReduceMotion',
+        message: 'typing AnimationController stopped',
+      );
+      // #endregion
       if (mounted) setState(() {});
     }
   }

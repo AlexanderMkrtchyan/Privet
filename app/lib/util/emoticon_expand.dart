@@ -8,14 +8,14 @@ String expandEmoticons(String input) {
   var out = input;
 
   // Longer tokens first so `:-)` wins over `:)`, `(brokenheart)` over `(heart)`.
-  for (final entry in _parenthetical) {
+  for (final entry in emoticonParenthetical) {
     out = out.replaceAllMapped(
       RegExp(RegExp.escape(entry.$1), caseSensitive: false),
       (_) => entry.$2,
     );
   }
 
-  for (final entry in _western) {
+  for (final entry in emoticonWestern) {
     final token = entry.$1;
     final emoji = entry.$2;
     if (token == ':/') {
@@ -33,7 +33,7 @@ String expandEmoticons(String input) {
 }
 
 /// Skype / Teams-style `(name)` codes. Sorted longest-first.
-const _parenthetical = <(String, String)>[
+const emoticonParenthetical = <(String, String)>[
   ('(brokenheart)', '💔'),
   ('(facepalm)', '🤦'),
   ('(handshake)', '🤝'),
@@ -107,7 +107,7 @@ const _parenthetical = <(String, String)>[
 ];
 
 /// Western text faces. Sorted longest-first.
-const _western = <(String, String)>[
+const emoticonWestern = <(String, String)>[
   (":'-(", '😢'),
   (":'(", '😢'),
   ('</3', '💔'),

@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'remote_input_stub.dart'
     if (dart.library.html) 'remote_input_web.dart'
     if (dart.library.io) 'remote_input_io.dart' as impl;
@@ -88,6 +90,10 @@ abstract final class RemoteInput {
   static Future<void> releaseAll() => impl.releaseAll();
 
   static Future<String?> getClipboardText() => impl.getClipboardText();
+
+  /// PNG bytes from the OS clipboard image, or null if none / unsupported.
+  static Future<Uint8List?> getClipboardImagePng() =>
+      impl.getClipboardImagePng();
 
   static Future<void> setClipboardText(String text) =>
       impl.setClipboardText(text);

@@ -8,6 +8,7 @@ Color _accent = const Color(0xFFB6F24A);
 bool _messageSelectHovering = false;
 bool _linkHovering = false;
 bool _dragHovering = false;
+bool _annotHovering = false;
 bool _stylesInstalled = false;
 
 String _cssHex(Color c) =>
@@ -97,12 +98,28 @@ void setPrivetDragHover(bool hovering) {
   if (hovering) {
     _messageSelectHovering = false;
     _linkHovering = false;
+    _annotHovering = false;
+  }
+  _applyBodyCursor();
+}
+
+/// Hide the system cursor while the lightbox shows a tool-shaped cursor.
+void setPrivetAnnotHover(bool hovering) {
+  installPrivetPaintedCursors();
+  if (_annotHovering == hovering) return;
+  _annotHovering = hovering;
+  if (hovering) {
+    _messageSelectHovering = false;
+    _linkHovering = false;
+    _dragHovering = false;
   }
   _applyBodyCursor();
 }
 
 void _applyBodyCursor() {
-  if (_dragHovering) {
+  if (_annotHovering) {
+    _setBodyCursor('none');
+  } else if (_dragHovering) {
     _setBodyCursor(_moveCursor(_accent));
   } else if (_linkHovering) {
     _setBodyCursor('pointer');

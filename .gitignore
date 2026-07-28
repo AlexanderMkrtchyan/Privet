@@ -2,6 +2,9 @@
 .cursor/
 .claude/
 
+# Local pkg-config / headers for tray_manager when -dev debs aren't installed
+.local-build-deps/
+
 # Secrets and local data
 server/data/
 server/node_modules/

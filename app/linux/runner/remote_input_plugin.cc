@@ -11,6 +11,7 @@
 #endif
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <string>
 #include <unordered_set>
@@ -655,6 +656,32 @@ FlMethodResponse* OnMethod(FlMethodCall* method_call) {
         clip ? gtk_clipboard_wait_for_text(clip) : nullptr;
     g_autoptr(FlValue) result =
         fl_value_new_string(text != nullptr ? text : "");
+    return FL_METHOD_RESPONSE(fl_method_success_response_new(result));
+  }
+
+  if (strcmp(name, "getClipboardImagePng") == 0) {
+    GtkClipboard* clip = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+    if (clip == nullptr || !gtk_clipboard_wait_is_image_available(clip)) {
+      return FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+    }
+    GdkPixbuf* pixbuf = gtk_clipboard_wait_for_image(clip);
+    if (pixbuf == nullptr) {
+      return FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+    }
+    gchar* buffer = nullptr;
+    gsize buffer_size = 0;
+    GError* error = nullptr;
+    const gboolean ok = gdk_pixbuf_save_to_buffer(
+        pixbuf, &buffer, &buffer_size, "png", &error, nullptr);
+    g_object_unref(pixbuf);
+    if (!ok || buffer == nullptr || buffer_size == 0) {
+      if (error != nullptr) g_error_free(error);
+      g_free(buffer);
+      return FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+    }
+    g_autoptr(FlValue) result = fl_value_new_uint8_list(
+        reinterpret_cast<const uint8_t*>(buffer), buffer_size);
+    g_free(buffer);
     return FL_METHOD_RESPONSE(fl_method_success_response_new(result));
   }
 

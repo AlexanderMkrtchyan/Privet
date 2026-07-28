@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 
-/// Global cheap-mode switch. Flipped only by [PrivetState.setLowResourceMode]
-/// (Profile → Low RAM & CPU). Do not auto-enable from frame timings — first
-/// paint / font warm-up on a fast NVIDIA box is not a weak GPU.
+import 'gpu_capability.dart';
+
+/// Global cheap-mode switch. Set by [PrivetState.setLowResourceMode] (Profile)
+/// or a **one-shot** GPU capability probe at bootstrap when the user has never
+/// chosen. Capable GPUs (e.g. RTX) keep full motion; software GL / weak boxes
+/// get static emoji and zero-duration transitions.
 ///
 /// When true the app prefers: zero-duration transitions, no splash ripples,
 /// static emoji, tighter image decode caps, flatter elevation (no soft shadows).
@@ -68,16 +71,20 @@ PageTransitionsTheme privetPageTransitionsTheme({required bool lowResource}) {
   );
 }
 
-/// Previously auto-enabled low-resource from early frame jank. Removed: cold
-/// first-paint on capable GPUs falsely triggered it and stripped animations.
-/// [cancel] remains so older call sites / tests stay safe.
+/// One-shot GPU check at bootstrap. Never samples frame timings (that falsely
+/// stripped motion on fast NVIDIA boxes during font warm-up).
 abstract final class LowResourceAutoDetect {
+  static Future<bool> shouldEnableCheapMode() async {
+    final capable = await hasCapableGpu();
+    return !capable;
+  }
+
   static void start({
     required bool preferenceSet,
     required Future<void> Function() enable,
     VoidCallback? onEnabled,
   }) {
-    // Intentionally a no-op — low-resource is manual only.
+    // Kept for API compat; bootstrap awaits [shouldEnableCheapMode] instead.
   }
 
   static void cancel() {}

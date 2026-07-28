@@ -1,5 +1,8 @@
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import 'dart:async';
+
+import 'agent_debug_log.dart';
 import 'media_permissions.dart';
 
 /// Sticky results from a real getUserMedia attempt.
@@ -85,7 +88,22 @@ Future<_DevicePresence> _detectDevices() async {
 }
 
 Future<MediaPermissionStatus> queryMediaPermissions() async {
+  // #region agent log
+  final sw = Stopwatch()..start();
+  // #endregion
   final devices = await _detectDevices();
+  // #region agent log
+  agentDebugLog(
+    hypothesisId: 'H8',
+    location: 'media_permissions_native.dart:queryMediaPermissions',
+    message: 'enumerateDevices done',
+    data: {
+      'elapsedMs': sw.elapsedMilliseconds,
+      'hasMic': devices.hasMic,
+      'hasCam': devices.hasCam,
+    },
+  );
+  // #endregion
 
   // Presence: sticky failure wins; else a real labeled device; else allow
   // one click probe while labels are still empty.
@@ -168,10 +186,13 @@ void markMediaGranted({required bool mic, required bool camera}) {
 
 void listenMediaDeviceChanges(void Function() onChange) {
   cancelMediaDeviceChanges();
+  Timer? debounce;
   void handler(dynamic _) {
     _micWorks = null;
     _camWorks = null;
-    onChange();
+    debounce?.cancel();
+    // PipeWire can spam devicechange while probing — coalesce.
+    debounce = Timer(const Duration(seconds: 2), onChange);
   }
 
   _deviceChangeHandler = handler;

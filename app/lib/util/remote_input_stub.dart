@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'remote_input.dart';
 
 Future<RemoteInputCapability> probe() async => RemoteInputCapability.unsupported;
@@ -39,6 +41,8 @@ Future<void> keyEvent({
 Future<void> releaseAll() async {}
 
 Future<String?> getClipboardText() async => null;
+
+Future<Uint8List?> getClipboardImagePng() async => null;
 
 Future<void> setClipboardText(String text) async {}
 
