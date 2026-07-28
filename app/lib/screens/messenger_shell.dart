@@ -45,6 +45,7 @@ import '../widgets/compact_emoji_picker.dart';
 import '../widgets/composer_autocomplete_popup.dart';
 import '../widgets/composer_spell_layer.dart';
 import '../widgets/composer_autocorrect_controller.dart';
+import '../widgets/composer_voice_bar.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/user_name.dart';
@@ -2580,6 +2581,11 @@ class _ConversationPaneState extends State<ConversationPane>
   OverlayEntry? _spellingMenu;
   bool _showEmoji = false;
   bool _recording = false;
+  VoiceDraft? _draftVoice;
+  Timer? _recordingTimer;
+  Duration _recordingElapsed = Duration.zero;
+  StreamSubscription<Amplitude>? _amplitudeSub;
+  final List<double> _recordingLevels = [];
   bool _showJumpToBottom = false;
   bool _searchOpen = false;
   bool _searchBusy = false;
@@ -2639,7 +2645,8 @@ class _ConversationPaneState extends State<ConversationPane>
     registerComposerMediaAttach(_onAnnotatedImageFromLightbox);
     // Do NOT enumerateDevices / init WebRTC ADM on chat open — on Linux+NVIDIA
     // that stalls frame presentation for many seconds (isolate stays alive,
-    // fps→0). Probe lazily when the user opens call controls.
+    // fps→0). Probe lazily when the user taps mic or call controls.
+    listenMediaDeviceChanges(_refreshMediaPermissions);
     _restoreDraft();
     final surfaceId = widget.state.activeConversationId;
     if (surfaceId != null) widget.state.attachChatSurface(surfaceId);
@@ -3468,7 +3475,7 @@ class _ConversationPaneState extends State<ConversationPane>
   bool get _composerHasContentNow =>
       _controller.text.trim().isNotEmpty ||
       _draftMedia.isNotEmpty ||
-      _recording;
+      _draftVoice != null;
 
   void _onComposerTextChanged() {
     if (_controller.isApplying) return;
@@ -3661,6 +3668,7 @@ class _ConversationPaneState extends State<ConversationPane>
     if (HardwareKeyboard.instance.isShiftPressed) {
       return KeyEventResult.ignored;
     }
+    if (_recording) return KeyEventResult.ignored;
     _send();
     return KeyEventResult.handled;
   }
@@ -3757,6 +3765,17 @@ class _ConversationPaneState extends State<ConversationPane>
     setState(() => _mediaPerms = status);
   }
 
+  /// Lazy device probe — avoids WebRTC init on chat open (see initState).
+  Future<void> _ensureMediaPermissions() async {
+    if (!_mediaPerms.canQuery) {
+      await _refreshMediaPermissions();
+    }
+  }
+
+  bool get _voiceMicEnabled =>
+      _draftVoice == null &&
+      (_recording || !_mediaPerms.canQuery || _mediaPerms.canStartAudio);
+
   @override
   void dispose() {
     cancelMediaDeviceChanges();
@@ -3776,6 +3795,7 @@ class _ConversationPaneState extends State<ConversationPane>
     _scroll.dispose();
     _searchController.dispose();
     _composerHasContent.dispose();
+    _stopRecordingUi(clearLevels: true);
     _recorder.dispose();
     super.dispose();
   }
@@ -4410,17 +4430,6 @@ class _ConversationPaneState extends State<ConversationPane>
                     ? state.typingLabel(conversationId: chat?.id)
                     : null,
               ),
-            if (_recording)
-              Container(
-                width: double.infinity,
-                color: PrivetTheme.danger.withValues(alpha: 0.15),
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Text(
-                  'Recording… tap mic again to send',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: PrivetTheme.danger),
-                ),
-              ),
             if (_draftMedia.isNotEmpty) _buildDraftPreview(),
             if (_replyingTo != null) _buildReplyBar(),
             if (_acSuggestions.isNotEmpty)
@@ -4470,24 +4479,9 @@ class _ConversationPaneState extends State<ConversationPane>
                                   }
                                 },
                                 child: _wrapComposerPointerLayer(
-                                  child: TextField(
-                                    key: _composerFieldKey,
-                                    controller: _controller,
-                                    focusNode: _composerFocus,
-                                    minLines: 1,
-                                    maxLines: 5,
-                                    keyboardType: TextInputType.multiline,
-                                    textInputAction: TextInputAction.newline,
-                                    autocorrect: false,
-                                    enableSuggestions: false,
-                                    contextMenuBuilder:
-                                        (context, editableTextState) =>
-                                            const SizedBox.shrink(),
-                                    onTapOutside: _onComposerTapOutside,
-                                    onChanged: (value) {
-                                      state.notifyTypingIfComposing(value);
-                                    },
-                                    onTap: _onComposerTap,
+                                  child: _buildComposerInput(
+                                    state: state,
+                                    compact: true,
                                     decoration: InputDecoration(
                                       isDense: true,
                                       contentPadding:
@@ -4495,13 +4489,14 @@ class _ConversationPaneState extends State<ConversationPane>
                                             horizontal: 8,
                                             vertical: 12,
                                           ),
-                                      hintText: _draftMedia.isEmpty
+                                      hintText:
+                                          _draftMedia.isEmpty &&
+                                              _draftVoice == null
                                           ? state.composerPlaceholder
                                           : 'Add a caption…',
                                       prefixIcon: IconButton(
                                         tooltip: 'Emoji',
                                         onPressed: _toggleEmoji,
-
                                         icon: Icon(
                                           _showEmoji
                                               ? Icons.keyboard_rounded
@@ -4527,32 +4522,49 @@ class _ConversationPaneState extends State<ConversationPane>
                           ValueListenableBuilder<bool>(
                             valueListenable: _composerHasContent,
                             builder: (context, hasContent, _) {
-                              if (hasContent) {
+                              if (_recording) {
                                 return Material(
-                                  color: PrivetTheme.signal,
+                                  color: PrivetTheme.danger.withValues(alpha: 0.16),
                                   borderRadius: BorderRadius.circular(14),
                                   child: InkWell(
-                                    onTap: _recording ? _toggleVoice : _send,
+                                    onTap: _stopRecording,
                                     mouseCursor: SystemMouseCursors.click,
                                     borderRadius: BorderRadius.circular(14),
                                     child: SizedBox(
                                       width: 48,
                                       height: 48,
                                       child: Icon(
-                                        _recording
-                                            ? Icons.stop_circle_rounded
-                                            : Icons.arrow_upward_rounded,
-                                        color: _recording
-                                            ? PrivetTheme.danger
-                                            : PrivetTheme.onAccent,
+                                        Icons.stop_rounded,
+                                        color: PrivetTheme.danger,
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+                              if (hasContent) {
+                                return Material(
+                                  color: PrivetTheme.signal,
+                                  borderRadius: BorderRadius.circular(14),
+                                  child: InkWell(
+                                    onTap: _send,
+                                    mouseCursor: SystemMouseCursors.click,
+                                    borderRadius: BorderRadius.circular(14),
+                                    child: SizedBox(
+                                      width: 48,
+                                      height: 48,
+                                      child: Icon(
+                                        Icons.arrow_upward_rounded,
+                                        color: PrivetTheme.onAccent,
                                       ),
                                     ),
                                   ),
                                 );
                               }
                               return IconButton(
-                                tooltip: 'Voice message',
-                                onPressed: _toggleVoice,
+                                tooltip: _voiceMicEnabled
+                                    ? 'Voice message'
+                                    : 'No microphone detected',
+                                onPressed: _voiceMicEnabled ? _startRecording : null,
                                 icon: const Icon(Icons.mic_rounded),
                               );
                             },
@@ -4597,25 +4609,13 @@ class _ConversationPaneState extends State<ConversationPane>
                                   }
                                 },
                                 child: _wrapComposerPointerLayer(
-                                  child: TextField(
-                                    key: _composerFieldKey,
-                                    controller: _controller,
-                                    focusNode: _composerFocus,
-                                    minLines: 1,
-                                    maxLines: 6,
-                                    keyboardType: TextInputType.multiline,
-                                    textInputAction: TextInputAction.newline,
-                                    autocorrect: false,
-                                    enableSuggestions: false,
-                                    contextMenuBuilder:
-                                        (context, editableTextState) =>
-                                            const SizedBox.shrink(),
-                                    onTapOutside: _onComposerTapOutside,
-                                    onChanged: (value) =>
-                                        state.notifyTypingIfComposing(value),
-                                    onTap: _onComposerTap,
+                                  child: _buildComposerInput(
+                                    state: state,
+                                    compact: false,
                                     decoration: InputDecoration(
-                                      hintText: _draftMedia.isEmpty
+                                      hintText:
+                                          _draftMedia.isEmpty &&
+                                              _draftVoice == null
                                           ? state.composerPlaceholder
                                           : 'Add a caption…',
                                     ),
@@ -4626,12 +4626,16 @@ class _ConversationPaneState extends State<ConversationPane>
                           ),
                           IconButton(
                             tooltip: _recording
-                                ? 'Stop & send'
-                                : 'Voice message',
-                            onPressed: _toggleVoice,
+                                ? 'Stop recording'
+                                : (_voiceMicEnabled
+                                      ? 'Voice message'
+                                      : 'No microphone detected'),
+                            onPressed: _recording
+                                ? _stopRecording
+                                : (_voiceMicEnabled ? _startRecording : null),
                             icon: Icon(
                               _recording
-                                  ? Icons.stop_circle_rounded
+                                  ? Icons.stop_rounded
                                   : Icons.mic_rounded,
                               color: _recording ? PrivetTheme.danger : null,
                             ),
@@ -4641,15 +4645,19 @@ class _ConversationPaneState extends State<ConversationPane>
                             color: PrivetTheme.signal,
                             borderRadius: BorderRadius.circular(14),
                             child: InkWell(
-                              onTap: _send,
-                              mouseCursor: SystemMouseCursors.click,
+                              onTap: _recording ? null : _send,
+                              mouseCursor: _recording
+                                  ? SystemMouseCursors.basic
+                                  : SystemMouseCursors.click,
                               borderRadius: BorderRadius.circular(14),
                               child: SizedBox(
                                 width: 48,
                                 height: 48,
                                 child: Icon(
                                   Icons.arrow_upward_rounded,
-                                  color: PrivetTheme.onAccent,
+                                  color: _recording
+                                      ? PrivetTheme.onAccent.withValues(alpha: 0.35)
+                                      : PrivetTheme.onAccent,
                                 ),
                               ),
                             ),
@@ -4743,6 +4751,45 @@ class _ConversationPaneState extends State<ConversationPane>
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildComposerInput({
+    required PrivetState state,
+    required bool compact,
+    InputDecoration? decoration,
+  }) {
+    if (_recording) {
+      return ComposerVoiceRecordingBar(
+        embedded: true,
+        elapsed: _recordingElapsed,
+        levels: _recordingLevels,
+        onCancel: _cancelRecording,
+      );
+    }
+    if (_draftVoice != null) {
+      return ComposerVoiceDraftBar(
+        embedded: true,
+        draft: _draftVoice!,
+        onDiscard: _discardVoiceDraft,
+      );
+    }
+    return TextField(
+      key: _composerFieldKey,
+      controller: _controller,
+      focusNode: _composerFocus,
+      minLines: 1,
+      maxLines: compact ? 5 : 6,
+      keyboardType: TextInputType.multiline,
+      textInputAction: TextInputAction.newline,
+      autocorrect: false,
+      enableSuggestions: false,
+      contextMenuBuilder: (context, editableTextState) =>
+          const SizedBox.shrink(),
+      onTapOutside: _onComposerTapOutside,
+      onChanged: (value) => state.notifyTypingIfComposing(value),
+      onTap: _onComposerTap,
+      decoration: decoration,
     );
   }
 
@@ -4869,6 +4916,14 @@ class _ConversationPaneState extends State<ConversationPane>
     // Chrome drops user-activation across getUserMedia awaits — unlock call
     // AudioElements here, while the click gesture is still live.
     unlockNotificationAudio();
+
+    await _ensureMediaPermissions();
+    if (!isScreen && !isControl && !_mediaPerms.hasMicrophone) {
+      widget.state.setError(
+        'No microphone detected — connect one to call',
+      );
+      return;
+    }
 
     // Firefox (and Chrome): getDisplayMedia requires transient user activation.
     // Show Privet chooser first; capture runs inside that option's click.
@@ -5708,6 +5763,7 @@ class _ConversationPaneState extends State<ConversationPane>
         ? _mimeFor(picked.filename)
         : picked.mimeType;
     setState(() {
+      _draftVoice = null;
       _draftMedia.add(
         PickedBytes(
           bytes: picked.bytes,
@@ -5776,50 +5832,55 @@ class _ConversationPaneState extends State<ConversationPane>
       );
   }
 
-  Future<void> _toggleVoice() async {
-    if (_recording) {
+  void _stopRecordingUi({bool clearLevels = false}) {
+    _recordingTimer?.cancel();
+    _recordingTimer = null;
+    unawaited(_amplitudeSub?.cancel());
+    _amplitudeSub = null;
+    if (clearLevels) _recordingLevels.clear();
+  }
+
+  void _discardVoiceDraft() {
+    setState(() => _draftVoice = null);
+    _syncComposerHasContent();
+  }
+
+  Future<void> _cancelRecording() async {
+    if (!_recording) return;
+    try {
       final path = await _recorder.stop();
-      setState(() => _recording = false);
-      _syncComposerHasContent();
-      if (path == null || path.isEmpty) {
-        _voiceToast('Recording produced no file');
+      if (path != null && path.isNotEmpty) {
+        await deleteRecordingFile(path);
+      }
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _recording = false;
+      _recordingElapsed = Duration.zero;
+    });
+    _stopRecordingUi(clearLevels: true);
+    _syncComposerHasContent();
+  }
+
+  Future<void> _startRecording() async {
+    if (_recording) return;
+    await _ensureMediaPermissions();
+    try {
+      if (!await _recorder.hasPermission()) {
+        _voiceToast('Microphone permission required');
         return;
       }
-
-      try {
-        final bytes = await readRecordingBytes(path);
-        await deleteRecordingFile(path);
-        if (bytes.isEmpty) {
-          _voiceToast('Empty recording — try again');
-          return;
-        }
-        final stamp = DateTime.now().millisecondsSinceEpoch;
-        // Web MediaRecorder → webm/opus; native (Linux) → wav (opus-in-.m4a fails).
-        final filename = kIsWeb ? 'voice-$stamp.webm' : 'voice-$stamp.wav';
-        final mimeType = kIsWeb ? 'audio/webm' : 'audio/wav';
-        await widget.state.sendMediaBytes(
-          bytes: bytes,
-          filename: filename,
-          mimeType: mimeType,
-          asVoice: true,
-        );
-        final err = widget.state.error;
-        if (err != null && err.isNotEmpty) {
-          _voiceToast(err);
-          return;
-        }
-        _scrollToEnd();
-      } catch (e) {
-        _voiceToast('Voice send failed: $e');
+      final devices = await _recorder.listInputDevices();
+      if (devices.isEmpty) {
+        _voiceToast('No microphone detected');
+        unawaited(_refreshMediaPermissions());
+        return;
       }
-      return;
-    }
-
-    if (!await _recorder.hasPermission()) {
-      _voiceToast('Microphone permission required');
-      return;
-    }
-    try {
+      setState(() {
+        _draftVoice = null;
+        _recordingElapsed = Duration.zero;
+        _recordingLevels.clear();
+      });
       if (kIsWeb) {
         await _recorder.start(
           const RecordConfig(
@@ -5830,7 +5891,6 @@ class _ConversationPaneState extends State<ConversationPane>
           path: 'privet-voice.webm',
         );
       } else {
-        // Linux ffmpeg cannot mux Opus into .m4a — that left a 0-byte file.
         final dir = await getTemporaryDirectory();
         final out = p.join(
           dir.path,
@@ -5841,10 +5901,70 @@ class _ConversationPaneState extends State<ConversationPane>
           path: out,
         );
       }
+      if (!mounted) return;
+      _recordingTimer?.cancel();
+      _recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (!mounted) return;
+        setState(() {
+          _recordingElapsed += const Duration(seconds: 1);
+        });
+      });
+      await _amplitudeSub?.cancel();
+      _amplitudeSub = _recorder
+          .onAmplitudeChanged(const Duration(milliseconds: 100))
+          .listen((amp) {
+        if (!mounted) return;
+        final level = ((amp.current + 45) / 45).clamp(0.08, 1.0);
+        setState(() {
+          _recordingLevels.add(level);
+          if (_recordingLevels.length > 40) {
+            _recordingLevels.removeAt(0);
+          }
+        });
+      });
       setState(() => _recording = true);
       _syncComposerHasContent();
     } catch (e) {
+      _stopRecordingUi(clearLevels: true);
       _voiceToast('Could not start recording: $e');
+    }
+  }
+
+  Future<void> _stopRecording() async {
+    if (!_recording) return;
+    final path = await _recorder.stop();
+    if (!mounted) return;
+    setState(() => _recording = false);
+    _stopRecordingUi(clearLevels: true);
+    if (path == null || path.isEmpty) {
+      _voiceToast('Recording produced no file');
+      _syncComposerHasContent();
+      return;
+    }
+
+    try {
+      final bytes = await readRecordingBytes(path);
+      await deleteRecordingFile(path);
+      if (bytes.isEmpty) {
+        _voiceToast('Empty recording — try again');
+        _syncComposerHasContent();
+        return;
+      }
+      final stamp = DateTime.now().millisecondsSinceEpoch;
+      final filename = kIsWeb ? 'voice-$stamp.webm' : 'voice-$stamp.wav';
+      final mimeType = kIsWeb ? 'audio/webm' : 'audio/wav';
+      setState(() {
+        _draftVoice = VoiceDraft(
+          bytes: bytes,
+          filename: filename,
+          mimeType: mimeType,
+        );
+        _recordingElapsed = Duration.zero;
+      });
+      _syncComposerHasContent();
+    } catch (e) {
+      _voiceToast('Could not save recording: $e');
+      _syncComposerHasContent();
     }
   }
 
@@ -5857,6 +5977,7 @@ class _ConversationPaneState extends State<ConversationPane>
 
   Future<void> _send() async {
     final drafts = List<PickedBytes>.from(_draftMedia);
+    final voice = _draftVoice;
     final text = _controller.text;
     final reply = _replyingTo;
     final replyToId = reply?.id;
@@ -5866,13 +5987,42 @@ class _ConversationPaneState extends State<ConversationPane>
         ? null
         : ReplyPreview.fromMessage(reply, bodyOverride: replyQuote);
     // Stop typing first — clear() would otherwise re-emit via onChanged, and a
-    // trailing throttle pulse must not outrun the message on the wire.
+    // trailing throttle pulse must not outrace the message on the wire.
     widget.state.stopOutgoingTyping();
     // PWA / compact: always dismiss IME after send so the OS keyboard does
     // not stick open or leave a white viewport gap.
     final dismissKeyboard = mounted && PrivetTheme.isCompact(context);
     _clearComposerAutocomplete();
     _controller.clearMarks();
+    if (voice != null) {
+      final caption = text.trim();
+      _controller.clear();
+      setState(() {
+        _draftVoice = null;
+        _replyingTo = null;
+        _replySnippet = null;
+      });
+      _syncComposerHasContent();
+      final chatId = widget.state.activeConversationId;
+      if (chatId != null) await widget.state.clearDraft(chatId);
+      await widget.state.sendMediaBytes(
+        bytes: voice.bytes,
+        filename: voice.filename,
+        mimeType: voice.mimeType,
+        caption: caption.isEmpty ? null : caption,
+        asVoice: true,
+        replyToId: replyToId,
+        replyTo: replyPreview,
+      );
+      final err = widget.state.error;
+      if (err != null && err.isNotEmpty) {
+        _voiceToast(err);
+        return;
+      }
+      if (dismissKeyboard) _dismissComposerKeyboard();
+      _scrollToEnd();
+      return;
+    }
     if (drafts.isNotEmpty) {
       final caption = text.trim();
       _controller.clear();

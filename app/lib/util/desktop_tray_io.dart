@@ -16,6 +16,8 @@ bool get isSupported =>
 Future<void> initDesktopTray() async {
   if (!isSupported) return;
   await windowManager.ensureInitialized();
+  // setSkipTaskbar (used when hiding/showing) needs ITaskbarList3 on Windows.
+  await windowManager.waitUntilReadyToShow();
   await windowManager.setPreventClose(true);
   _DesktopTrayHost.instance.attach();
   await _DesktopTrayHost.instance.ensureTray();
@@ -187,7 +189,13 @@ class _DesktopTrayHost with WindowListener, TrayListener {
   Future<void> showWindow() async {
     if (_quitting) return;
     await ensureTray();
-    await windowManager.setSkipTaskbar(false);
+    if (Platform.isWindows) {
+      try {
+        await windowManager.setSkipTaskbar(false);
+      } catch (e, st) {
+        debugPrint('DesktopTray: setSkipTaskbar(false) failed: $e\n$st');
+      }
+    }
     await windowManager.show();
     await windowManager.focus();
   }
@@ -197,7 +205,11 @@ class _DesktopTrayHost with WindowListener, TrayListener {
     await ensureTray();
     // Drop from the taskbar while in tray (Windows); Linux ignores harmlessly.
     if (Platform.isWindows) {
-      await windowManager.setSkipTaskbar(true);
+      try {
+        await windowManager.setSkipTaskbar(true);
+      } catch (e, st) {
+        debugPrint('DesktopTray: setSkipTaskbar(true) failed: $e\n$st');
+      }
     }
     await windowManager.hide();
   }

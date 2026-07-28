@@ -6,10 +6,15 @@
 
 #include <windows.h>
 
+#include <gdiplus.h>
+#include <objidl.h>
+
 #include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace {
 
@@ -163,6 +168,133 @@ void ReleaseAllKeys() {
   ups[2].type = INPUT_MOUSE;
   ups[2].mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
   SendInput(3, ups, sizeof(INPUT));
+}
+
+ULONG_PTR g_gdiplus_token = 0;
+
+struct GdiplusInitializer {
+  GdiplusInitializer() {
+    Gdiplus::GdiplusStartupInput input;
+    Gdiplus::GdiplusStartup(&g_gdiplus_token, &input, nullptr);
+  }
+  ~GdiplusInitializer() {
+    if (g_gdiplus_token) {
+      Gdiplus::GdiplusShutdown(g_gdiplus_token);
+    }
+  }
+} g_gdiplus_init;
+
+int PngEncoderClsid(CLSID* clsid) {
+  UINT num = 0;
+  UINT size = 0;
+  Gdiplus::GetImageEncodersSize(&num, &size);
+  if (size == 0) return -1;
+  std::vector<BYTE> buffer(size);
+  auto* codecs = reinterpret_cast<Gdiplus::ImageCodecInfo*>(buffer.data());
+  Gdiplus::GetImageEncoders(num, size, codecs);
+  for (UINT i = 0; i < num; ++i) {
+    if (wcscmp(codecs[i].MimeType, L"image/png") == 0) {
+      *clsid = codecs[i].Clsid;
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+std::vector<uint8_t> BitmapToPng(Gdiplus::Bitmap* bitmap) {
+  std::vector<uint8_t> result;
+  if (!bitmap || bitmap->GetLastStatus() != Gdiplus::Ok) {
+    return result;
+  }
+  CLSID clsid = {};
+  if (PngEncoderClsid(&clsid) < 0) {
+    return result;
+  }
+  IStream* stream = nullptr;
+  if (CreateStreamOnHGlobal(nullptr, TRUE, &stream) != S_OK) {
+    return result;
+  }
+  if (bitmap->Save(stream, &clsid) == Gdiplus::Ok) {
+    HGLOBAL hg = nullptr;
+    if (GetHGlobalFromStream(stream, &hg) == S_OK) {
+      const SIZE_T size = GlobalSize(hg);
+      auto* data = static_cast<uint8_t*>(GlobalLock(hg));
+      if (data && size > 0) {
+        result.assign(data, data + size);
+      }
+      GlobalUnlock(hg);
+    }
+  }
+  stream->Release();
+  return result;
+}
+
+std::vector<uint8_t> PngFromDib(const void* dib_data) {
+  auto* bih = static_cast<const BITMAPINFOHEADER*>(dib_data);
+  if (!bih || bih->biSize < sizeof(BITMAPINFOHEADER)) {
+    return {};
+  }
+
+  DWORD palette_size = 0;
+  if (bih->biCompression == BI_RGB) {
+    if (bih->biBitCount <= 8) {
+      const DWORD colors =
+          bih->biClrUsed ? bih->biClrUsed : (1u << bih->biBitCount);
+      palette_size = colors * sizeof(RGBQUAD);
+    }
+  } else if (bih->biCompression == BI_BITFIELDS) {
+    palette_size = 3 * sizeof(DWORD);
+  }
+
+  const auto* bits = static_cast<const BYTE*>(dib_data) + bih->biSize +
+                     palette_size;
+  std::unique_ptr<Gdiplus::Bitmap> bitmap(Gdiplus::Bitmap::FromBITMAPINFO(
+      reinterpret_cast<const BITMAPINFO*>(dib_data),
+      const_cast<BYTE*>(bits)));
+  return BitmapToPng(bitmap.get());
+}
+
+std::vector<uint8_t> ReadClipboardImagePng() {
+  std::vector<uint8_t> result;
+  if (!OpenClipboard(nullptr)) {
+    return result;
+  }
+
+  const UINT png_fmt = RegisterClipboardFormatW(L"PNG");
+  if (png_fmt != 0 && IsClipboardFormatAvailable(png_fmt)) {
+    HANDLE data = GetClipboardData(png_fmt);
+    if (data) {
+      auto* ptr = static_cast<const uint8_t*>(GlobalLock(data));
+      const SIZE_T size = GlobalSize(data);
+      if (ptr && size > 0) {
+        result.assign(ptr, ptr + size);
+      }
+      GlobalUnlock(data);
+    }
+    CloseClipboard();
+    return result;
+  }
+
+  if (IsClipboardFormatAvailable(CF_DIB)) {
+    HANDLE data = GetClipboardData(CF_DIB);
+    if (data) {
+      void* locked = GlobalLock(data);
+      if (locked) {
+        result = PngFromDib(locked);
+        GlobalUnlock(data);
+      }
+    }
+  } else if (IsClipboardFormatAvailable(CF_BITMAP)) {
+    HBITMAP hbm = static_cast<HBITMAP>(GetClipboardData(CF_BITMAP));
+    if (hbm) {
+      std::unique_ptr<Gdiplus::Bitmap> bitmap(
+          Gdiplus::Bitmap::FromHBITMAP(hbm, nullptr));
+      result = BitmapToPng(bitmap.get());
+    }
+  }
+
+  CloseClipboard();
+  return result;
 }
 
 void HandleMethod(
@@ -333,6 +465,16 @@ void HandleMethod(
       CloseClipboard();
     }
     result->Success();
+    return;
+  }
+
+  if (call.method_name() == "getClipboardImagePng") {
+    std::vector<uint8_t> png = ReadClipboardImagePng();
+    if (png.empty()) {
+      result->Success(flutter::EncodableValue());
+      return;
+    }
+    result->Success(flutter::EncodableValue(png));
     return;
   }
 
