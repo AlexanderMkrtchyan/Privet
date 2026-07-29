@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 
 import 'clipboard_files.dart';
@@ -12,6 +13,36 @@ KeyEventCallback? _keyHandler;
 var _pasteInFlight = false;
 
 Future<PickedBytes?> pickFileNative() async => null;
+
+Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) async {
+  final result = await FilePicker.platform.pickFiles(
+    withData: true,
+    type: FileType.any,
+    allowMultiple: true,
+  );
+  if (result == null || result.files.isEmpty) return const [];
+  final out = <PickedBytes>[];
+  for (final file in result.files) {
+    if (out.length >= maxFiles) break;
+    final bytes = file.bytes;
+    if (bytes == null || bytes.isEmpty) continue;
+    out.add(PickedBytes(
+      bytes: bytes,
+      filename: file.name,
+      mimeType: _mimeFor(file.name),
+    ));
+  }
+  return out;
+}
+
+String _mimeFor(String name) {
+  final lower = name.toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  return 'application/octet-stream';
+}
 
 int bindImagePaste(void Function(PickedBytes file) onImage) {
   final id = ++_pasteBindId;

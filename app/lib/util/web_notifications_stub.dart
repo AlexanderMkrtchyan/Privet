@@ -14,4 +14,8 @@ void showWebNotification({
 }) {}
 
 /// No-op off web. Returns a disposer.
-void Function() onDocumentVisible(void Function() callback) => () {};
+void Function() onDocumentVisible(void Function() callback) => () {}
+
+Future<void> refreshDesktopFocusState() async {}
+
+void dismissDesktopNotification(String tag) {}

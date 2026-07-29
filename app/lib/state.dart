@@ -32,6 +32,8 @@ import 'util/ui_overlay_pause.dart';
 import 'util/recv_media_stream.dart';
 import 'util/remote_call_audio.dart';
 import 'util/webrtc_safe.dart';
+import 'util/desktop_call_window.dart';
+import 'util/desktop_launcher_badge.dart';
 import 'util/desktop_tray.dart';
 import 'util/web_notifications.dart';
 
@@ -219,6 +221,8 @@ class CallSession extends ChangeNotifier {
 
   bool get isRemoteController => remoteControl?.state.isController == true;
   bool get isRemoteHost => remoteControl?.state.isHost == true;
+  bool get isRemoteHostPending =>
+      remoteControlIncomingRequest && isSharingLocally;
   RemoteInputCapability? get remoteInputCapability => remoteControl?.capability;
   String? get remoteControlError => remoteControl?.error;
 
@@ -2256,6 +2260,12 @@ class PrivetState extends ChangeNotifier {
   /// Read cursor when a chat was opened — used for # summarize unread after mark-read.
   final Map<String, String?> _aiUnreadSince = {};
   final Map<String, List<TaskItem>> tasksByChat = {};
+  final Map<String, List<TaskItem>> taskHistoryByChat = {};
+  final Map<String, bool> taskHistoryHasMoreByChat = {};
+  final Set<String> taskHistoryLoadingOlder = {};
+  static const int taskHistoryPageSize = 20;
+  final Map<String, List<PaymentReminder>> remindersByChat = {};
+  final Map<String, List<PaymentReminder>> reminderHistoryByChat = {};
   final Set<String> online = {};
   final Map<String, DateTime> lastSeen = {};
   List<PrivetUser> blocked = [];
@@ -2507,10 +2517,15 @@ class PrivetState extends ChangeNotifier {
     return n;
   }
 
-  /// Linux / Windows tray: red-dot icon when there are unread messages.
+  /// Linux / Windows tray + Ubuntu dock badge from the same unread total.
   void _syncDesktopTrayUnread() {
-    if (!DesktopTray.isSupported) return;
-    unawaited(DesktopTray.setUnreadCount(totalUnreadCount));
+    final count = totalUnreadCount;
+    if (DesktopTray.isSupported) {
+      unawaited(DesktopTray.setUnreadCount(count));
+    }
+    if (DesktopLauncherBadge.isSupported) {
+      unawaited(DesktopLauncherBadge.setUnreadCount(count));
+    }
   }
 
   void notifySession() {
@@ -2639,6 +2654,10 @@ class PrivetState extends ChangeNotifier {
       return;
     }
     setBrowserTabTitle(null);
+  }
+
+  void _flashDesktopWindowForCall() {
+    unawaited(DesktopCallWindow.flashForIncomingCall());
   }
 
   ApiClient get api => _api;
@@ -3192,6 +3211,11 @@ class PrivetState extends ChangeNotifier {
     loadingOlder.clear();
     _pendingWsMessages.clear();
     tasksByChat.clear();
+    taskHistoryByChat.clear();
+    taskHistoryHasMoreByChat.clear();
+    taskHistoryLoadingOlder.clear();
+    remindersByChat.clear();
+    reminderHistoryByChat.clear();
     online.clear();
     lastSeen.clear();
     blocked = [];
@@ -3372,6 +3396,19 @@ class PrivetState extends ChangeNotifier {
       } catch (_) {
         tasksByChat[id] = [];
       }
+    }
+    if (!remindersByChat.containsKey(id)) {
+      try {
+        remindersByChat[id] = await _api.reminders(id);
+      } catch (_) {
+        remindersByChat[id] = [];
+      }
+    }
+    if (!reminderHistoryByChat.containsKey(id)) {
+      await refreshReminderHistory(id);
+    }
+    if (!taskHistoryByChat.containsKey(id)) {
+      await refreshTaskHistory(id);
     }
     // Clear unread locally only when this window is actually focused —
     // otherwise an open chat in the background would swallow badges.
@@ -3745,28 +3782,101 @@ class PrivetState extends ChangeNotifier {
   ConversationTasks taskBoardFor(String? conversationId) =>
       ConversationTasks(items: List<TaskItem>.from(tasksFor(conversationId)));
 
+  List<TaskItem> taskHistoryFor(String? conversationId) {
+    if (conversationId == null) return const [];
+    return taskHistoryByChat[conversationId] ?? const [];
+  }
+
+  ConversationTasks taskHistoryBoardFor(String? conversationId) =>
+      ConversationTasks(items: List<TaskItem>.from(taskHistoryFor(conversationId)));
+
+  bool taskHistoryHasMore(String? conversationId) =>
+      conversationId != null && (taskHistoryHasMoreByChat[conversationId] ?? false);
+
+  Future<void> refreshTaskHistory(String conversationId) async {
+    try {
+      final page = await _api.taskHistory(
+        conversationId,
+        limit: taskHistoryPageSize,
+      );
+      taskHistoryByChat[conversationId] = page.items;
+      taskHistoryHasMoreByChat[conversationId] = page.hasMore;
+    } catch (_) {
+      taskHistoryByChat[conversationId] = [];
+      taskHistoryHasMoreByChat[conversationId] = false;
+    }
+    notifyListeners();
+  }
+
+  Future<bool> loadOlderTaskHistory(String conversationId) async {
+    if (taskHistoryHasMoreByChat[conversationId] != true) return false;
+    if (taskHistoryLoadingOlder.contains(conversationId)) return false;
+    final existing = taskHistoryByChat[conversationId] ?? const [];
+    final roots = existing.where((i) => !i.isSubtask).toList();
+    if (roots.isEmpty) {
+      taskHistoryHasMoreByChat[conversationId] = false;
+      notifyListeners();
+      return false;
+    }
+    final oldest = roots.last;
+    final before = oldest.updatedAt ?? oldest.createdAt;
+    taskHistoryLoadingOlder.add(conversationId);
+    notifyListeners();
+    try {
+      final page = await _api.taskHistory(
+        conversationId,
+        limit: taskHistoryPageSize,
+        before: _sqlTimestamp(before),
+      );
+      if (page.items.isEmpty) {
+        taskHistoryHasMoreByChat[conversationId] = false;
+        return false;
+      }
+      final seen = existing.map((e) => e.id).toSet();
+      final merged = [
+        ...existing,
+        ...page.items.where((e) => !seen.contains(e.id)),
+      ];
+      taskHistoryByChat[conversationId] = merged;
+      taskHistoryHasMoreByChat[conversationId] = page.hasMore;
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      taskHistoryLoadingOlder.remove(conversationId);
+      notifyListeners();
+    }
+  }
+
   void _setTasks(String conversationId, List<TaskItem> items) {
     tasksByChat[conversationId] = items;
     notifyListeners();
   }
 
-  Future<void> addTask({
+  Future<TaskItem> addTask({
     required String conversationId,
     required String body,
     String? messageId,
     String? mediaUrl,
     String? mimeType,
     String? fileName,
+    List<MediaAttachment>? attachments,
+    String? assignedTo,
+    String? parentId,
   }) async {
-    final items = await _api.createTask(
+    final result = await _api.createTaskDetailed(
       conversationId: conversationId,
       body: body,
       messageId: messageId,
       mediaUrl: mediaUrl,
       mimeType: mimeType,
       fileName: fileName,
+      attachments: attachments?.map((e) => e.toJson()).toList(),
+      assignedTo: assignedTo,
+      parentId: parentId,
     );
-    _setTasks(conversationId, items);
+    _setTasks(conversationId, result.items);
+    return result.item;
   }
 
   Future<void> addMessageToTask(ChatMessage message) async {
@@ -3781,26 +3891,45 @@ class PrivetState extends ChangeNotifier {
             'album' => '${message.mediaItems.length} attachments',
             _ => 'Message',
           };
-    MediaAttachment? media;
-    for (final item in message.mediaItems) {
-      if (item.kind == 'image') {
-        media = item;
-        break;
-      }
-    }
-    media ??= message.mediaItems.isNotEmpty ? message.mediaItems.first : null;
+    final media = message.mediaItems.take(10).toList();
     await addTask(
       conversationId: message.conversationId,
       body: body,
       messageId: message.id,
-      mediaUrl: media?.mediaUrl,
-      mimeType: media?.mimeType,
-      fileName: media?.fileName,
+      mediaUrl: media.isNotEmpty ? media.first.mediaUrl : null,
+      mimeType: media.isNotEmpty ? media.first.mimeType : null,
+      fileName: media.isNotEmpty ? media.first.fileName : null,
+      attachments: media.isNotEmpty ? media : null,
     );
   }
 
   Future<void> toggleTaskDone(TaskItem item) async {
-    final items = await _api.updateTask(taskId: item.id, done: !item.done);
+    final markingDone = !item.done;
+    final items = await _api.updateTask(taskId: item.id, done: markingDone);
+    _setTasks(item.conversationId, items);
+    if (markingDone) {
+      if (!item.isSubtask) {
+        // Parent done cascades to all subtasks on the server → group enters history.
+        await refreshTaskHistory(item.conversationId);
+      } else {
+        final board = ConversationTasks(items: items);
+        final rootId = item.parentId!;
+        final root = board.rootItems.where((t) => t.id == rootId).firstOrNull;
+        if (root != null) {
+          final subs = board.subtasksOf(rootId);
+          final fullyDone =
+              root.done && (subs.isEmpty || subs.every((s) => s.done));
+          if (fullyDone) {
+            await refreshTaskHistory(item.conversationId);
+          }
+        }
+      }
+    }
+  }
+
+  /// Only the task creator can call this — fully dismisses the task from the active list.
+  Future<void> confirmTaskDone(TaskItem item) async {
+    final items = await _api.updateTask(taskId: item.id, doneConfirmed: true);
     _setTasks(item.conversationId, items);
   }
 
@@ -3815,11 +3944,29 @@ class PrivetState extends ChangeNotifier {
     String? mimeType,
     String? fileName,
   }) async {
+    final next = [
+      ...item.mediaItems,
+      MediaAttachment(
+        mediaUrl: mediaUrl,
+        kind: (mimeType ?? '').startsWith('image/') ? 'image' : 'file',
+        mimeType: mimeType,
+        fileName: fileName,
+      ),
+    ].take(10).toList();
     final items = await _api.updateTask(
       taskId: item.id,
-      mediaUrl: mediaUrl,
-      mimeType: mimeType,
-      fileName: fileName,
+      attachments: next.map((e) => e.toJson()).toList(),
+    );
+    _setTasks(item.conversationId, items);
+  }
+
+  Future<void> setTaskAttachments({
+    required TaskItem item,
+    required List<MediaAttachment> attachments,
+  }) async {
+    final items = await _api.updateTask(
+      taskId: item.id,
+      attachments: attachments.take(10).map((e) => e.toJson()).toList(),
     );
     _setTasks(item.conversationId, items);
   }
@@ -3827,6 +3974,16 @@ class PrivetState extends ChangeNotifier {
   Future<void> clearTaskMedia(TaskItem item) async {
     final items = await _api.updateTask(taskId: item.id, clearMedia: true);
     _setTasks(item.conversationId, items);
+  }
+
+  Future<void> removeTaskAttachment(TaskItem item, String mediaUrl) async {
+    final next =
+        item.mediaItems.where((m) => m.mediaUrl != mediaUrl).toList();
+    if (next.isEmpty) {
+      await clearTaskMedia(item);
+      return;
+    }
+    await setTaskAttachments(item: item, attachments: next);
   }
 
   Future<void> deleteTask(TaskItem item) async {
@@ -3837,6 +3994,158 @@ class PrivetState extends ChangeNotifier {
   Future<void> clearDoneTasks(String conversationId) async {
     final items = await _api.clearDoneTasks(conversationId);
     _setTasks(conversationId, items);
+  }
+
+  List<PaymentReminder> remindersFor(String? conversationId) {
+    if (conversationId == null) return const [];
+    return remindersByChat[conversationId] ?? const [];
+  }
+
+  List<PaymentReminder> reminderHistoryFor(String? conversationId) {
+    if (conversationId == null) return const [];
+    return reminderHistoryByChat[conversationId] ?? const [];
+  }
+
+  Future<void> refreshReminderHistory(String conversationId) async {
+    try {
+      reminderHistoryByChat[conversationId] = await _api.reminderHistory(conversationId);
+    } catch (_) {
+      reminderHistoryByChat[conversationId] = [];
+    }
+    notifyListeners();
+  }
+
+  void _setReminders(String conversationId, List<PaymentReminder> items) {
+    remindersByChat[conversationId] = items;
+    notifyListeners();
+  }
+
+  Future<void> addReminder({
+    required String conversationId,
+    required String kind,
+    int? amountCents,
+    required String currency,
+    required String direction,
+    required String dueDate,
+    String note = '',
+  }) async {
+    final items = await _api.createReminder(
+      conversationId: conversationId,
+      kind: kind,
+      amountCents: amountCents,
+      currency: currency,
+      direction: direction,
+      dueDate: dueDate,
+      note: note,
+    );
+    _setReminders(conversationId, items);
+  }
+
+  Future<void> markReminderPaid(PaymentReminder r) async {
+    final items = await _api.updateReminder(reminderId: r.id, paid: true);
+    _setReminders(r.conversationId, items);
+    await refreshReminderHistory(r.conversationId);
+  }
+
+  Future<void> snoozeReminder(PaymentReminder r, Duration duration) async {
+    final until = DateTime.now().add(duration).toIso8601String();
+    final items = await _api.updateReminder(reminderId: r.id, snoozedUntil: until);
+    _setReminders(r.conversationId, items);
+  }
+
+  Future<void> updateReminderDetails(PaymentReminder r, {
+    int? amountCents,
+    String? currency,
+    String? direction,
+    String? dueDate,
+    String? note,
+  }) async {
+    final items = await _api.updateReminder(
+      reminderId: r.id,
+      amountCents: amountCents,
+      currency: currency,
+      direction: direction,
+      dueDate: dueDate,
+      note: note,
+    );
+    _setReminders(r.conversationId, items);
+  }
+
+  Future<void> deleteReminder(PaymentReminder r) async {
+    final items = await _api.deleteReminder(r.id);
+    _setReminders(r.conversationId, items);
+  }
+
+  Future<void> toggleTaskPin(TaskItem item) async {
+    final items = await _api.updateTask(taskId: item.id, pinned: !item.pinned);
+    _setTasks(item.conversationId, items);
+  }
+
+  Future<void> unpinTasksFromHeader(String conversationId) async {
+    final items = await _api.unpinAllTasks(conversationId);
+    _setTasks(conversationId, items);
+  }
+
+  Future<void> toggleReminderPin(PaymentReminder r) async {
+    final items = await _api.updateReminder(reminderId: r.id, pinned: !r.pinned);
+    _setReminders(r.conversationId, items);
+  }
+
+  void _applyReminderLists(
+    String conversationId, {
+    required List<PaymentReminder> items,
+    required List<PaymentReminder> history,
+  }) {
+    remindersByChat[conversationId] = items;
+    reminderHistoryByChat[conversationId] = history;
+    notifyListeners();
+  }
+
+  Future<void> addPaymentExpense({
+    required PaymentReminder payment,
+    required String label,
+    required int amountCents,
+  }) async {
+    final result = await _api.createExpense(
+      paymentId: payment.id,
+      label: label,
+      amountCents: amountCents,
+    );
+    _applyReminderLists(
+      payment.conversationId,
+      items: result.items,
+      history: result.history,
+    );
+  }
+
+  Future<void> updatePaymentExpense({
+    required String conversationId,
+    required String expenseId,
+    String? label,
+    int? amountCents,
+  }) async {
+    final result = await _api.updateExpense(
+      expenseId: expenseId,
+      label: label,
+      amountCents: amountCents,
+    );
+    _applyReminderLists(
+      conversationId,
+      items: result.items,
+      history: result.history,
+    );
+  }
+
+  Future<void> deletePaymentExpense({
+    required String conversationId,
+    required String expenseId,
+  }) async {
+    final result = await _api.deleteExpense(expenseId);
+    _applyReminderLists(
+      conversationId,
+      items: result.items,
+      history: result.history,
+    );
   }
 
   Future<void> openDm(PrivetUser peer) async {
@@ -3875,6 +4184,11 @@ class PrivetState extends ChangeNotifier {
     loadingOlder.remove(conversationId);
     _pendingWsMessages.remove(conversationId);
     tasksByChat.remove(conversationId);
+    taskHistoryByChat.remove(conversationId);
+    taskHistoryHasMoreByChat.remove(conversationId);
+    taskHistoryLoadingOlder.remove(conversationId);
+    remindersByChat.remove(conversationId);
+    reminderHistoryByChat.remove(conversationId);
   }
 
   Future<List<PrivetUser>> removeGroupMember({
@@ -4775,6 +5089,122 @@ Examples:
     }
   }
 
+  Future<void> _onIncomingMessage(Map<String, dynamic> event) async {
+    if (DesktopTray.isSupported) {
+      await refreshDesktopFocusState();
+    }
+
+    final message = ChatMessage.fromJson(
+      event['message'] as Map<String, dynamic>,
+    );
+    final clientId = event['clientId'] as String?;
+    final chatId = message.conversationId;
+    var isNew = true;
+    if (!historyLoaded.contains(chatId)) {
+      final pending = _pendingWsMessages.putIfAbsent(chatId, () => []);
+      if (clientId != null) {
+        pending.removeWhere((m) => m.id == clientId);
+      }
+      isNew = !pending.any((m) => m.id == message.id);
+      if (isNew) pending.add(message);
+      // Keep optimistic local rows (active send) in sync without marking loaded.
+      if (messagesByChat.containsKey(chatId)) {
+        final list = List<ChatMessage>.from(messagesByChat[chatId]!);
+        if (clientId != null) {
+          list.removeWhere((m) => m.id == clientId);
+        }
+        if (!list.any((m) => m.id == message.id)) {
+          list.add(message);
+          list.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+        }
+        messagesByChat[chatId] = list;
+      }
+      // Only fetch history if this chat is open / already loading — never
+      // invent a one-message cache for background chats.
+      if (activeConversationId == chatId ||
+          _historyLoading.contains(chatId)) {
+        unawaited(ensureHistory(chatId).catchError((_) {}));
+      }
+    } else {
+      final list = List<ChatMessage>.from(messagesByChat[chatId] ?? []);
+      if (clientId != null) {
+        list.removeWhere((m) => m.id == clientId);
+      }
+      isNew = !list.any((m) => m.id == message.id);
+      if (isNew) {
+        list.add(message);
+      }
+      messagesByChat[chatId] = list;
+    }
+    final active = activeConversationId == chatId;
+    final fromSelf = message.sender.id == user?.id;
+    if (!fromSelf) {
+      _lastPeerMessageAt[_peerMessageKey(chatId, message.sender.id)] =
+          DateTime.now();
+      _clearPeerTyping(chatId, onlyUserId: message.sender.id);
+    }
+    final viewingHere =
+        active && chatSurfaceMounted && !documentHidden && documentHasFocus;
+    if (!fromSelf) {
+      final idx = conversations.indexWhere((c) => c.id == chatId);
+      if (idx >= 0) {
+        if (viewingHere && _userRecentlyPresent) {
+          conversations[idx] = conversations[idx].copyWith(
+            unreadCount: 0,
+            lastMessage: message,
+          );
+        } else if (isNew) {
+          // Only bump on first delivery — duplicate WS events must not
+          // inflate the badge, or it later snaps to 0 and feels random.
+          final c = conversations[idx];
+          conversations[idx] = c.copyWith(
+            unreadCount: c.unreadCount + 1,
+            lastMessage: message,
+          );
+        } else {
+          conversations[idx] = conversations[idx].copyWith(
+            lastMessage: message,
+          );
+        }
+      }
+      // Always ding on every new incoming message (mute is the only off switch).
+      // Server sets playSound:false on non-primary sockets so multi-tab /
+      // multi-browser logins for the same user only ding once.
+      if (isNew &&
+          event['playSound'] != false &&
+          message.kind != 'call') {
+        var muted = false;
+        for (final c in conversations) {
+          if (c.id == chatId) {
+            muted = c.muted;
+            break;
+          }
+        }
+        if (!muted && soundEnabled) {
+          playMessageSound(messageId: message.id);
+        }
+      }
+    } else {
+      final idx = conversations.indexWhere((c) => c.id == chatId);
+      if (idx >= 0) {
+        conversations[idx] =
+            conversations[idx].copyWith(lastMessage: message);
+      }
+    }
+    // Promote the chat without a full HTTP inbox refetch.
+    final existingIdx = conversations.indexWhere((c) => c.id == chatId);
+    if (existingIdx < 0) {
+      _scheduleInboxReconcile();
+    } else if (existingIdx > 0) {
+      final updated = conversations.removeAt(existingIdx);
+      conversations.insert(0, updated);
+    }
+    notifyChatAndInbox();
+    if (viewingHere && _userRecentlyPresent && !fromSelf) {
+      _scheduleFocusedRead();
+    }
+  }
+
   void _onEvent(Map<String, dynamic> event) {
     switch (event['type']) {
       case 'presence':
@@ -4805,116 +5235,18 @@ Examples:
               .toList();
           notifyListeners();
         }
+      case 'reminders.updated':
+        final remChatId = event['conversationId'] as String?;
+        if (remChatId != null) {
+          final raw = (event['items'] as List?) ?? const [];
+          remindersByChat[remChatId] = raw
+              .map((e) => PaymentReminder.fromJson(e as Map<String, dynamic>))
+              .toList();
+          unawaited(refreshReminderHistory(remChatId));
+          notifyListeners();
+        }
       case 'message':
-        final message = ChatMessage.fromJson(
-          event['message'] as Map<String, dynamic>,
-        );
-        final clientId = event['clientId'] as String?;
-        final chatId = message.conversationId;
-        var isNew = true;
-        if (!historyLoaded.contains(chatId)) {
-          final pending = _pendingWsMessages.putIfAbsent(chatId, () => []);
-          if (clientId != null) {
-            pending.removeWhere((m) => m.id == clientId);
-          }
-          isNew = !pending.any((m) => m.id == message.id);
-          if (isNew) pending.add(message);
-          // Keep optimistic local rows (active send) in sync without marking loaded.
-          if (messagesByChat.containsKey(chatId)) {
-            final list = List<ChatMessage>.from(messagesByChat[chatId]!);
-            if (clientId != null) {
-              list.removeWhere((m) => m.id == clientId);
-            }
-            if (!list.any((m) => m.id == message.id)) {
-              list.add(message);
-              list.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-            }
-            messagesByChat[chatId] = list;
-          }
-          // Only fetch history if this chat is open / already loading — never
-          // invent a one-message cache for background chats.
-          if (activeConversationId == chatId ||
-              _historyLoading.contains(chatId)) {
-            unawaited(ensureHistory(chatId).catchError((_) {}));
-          }
-        } else {
-          final list = List<ChatMessage>.from(messagesByChat[chatId] ?? []);
-          if (clientId != null) {
-            list.removeWhere((m) => m.id == clientId);
-          }
-          isNew = !list.any((m) => m.id == message.id);
-          if (isNew) {
-            list.add(message);
-          }
-          messagesByChat[chatId] = list;
-        }
-        final active = activeConversationId == chatId;
-        final fromSelf = message.sender.id == user?.id;
-        if (!fromSelf) {
-          _lastPeerMessageAt[_peerMessageKey(chatId, message.sender.id)] =
-              DateTime.now();
-          _clearPeerTyping(chatId, onlyUserId: message.sender.id);
-        }
-        final viewingHere =
-            active && chatSurfaceMounted && !documentHidden && documentHasFocus;
-        if (!fromSelf) {
-          final idx = conversations.indexWhere((c) => c.id == chatId);
-          if (idx >= 0) {
-            if (viewingHere && _userRecentlyPresent) {
-              conversations[idx] = conversations[idx].copyWith(
-                unreadCount: 0,
-                lastMessage: message,
-              );
-            } else if (isNew) {
-              // Only bump on first delivery — duplicate WS events must not
-              // inflate the badge, or it later snaps to 0 and feels random.
-              final c = conversations[idx];
-              conversations[idx] = c.copyWith(
-                unreadCount: c.unreadCount + 1,
-                lastMessage: message,
-              );
-            } else {
-              conversations[idx] = conversations[idx].copyWith(
-                lastMessage: message,
-              );
-            }
-          }
-          // Always ding on every new incoming message (mute is the only off switch).
-          // Server sets playSound:false on non-primary sockets so multi-tab /
-          // multi-browser logins for the same user only ding once.
-          if (isNew &&
-              event['playSound'] != false &&
-              message.kind != 'call') {
-            var muted = false;
-            for (final c in conversations) {
-              if (c.id == chatId) {
-                muted = c.muted;
-                break;
-              }
-            }
-            if (!muted && soundEnabled) {
-              playMessageSound(messageId: message.id);
-            }
-          }
-        } else {
-          final idx = conversations.indexWhere((c) => c.id == chatId);
-          if (idx >= 0) {
-            conversations[idx] =
-                conversations[idx].copyWith(lastMessage: message);
-          }
-        }
-        // Promote the chat without a full HTTP inbox refetch.
-        final existingIdx = conversations.indexWhere((c) => c.id == chatId);
-        if (existingIdx < 0) {
-          _scheduleInboxReconcile();
-        } else if (existingIdx > 0) {
-          final updated = conversations.removeAt(existingIdx);
-          conversations.insert(0, updated);
-        }
-        notifyChatAndInbox();
-        if (viewingHere && _userRecentlyPresent && !fromSelf) {
-          _scheduleFocusedRead();
-        }
+        unawaited(_onIncomingMessage(event));
       case 'message.updated':
         final updated = ChatMessage.fromJson(
           event['message'] as Map<String, dynamic>,
@@ -4935,6 +5267,7 @@ Examples:
             unreadCount: 0,
             lastReadAt: readAt ?? c.lastReadAt,
           );
+          dismissDesktopNotification(chatId);
         } else if (!c.isGroup) {
           conversations[idx] = c.copyWith(
             peerLastReadAt: readAt ?? c.peerLastReadAt,
@@ -5024,6 +5357,7 @@ Examples:
         // leak into the shared stream after accept (suppressCallTones stops it).
         if (!alreadyOutgoing) {
           playOutgoingCallSound();
+          _flashDesktopWindowForCall();
         }
         notifyListeners();
       case 'call.incoming':
@@ -5038,6 +5372,7 @@ Examples:
         );
         callMinimized = false;
         startIncomingCallSound();
+        _flashDesktopWindowForCall();
         notifyListeners();
       case 'call.accepted':
         final callId = event['callId'] as String?;

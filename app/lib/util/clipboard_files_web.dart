@@ -116,8 +116,12 @@ Future<void> _handleAttachChange(html.FileUploadInputElement input) async {
 
 /// Legacy programmatic picker — prefer the positioned overlay input.
 Future<PickedBytes?> pickFileNative() {
+  return pickMultipleFilesNative(maxFiles: 1).then((files) => files.isEmpty ? null : files.first);
+}
+
+Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) {
   ensureAttachFileInput();
-  final completer = Completer<PickedBytes?>();
+  final completer = Completer<List<PickedBytes>>();
   final input = html.FileUploadInputElement()
     ..accept = '*/*'
     ..multiple = true;
@@ -135,7 +139,7 @@ Future<PickedBytes?> pickFileNative() {
   html.document.body?.append(input);
 
   var settled = false;
-  void complete(PickedBytes? value) {
+  void complete(List<PickedBytes> value) {
     if (settled) return;
     settled = true;
     input.remove();
@@ -146,33 +150,32 @@ Future<PickedBytes?> pickFileNative() {
     try {
       final files = input.files;
       if (files == null || files.isEmpty) {
-        complete(null);
+        complete(const []);
         return;
       }
-      PickedBytes? first;
+      final picked = <PickedBytes>[];
       for (var i = 0; i < files.length; i++) {
+        if (picked.length >= maxFiles) break;
         final file = files[i];
         final bytes = await readBlobAsBytes(file);
         if (bytes == null || bytes.isEmpty) continue;
-        final picked = PickedBytes(
-          bytes: bytes,
-          filename: file.name.isEmpty ? 'attachment.bin' : file.name,
-          mimeType:
-              file.type.isEmpty ? 'application/octet-stream' : file.type,
+        picked.add(
+          PickedBytes(
+            bytes: bytes,
+            filename: file.name.isEmpty ? 'attachment.bin' : file.name,
+            mimeType:
+                file.type.isEmpty ? 'application/octet-stream' : file.type,
+          ),
         );
-        first ??= picked;
-        if (i > 0) {
-          _onAttachPicked?.call(picked);
-        }
       }
-      complete(first);
+      complete(picked);
     } catch (_) {
-      complete(null);
+      complete(const []);
     }
   });
 
-  input.on['cancel'].listen((_) => complete(null));
-  Timer(const Duration(seconds: 30), () => complete(null));
+  input.on['cancel'].listen((_) => complete(const []));
+  Timer(const Duration(seconds: 120), () => complete(const []));
   input.click();
   return completer.future;
 }

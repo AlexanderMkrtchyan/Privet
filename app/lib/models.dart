@@ -214,30 +214,63 @@ class TaskItem {
     required this.conversationId,
     required this.body,
     required this.done,
+    required this.doneConfirmed,
     required this.sortOrder,
     required this.createdAt,
+    this.parentId,
     this.messageId,
     this.mediaUrl,
     this.mimeType,
     this.fileName,
+    this.attachments = const [],
     this.createdBy,
+    this.assignedTo,
+    this.pinned = false,
     this.updatedAt,
+    this.subtaskDone,
+    this.subtaskTotal,
   });
 
   final String id;
   final String conversationId;
+  /// Null for top-level tasks; set for subtasks.
+  final String? parentId;
   final String body;
   final bool done;
+  /// True only when creator (setter) has confirmed the task is done — it disappears from active list.
+  final bool doneConfirmed;
   final int sortOrder;
   final String? messageId;
   final String? mediaUrl;
   final String? mimeType;
   final String? fileName;
+  final List<MediaAttachment> attachments;
   final PrivetUser? createdBy;
+  final PrivetUser? assignedTo;
+  final bool pinned;
   final DateTime createdAt;
   final DateTime? updatedAt;
+  /// Subtask progress counts (set on parent tasks from server).
+  final int? subtaskDone;
+  final int? subtaskTotal;
 
-  bool get hasMedia => mediaUrl != null && mediaUrl!.isNotEmpty;
+  bool get isSubtask => parentId != null && parentId!.isNotEmpty;
+
+  bool get hasMedia =>
+      attachments.isNotEmpty || (mediaUrl != null && mediaUrl!.isNotEmpty);
+
+  List<MediaAttachment> get mediaItems {
+    if (attachments.isNotEmpty) return attachments;
+    if (mediaUrl == null || mediaUrl!.isEmpty) return const [];
+    return [
+      MediaAttachment(
+        mediaUrl: mediaUrl!,
+        kind: isImage ? 'image' : 'file',
+        mimeType: mimeType,
+        fileName: fileName,
+      ),
+    ];
+  }
 
   bool get isImage {
     if (mimeType != null && mimeType!.startsWith('image/')) return true;
@@ -249,44 +282,72 @@ class TaskItem {
         name.endsWith('.webp');
   }
 
-  factory TaskItem.fromJson(Map<String, dynamic> json) => TaskItem(
-        id: json['id'] as String,
-        conversationId: json['conversationId'] as String,
-        body: (json['body'] as String?) ?? '',
-        done: json['done'] == true,
-        sortOrder: (json['sortOrder'] as num?)?.toInt() ?? 0,
-        messageId: json['messageId'] as String?,
-        mediaUrl: json['mediaUrl'] as String?,
-        mimeType: json['mimeType'] as String?,
-        fileName: json['fileName'] as String?,
-        createdBy: json['createdBy'] is Map<String, dynamic>
-            ? PrivetUser.fromJson(json['createdBy'] as Map<String, dynamic>)
-            : null,
-        createdAt: parseServerUtc(json['createdAt']) ?? DateTime.now(),
-        updatedAt: parseServerUtc(json['updatedAt']),
-      );
+  factory TaskItem.fromJson(Map<String, dynamic> json) {
+    final attachmentsRaw = (json['attachments'] as List?) ?? const [];
+    final parsed = attachmentsRaw
+        .whereType<Map>()
+        .map((e) => MediaAttachment.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+    return TaskItem(
+      id: json['id'] as String,
+      conversationId: json['conversationId'] as String,
+      parentId: json['parentId'] as String?,
+      body: (json['body'] as String?) ?? '',
+      done: json['done'] == true,
+      doneConfirmed: json['doneConfirmed'] == true,
+      sortOrder: (json['sortOrder'] as num?)?.toInt() ?? 0,
+      messageId: json['messageId'] as String?,
+      mediaUrl: json['mediaUrl'] as String?,
+      mimeType: json['mimeType'] as String?,
+      fileName: json['fileName'] as String?,
+      attachments: parsed,
+      createdBy: json['createdBy'] is Map<String, dynamic>
+          ? PrivetUser.fromJson(json['createdBy'] as Map<String, dynamic>)
+          : null,
+      assignedTo: json['assignedTo'] is Map<String, dynamic>
+          ? PrivetUser.fromJson(json['assignedTo'] as Map<String, dynamic>)
+          : null,
+      pinned: json['pinned'] == true,
+      createdAt: parseServerUtc(json['createdAt']) ?? DateTime.now(),
+      updatedAt: parseServerUtc(json['updatedAt']),
+      subtaskDone: (json['subtaskDone'] as num?)?.toInt(),
+      subtaskTotal: (json['subtaskTotal'] as num?)?.toInt(),
+    );
+  }
 
   TaskItem copyWith({
     String? body,
     bool? done,
+    bool? doneConfirmed,
     String? mediaUrl,
     String? mimeType,
     String? fileName,
+    List<MediaAttachment>? attachments,
+    bool? pinned,
+    int? subtaskDone,
+    int? subtaskTotal,
     bool clearMedia = false,
   }) =>
       TaskItem(
         id: id,
         conversationId: conversationId,
+        parentId: parentId,
         body: body ?? this.body,
         done: done ?? this.done,
+        doneConfirmed: doneConfirmed ?? this.doneConfirmed,
         sortOrder: sortOrder,
         messageId: messageId,
         mediaUrl: clearMedia ? null : (mediaUrl ?? this.mediaUrl),
         mimeType: clearMedia ? null : (mimeType ?? this.mimeType),
         fileName: clearMedia ? null : (fileName ?? this.fileName),
+        attachments: clearMedia ? const [] : (attachments ?? this.attachments),
         createdBy: createdBy,
+        assignedTo: assignedTo,
+        pinned: pinned ?? this.pinned,
         createdAt: createdAt,
         updatedAt: updatedAt,
+        subtaskDone: subtaskDone ?? this.subtaskDone,
+        subtaskTotal: subtaskTotal ?? this.subtaskTotal,
       );
 }
 
@@ -295,16 +356,257 @@ class ConversationTasks {
 
   final List<TaskItem> items;
 
-  int get total => items.length;
-  int get doneCount => items.where((i) => i.done).length;
-  bool get isComplete => total == 0 || doneCount == total;
-  double get progress => total == 0 ? 1.0 : doneCount / total;
+  /// Top-level tasks only (excludes subtasks).
+  List<TaskItem> get rootItems =>
+      items.where((i) => !i.isSubtask).toList();
+
+  /// Open root tasks (server filters; client-side guard for incomplete groups).
+  List<TaskItem> get activeItems => rootItems.where((i) {
+        if (i.doneConfirmed) return false;
+        if (!i.done) return true;
+        // Parent checked off but subtasks may still be open — server keeps it active.
+        final subs = subtasksOf(i.id);
+        return subs.any((s) => !s.done);
+      }).toList();
+
+  /// Undone subtasks only (for remaining-work counts).
+  List<TaskItem> activeSubtasksOf(String parentId) => items
+      .where((i) =>
+          i.parentId == parentId && !i.done && !i.doneConfirmed)
+      .toList();
+
+  /// All subtasks under a parent (includes done — shown until group completes).
+  List<TaskItem> subtasksOf(String parentId) =>
+      items.where((i) => i.parentId == parentId).toList();
+
+  TaskItem? get pinnedTask {
+    for (final t in activeItems) {
+      if (t.pinned) return t;
+    }
+    return null;
+  }
+
+  /// Progress for a pinned/active parent (includes done subtasks in counts).
+  ({int done, int total}) progressFor(TaskItem parent) {
+    if (parent.subtaskTotal != null && parent.subtaskTotal! > 0) {
+      return (
+        done: parent.subtaskDone ?? 0,
+        total: parent.subtaskTotal!,
+      );
+    }
+    final kids = activeSubtasksOf(parent.id);
+    if (kids.isNotEmpty) {
+      return (done: 0, total: kids.length);
+    }
+    return (done: parent.done ? 1 : 0, total: 1);
+  }
+
+  /// Board progress: only counts remaining (undone) work items.
+  int get total {
+    var n = 0;
+    for (final t in activeItems) {
+      final kids = activeSubtasksOf(t.id);
+      n += kids.isEmpty ? 1 : kids.length;
+    }
+    return n;
+  }
+
+  int get doneCount {
+    var n = 0;
+    for (final t in activeItems) {
+      final total = t.subtaskTotal ?? 0;
+      final done = t.subtaskDone ?? 0;
+      if (total > 0) {
+        n += done;
+      } else {
+        final kids = activeSubtasksOf(t.id);
+        if (kids.isEmpty && t.done) n++;
+      }
+    }
+    return n;
+  }
+
+  bool get isComplete => total == 0;
+  double get progress {
+    final remaining = total;
+    final completed = doneCount;
+    final all = remaining + completed;
+    if (all == 0) return 1.0;
+    return completed / all;
+  }
 
   factory ConversationTasks.fromJsonList(List<dynamic> list) =>
       ConversationTasks(
         items: list
             .map((e) => TaskItem.fromJson(e as Map<String, dynamic>))
             .toList(),
+      );
+}
+
+/// Line item spent from a payment wallet (beer, taxi, etc.).
+class PaymentExpense {
+  PaymentExpense({
+    required this.id,
+    required this.paymentId,
+    required this.label,
+    required this.amountCents,
+    this.createdAt,
+    this.sortOrder = 0,
+  });
+
+  final String id;
+  final String paymentId;
+  final String label;
+  final int amountCents;
+  final DateTime? createdAt;
+  final int sortOrder;
+
+  double get amountDouble => amountCents / 100.0;
+
+  factory PaymentExpense.fromJson(Map<String, dynamic> json) => PaymentExpense(
+        id: json['id'] as String,
+        paymentId: json['paymentId'] as String,
+        label: (json['label'] as String?) ?? '',
+        amountCents: (json['amountCents'] as num?)?.toInt() ?? 0,
+        createdAt: parseServerUtc(json['createdAt']),
+        sortOrder: (json['sortOrder'] as num?)?.toInt() ?? 0,
+      );
+}
+
+/// Payment or generic reminder attached to a conversation (visible to creator only).
+class PaymentReminder {
+  PaymentReminder({
+    required this.id,
+    required this.conversationId,
+    required this.kind,
+    required this.currency,
+    required this.direction,
+    required this.dueDate,
+    required this.paid,
+    required this.createdAt,
+    this.amountCents,
+    this.note = '',
+    this.paidAt,
+    this.paidBy,
+    this.snoozedUntil,
+    this.createdBy,
+    this.updatedAt,
+    this.pinned = false,
+    this.expenses = const [],
+  });
+
+  final String id;
+  final String conversationId;
+
+  /// 'payment' or 'reminder' (plain text reminder without amount).
+  final String kind;
+  final int? amountCents;
+  final String currency;
+
+  /// 'owe' = I owe them, 'owed' = they owe me (only relevant for payment kind).
+  final String direction;
+  final String note;
+  final String dueDate; // ISO date yyyy-MM-dd
+  final bool paid;
+  final DateTime? paidAt;
+  final PrivetUser? paidBy;
+  final DateTime? snoozedUntil;
+  final PrivetUser? createdBy;
+  final DateTime createdAt;
+  final DateTime? updatedAt;
+  final bool pinned;
+  final List<PaymentExpense> expenses;
+
+  bool get isPayment => kind == 'payment';
+
+  double? get amountDouble => amountCents != null ? amountCents! / 100.0 : null;
+
+  int get spentCents => expenses.fold<int>(0, (sum, e) => sum + e.amountCents);
+
+  int? get remainingCents =>
+      amountCents == null ? null : amountCents! - spentCents;
+
+  String get currencySymbol {
+    const symbols = {'USD': '\$', 'EUR': '€', 'GBP': '£', 'RUB': '₽', 'UAH': '₴'};
+    return symbols[currency] ?? currency;
+  }
+
+  String formatMoney(int cents) {
+    final a = cents / 100.0;
+    final sym = currencySymbol;
+    return a % 1 == 0 ? '$sym${a.toInt()}' : '$sym${a.toStringAsFixed(2)}';
+  }
+
+  String get formattedAmount {
+    final a = amountDouble;
+    if (a == null) return currencySymbol;
+    return a % 1 == 0 ? '$currencySymbol${a.toInt()}' : '$currencySymbol${a.toStringAsFixed(2)}';
+  }
+
+  bool get isOverdue {
+    if (paid) return false;
+    final due = DateTime.tryParse(dueDate);
+    if (due == null) return false;
+    return DateTime.now().isAfter(due.add(const Duration(days: 1)));
+  }
+
+  factory PaymentReminder.fromJson(Map<String, dynamic> json) => PaymentReminder(
+        id: json['id'] as String,
+        conversationId: json['conversationId'] as String,
+        kind: (json['kind'] as String?) ?? 'payment',
+        amountCents: json['amountCents'] != null ? (json['amountCents'] as num).toInt() : null,
+        currency: (json['currency'] as String?) ?? 'USD',
+        direction: (json['direction'] as String?) ?? 'owe',
+        note: (json['note'] as String?) ?? '',
+        dueDate: json['dueDate'] as String,
+        paid: json['paid'] == true,
+        paidAt: parseServerUtc(json['paidAt']),
+        paidBy: json['paidBy'] is Map<String, dynamic>
+            ? PrivetUser.fromJson(json['paidBy'] as Map<String, dynamic>)
+            : null,
+        snoozedUntil: parseServerUtc(json['snoozedUntil']),
+        createdBy: json['createdBy'] is Map<String, dynamic>
+            ? PrivetUser.fromJson(json['createdBy'] as Map<String, dynamic>)
+            : null,
+        createdAt: parseServerUtc(json['createdAt']) ?? DateTime.now(),
+        updatedAt: parseServerUtc(json['updatedAt']),
+        pinned: json['pinned'] == true,
+        expenses: (json['expenses'] as List?)
+                ?.whereType<Map>()
+                .map((e) => PaymentExpense.fromJson(Map<String, dynamic>.from(e)))
+                .toList() ??
+            const [],
+      );
+
+  PaymentReminder copyWith({
+    int? amountCents,
+    String? currency,
+    String? direction,
+    String? note,
+    String? dueDate,
+    bool? paid,
+    DateTime? paidAt,
+    DateTime? snoozedUntil,
+    List<PaymentExpense>? expenses,
+  }) =>
+      PaymentReminder(
+        id: id,
+        conversationId: conversationId,
+        kind: kind,
+        amountCents: amountCents ?? this.amountCents,
+        currency: currency ?? this.currency,
+        direction: direction ?? this.direction,
+        note: note ?? this.note,
+        dueDate: dueDate ?? this.dueDate,
+        paid: paid ?? this.paid,
+        paidAt: paidAt ?? this.paidAt,
+        paidBy: paidBy,
+        snoozedUntil: snoozedUntil ?? this.snoozedUntil,
+        createdBy: createdBy,
+        createdAt: createdAt,
+        updatedAt: updatedAt,
+        pinned: pinned,
+        expenses: expenses ?? this.expenses,
       );
 }
 

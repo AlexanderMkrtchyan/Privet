@@ -123,3 +123,7 @@ void Function() onDocumentVisible(void Function() callback) {
     html.window.removeEventListener('focus', handler);
   };
 }
+
+Future<void> refreshDesktopFocusState() async {}
+
+void dismissDesktopNotification(String tag) {}

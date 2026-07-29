@@ -148,11 +148,47 @@ export function migrate() {
       mime_type TEXT,
       file_name TEXT,
       created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      assigned_to TEXT REFERENCES users(id) ON DELETE SET NULL,
+      done_confirmed INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_task_items_conversation
       ON task_items(conversation_id, sort_order);
+
+    CREATE TABLE IF NOT EXISTS payment_reminders (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL DEFAULT 'payment',
+      amount_cents INTEGER,
+      currency TEXT NOT NULL DEFAULT 'USD',
+      direction TEXT NOT NULL DEFAULT 'owe',
+      note TEXT NOT NULL DEFAULT '',
+      due_date TEXT NOT NULL,
+      paid INTEGER NOT NULL DEFAULT 0,
+      paid_at TEXT,
+      paid_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      snoozed_until TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_payment_reminders_conversation
+      ON payment_reminders(conversation_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_reminders_due
+      ON payment_reminders(due_date, paid);
+
+    CREATE TABLE IF NOT EXISTS payment_expenses (
+      id TEXT PRIMARY KEY,
+      payment_id TEXT NOT NULL REFERENCES payment_reminders(id) ON DELETE CASCADE,
+      label TEXT NOT NULL DEFAULT '',
+      amount_cents INTEGER NOT NULL,
+      created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_payment_expenses_payment
+      ON payment_expenses(payment_id);
 
     CREATE TABLE IF NOT EXISTS user_blocks (
       blocker_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -172,6 +208,74 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_device_tokens_user
       ON device_tokens(user_id);
   `);
+
+  // Add columns introduced after initial schema (safe to run repeatedly).
+  const addColIfMissing = (table, col, def) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(r => r.name);
+    if (!cols.includes(col)) {
+      db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`).run();
+    }
+  };
+  addColIfMissing('task_items', 'assigned_to', 'TEXT REFERENCES users(id) ON DELETE SET NULL');
+  addColIfMissing('task_items', 'done_confirmed', 'INTEGER NOT NULL DEFAULT 0');
+  addColIfMissing('payment_reminders', 'kind', "TEXT NOT NULL DEFAULT 'payment'");
+  addColIfMissing('payment_reminders', 'paid_by', 'TEXT REFERENCES users(id) ON DELETE SET NULL');
+  addColIfMissing('payment_reminders', 'amount_cents', 'INTEGER');
+  addColIfMissing('task_items', 'pinned', 'INTEGER NOT NULL DEFAULT 0');
+  addColIfMissing('task_items', 'parent_id', 'TEXT REFERENCES task_items(id) ON DELETE CASCADE');
+  addColIfMissing('task_items', 'attachments', 'TEXT');
+  addColIfMissing('payment_reminders', 'pinned', 'INTEGER NOT NULL DEFAULT 0');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_task_items_parent
+      ON task_items(conversation_id, parent_id, sort_order);
+  `);
+
+  // Older DBs created amount_cents as NOT NULL — recreate table so reminders can omit amount.
+  const amountCol = db.prepare('PRAGMA table_info(payment_reminders)').all()
+    .find((c) => c.name === 'amount_cents');
+  if (amountCol && amountCol.notnull === 1) {
+    db.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN;
+      CREATE TABLE payment_reminders_v2 (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL DEFAULT 'payment',
+        amount_cents INTEGER,
+        currency TEXT NOT NULL DEFAULT 'USD',
+        direction TEXT NOT NULL DEFAULT 'owe',
+        note TEXT NOT NULL DEFAULT '',
+        due_date TEXT NOT NULL,
+        paid INTEGER NOT NULL DEFAULT 0,
+        paid_at TEXT,
+        paid_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+        snoozed_until TEXT,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO payment_reminders_v2 (
+        id, conversation_id, created_by, kind, amount_cents, currency, direction,
+        note, due_date, paid, paid_at, paid_by, snoozed_until, pinned, created_at, updated_at
+      )
+      SELECT
+        id, conversation_id, created_by,
+        COALESCE(kind, 'payment'),
+        amount_cents, currency, direction, note, due_date, paid, paid_at, paid_by,
+        snoozed_until, COALESCE(pinned, 0), created_at, updated_at
+      FROM payment_reminders;
+      DROP TABLE payment_reminders;
+      ALTER TABLE payment_reminders_v2 RENAME TO payment_reminders;
+      CREATE INDEX IF NOT EXISTS idx_payment_reminders_conversation
+        ON payment_reminders(conversation_id);
+      CREATE INDEX IF NOT EXISTS idx_payment_reminders_due
+        ON payment_reminders(due_date, paid);
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
+    console.log('[privet-db] migrated payment_reminders.amount_cents → nullable');
+  }
 
   // Backfill outbound notes from existing inbound forward copies.
   db.prepare(

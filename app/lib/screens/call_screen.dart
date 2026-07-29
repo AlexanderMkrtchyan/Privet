@@ -294,6 +294,7 @@ class _MiniCallBar extends StatelessWidget {
     // Any live video worth previewing — decoupled from call *mode* so a screen
     // share started during an audio call still lights up the tile.
     final hostingControl = session.isRemoteHost ||
+        session.isRemoteHostPending ||
         (session.isControlCall && sharing);
     final localCamLive = session.hasCamTrack &&
         session.camOn &&
@@ -1062,6 +1063,7 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
 
     // Hosting control: never stage our own capture — it nests in the stream.
     final hostingControl = session.isRemoteHost ||
+        session.isRemoteHostPending ||
         (session.isControlCall && sharing);
     final stageIsRemote = !hostingControl && remoteVideo;
     final stageIsLocalCam =
@@ -1110,7 +1112,8 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
 
     final immersive = session.isControlCall ||
         (session.remoteControlActive &&
-            (session.isRemoteController || session.isRemoteHost));
+            (session.isRemoteController || session.isRemoteHost)) ||
+        session.isRemoteHostPending;
 
     // ── Stage ──
     final Widget stage;

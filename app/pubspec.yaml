@@ -32,6 +32,7 @@ dependencies:
   window_manager: ^0.5.1
   tray_manager: ^0.5.1
   desktop_notifications: ^0.6.3
+  dbus: ^0.7.11
 
 dev_dependencies:
   flutter_test:

@@ -57,9 +57,21 @@ import {
   clearDoneTaskItems,
   createTaskItem,
   deleteTaskItem,
+  listDoneTaskItems,
   listTaskItems,
+  unpinAllTasks,
   updateTaskItem,
 } from '../db/tasks.js';
+import {
+  createExpense,
+  createReminder,
+  deleteExpense,
+  deleteReminder,
+  listReminders,
+  listReminderHistory,
+  updateExpense,
+  updateReminder,
+} from '../db/reminders.js';
 import {
   extractFirstUrl,
   fetchLinkPreview,
@@ -69,6 +81,14 @@ import { noteConversationMessage, shouldAcceptMarkRead } from '../readGate.js';
 import { pushToUser } from '../push/fcm.js';
 import { runPrivetAi } from '../ai/chat.js';
 import { serverAiStatus } from '../ai/llm.js';
+
+function broadcastReminders(conversationId) {
+  broadcastToUsers(memberIds(conversationId), {
+    type: 'reminders.updated',
+    conversationId,
+    items: listReminders(conversationId),
+  });
+}
 
 function broadcastTasks(conversationId) {
   broadcastToUsers(memberIds(conversationId), {
@@ -860,6 +880,17 @@ export async function registerRoutes(app) {
     return { items: listTaskItems(id) };
   });
 
+  app.get('/conversations/:id/tasks/history', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params;
+    if (!userInConversation(id, user.id)) return reply.code(403).send({ error: 'forbidden' });
+    const limit = request.query?.limit;
+    const before = request.query?.before ? String(request.query.before) : null;
+    const result = listDoneTaskItems(id, { limit, before });
+    return result;
+  });
+
   app.post('/conversations/:id/tasks', async (request, reply) => {
     const user = await requireUser(request, reply);
     if (!user) return;
@@ -872,18 +903,13 @@ export async function registerRoutes(app) {
         conversationId: id,
         createdBy: user.id,
         body: request.body?.body,
-        messageId: request.body?.messageId
-          ? String(request.body.messageId)
-          : null,
-        mediaUrl: request.body?.mediaUrl
-          ? String(request.body.mediaUrl)
-          : null,
-        mimeType: request.body?.mimeType
-          ? String(request.body.mimeType)
-          : null,
-        fileName: request.body?.fileName
-          ? String(request.body.fileName)
-          : null,
+        messageId: request.body?.messageId ? String(request.body.messageId) : null,
+        mediaUrl: request.body?.mediaUrl ? String(request.body.mediaUrl) : null,
+        mimeType: request.body?.mimeType ? String(request.body.mimeType) : null,
+        fileName: request.body?.fileName ? String(request.body.fileName) : null,
+        attachments: Array.isArray(request.body?.attachments) ? request.body.attachments : null,
+        assignedTo: request.body?.assignedTo ? String(request.body.assignedTo) : null,
+        parentId: request.body?.parentId ? String(request.body.parentId) : null,
       });
       broadcastTasks(id);
       return { item, items: listTaskItems(id) };
@@ -902,9 +928,17 @@ export async function registerRoutes(app) {
       const item = updateTaskItem(id, user.id, {
         body: request.body?.body,
         done: request.body?.done,
+        doneConfirmed: request.body?.doneConfirmed,
+        assignedTo: request.body?.assignedTo,
+        pinned: request.body?.pinned,
         mediaUrl: request.body?.mediaUrl,
         mimeType: request.body?.mimeType,
         fileName: request.body?.fileName,
+        attachments: Array.isArray(request.body?.attachments)
+          ? request.body.attachments
+          : request.body?.attachments === null
+            ? []
+            : undefined,
         clearMedia: request.body?.clearMedia === true,
       });
       broadcastTasks(item.conversationId);
@@ -944,6 +978,171 @@ export async function registerRoutes(app) {
     } catch (err) {
       const message = err.message || 'could not clear tasks';
       const code = message === 'forbidden' ? 403 : 400;
+      return reply.code(code).send({ error: message });
+    }
+  });
+
+  app.post('/conversations/:id/tasks/unpin-all', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params;
+    try {
+      const items = unpinAllTasks(id, user.id);
+      broadcastTasks(id);
+      return { items };
+    } catch (err) {
+      const message = err.message || 'could not unpin tasks';
+      const code = message === 'forbidden' ? 403 : 400;
+      return reply.code(code).send({ error: message });
+    }
+  });
+
+  // Payment reminders
+  app.get('/conversations/:id/reminders', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params;
+    if (!userInConversation(id, user.id)) return reply.code(403).send({ error: 'forbidden' });
+    return { items: listReminders(id) };
+  });
+
+  app.get('/conversations/:id/reminders/history', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params;
+    if (!userInConversation(id, user.id)) return reply.code(403).send({ error: 'forbidden' });
+    return { items: listReminderHistory(id) };
+  });
+
+  app.post('/conversations/:id/reminders', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params;
+    try {
+      const kind = request.body?.kind === 'reminder' ? 'reminder' : 'payment';
+      const rawCents = request.body?.amountCents;
+      const item = createReminder({
+        conversationId: id,
+        createdBy: user.id,
+        kind,
+        amountCents: kind === 'payment' && rawCents != null ? Number(rawCents) : null,
+        currency: request.body?.currency || 'USD',
+        direction: request.body?.direction || 'owe',
+        note: request.body?.note || '',
+        dueDate: String(request.body?.dueDate || ''),
+      });
+      broadcastReminders(id);
+      return { item, items: listReminders(id) };
+    } catch (err) {
+      const message = err.message || 'could not create reminder';
+      const code = message === 'forbidden' ? 403 : 400;
+      return reply.code(code).send({ error: message });
+    }
+  });
+
+  app.patch('/reminders/:id', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params;
+    try {
+      const item = updateReminder(id, user.id, {
+        amountCents: request.body?.amountCents !== undefined ? Number(request.body.amountCents) : undefined,
+        currency: request.body?.currency,
+        direction: request.body?.direction,
+        note: request.body?.note,
+        dueDate: request.body?.dueDate,
+        paid: request.body?.paid,
+        paidBy: user.id,
+        snoozedUntil: request.body?.snoozedUntil,
+        pinned: request.body?.pinned,
+      });
+      broadcastReminders(item.conversationId);
+      return { item, items: listReminders(item.conversationId) };
+    } catch (err) {
+      const message = err.message || 'could not update reminder';
+      const code = message === 'forbidden' ? 403 : message === 'not found' ? 404 : 400;
+      return reply.code(code).send({ error: message });
+    }
+  });
+
+  app.delete('/reminders/:id', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params;
+    try {
+      const result = deleteReminder(id, user.id);
+      broadcastReminders(result.conversationId);
+      return { ok: true, items: listReminders(result.conversationId) };
+    } catch (err) {
+      const message = err.message || 'could not delete reminder';
+      const code = message === 'forbidden' ? 403 : message === 'not found' ? 404 : 400;
+      return reply.code(code).send({ error: message });
+    }
+  });
+
+  app.post('/reminders/:id/expenses', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params;
+    try {
+      const result = createExpense({
+        paymentId: id,
+        userId: user.id,
+        label: request.body?.label || '',
+        amountCents: request.body?.amountCents,
+      });
+      broadcastReminders(result.conversationId);
+      return {
+        expense: result.expense,
+        items: listReminders(result.conversationId),
+        history: listReminderHistory(result.conversationId),
+      };
+    } catch (err) {
+      const message = err.message || 'could not create expense';
+      const code = message === 'forbidden' ? 403 : message === 'not found' ? 404 : 400;
+      return reply.code(code).send({ error: message });
+    }
+  });
+
+  app.patch('/expenses/:id', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params;
+    try {
+      const result = updateExpense(id, user.id, {
+        label: request.body?.label,
+        amountCents: request.body?.amountCents !== undefined
+          ? Number(request.body.amountCents)
+          : undefined,
+      });
+      broadcastReminders(result.conversationId);
+      return {
+        expense: result.expense,
+        items: listReminders(result.conversationId),
+        history: listReminderHistory(result.conversationId),
+      };
+    } catch (err) {
+      const message = err.message || 'could not update expense';
+      const code = message === 'forbidden' ? 403 : message === 'not found' ? 404 : 400;
+      return reply.code(code).send({ error: message });
+    }
+  });
+
+  app.delete('/expenses/:id', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params;
+    try {
+      const result = deleteExpense(id, user.id);
+      broadcastReminders(result.conversationId);
+      return {
+        ok: true,
+        items: listReminders(result.conversationId),
+        history: listReminderHistory(result.conversationId),
+      };
+    } catch (err) {
+      const message = err.message || 'could not delete expense';
+      const code = message === 'forbidden' ? 403 : message === 'not found' ? 404 : 400;
       return reply.code(code).send({ error: message });
     }
   });

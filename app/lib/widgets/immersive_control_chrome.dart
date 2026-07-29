@@ -36,16 +36,35 @@ class _ImmersiveControlChromeState extends State<ImmersiveControlChrome> {
 
   CallSession get session => widget.session;
 
+  bool get _hostSide =>
+      session.isRemoteHost || session.isRemoteHostPending;
+
   @override
   void initState() {
     super.initState();
+    session.addListener(_onSession);
+    if (_hostSide) {
+      _pinned = true;
+      _visible = true;
+    }
     _scheduleHide();
   }
 
   @override
   void dispose() {
+    session.removeListener(_onSession);
     _hideTimer?.cancel();
     super.dispose();
+  }
+
+  void _onSession() {
+    if (!mounted) return;
+    if (_hostSide && !_pinned) {
+      setState(() {
+        _pinned = true;
+        _visible = true;
+      });
+    }
   }
 
   void _setVisible(bool v) {
@@ -56,7 +75,7 @@ class _ImmersiveControlChromeState extends State<ImmersiveControlChrome> {
 
   void _scheduleHide() {
     _hideTimer?.cancel();
-    if (_pinned || _hoverTop) return;
+    if (_pinned || _hoverTop || _hostSide) return;
     _hideTimer = Timer(const Duration(seconds: 2), () {
       if (!mounted || _pinned || _hoverTop) return;
       _setVisible(false);
@@ -81,6 +100,8 @@ class _ImmersiveControlChromeState extends State<ImmersiveControlChrome> {
     final activeId = session.remoteControl?.activeDisplayId;
     final controlling = session.isRemoteController;
     final hosting = session.isRemoteHost;
+    final pendingHost = session.isRemoteHostPending;
+    final hostSide = hosting || pendingHost;
 
     return Stack(
       fit: StackFit.expand,
@@ -133,14 +154,16 @@ class _ImmersiveControlChromeState extends State<ImmersiveControlChrome> {
                     Icon(
                       Icons.mouse_rounded,
                       size: 18,
-                      color: hosting ? const Color(0xFFFFA726) : PrivetTheme.signal,
+                      color: hostSide ? const Color(0xFFFFA726) : PrivetTheme.signal,
                     ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         hosting
                             ? '$peer controlling • ${widget.elapsed}'
-                            : 'Controlling $peer • ${widget.elapsed}',
+                            : pendingHost
+                                ? '$peer wants control • ${widget.elapsed}'
+                                : 'Controlling $peer • ${widget.elapsed}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: GoogleFonts.dmSans(
@@ -226,11 +249,11 @@ class _ImmersiveControlChromeState extends State<ImmersiveControlChrome> {
                         size: 18,
                       ),
                     ),
-                    if (controlling || hosting)
+                    if (controlling || hostSide)
                       TextButton(
                         onPressed: () => session.revokeRemoteControl(),
                         child: Text(
-                          hosting ? 'Stop' : 'Stop control',
+                          hostSide ? 'Stop' : 'Stop control',
                           style: GoogleFonts.dmSans(
                             color: const Color(0xFFFFA726),
                             fontWeight: FontWeight.w700,

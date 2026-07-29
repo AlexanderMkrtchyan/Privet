@@ -390,6 +390,26 @@ class ApiClient {
         .toList();
   }
 
+  Future<({List<TaskItem> items, bool hasMore})> taskHistory(
+    String conversationId, {
+    int limit = 20,
+    String? before,
+  }) async {
+    final q = <String>['limit=$limit'];
+    if (before != null && before.isNotEmpty) {
+      q.add('before=${Uri.encodeComponent(before)}');
+    }
+    final res = await http.get(
+      _u('/conversations/$conversationId/tasks/history?${q.join('&')}'),
+      headers: _authHeaders,
+    );
+    final data = _decode(res);
+    final items = (data['items'] as List)
+        .map((e) => TaskItem.fromJson(e as Map<String, dynamic>))
+        .toList();
+    return (items: items, hasMore: data['hasMore'] == true);
+  }
+
   Future<List<TaskItem>> createTask({
     required String conversationId,
     required String body,
@@ -397,6 +417,9 @@ class ApiClient {
     String? mediaUrl,
     String? mimeType,
     String? fileName,
+    List<Map<String, dynamic>>? attachments,
+    String? assignedTo,
+    String? parentId,
   }) async {
     final res = await http.post(
       _u('/conversations/$conversationId/tasks'),
@@ -407,6 +430,9 @@ class ApiClient {
         if (mediaUrl != null) 'mediaUrl': mediaUrl,
         if (mimeType != null) 'mimeType': mimeType,
         if (fileName != null) 'fileName': fileName,
+        if (attachments != null) 'attachments': attachments,
+        if (assignedTo != null) 'assignedTo': assignedTo,
+        if (parentId != null) 'parentId': parentId,
       }),
     );
     final data = _decode(res);
@@ -415,13 +441,53 @@ class ApiClient {
         .toList();
   }
 
+  /// Creates a task and returns both the new item and the full board list.
+  Future<({TaskItem item, List<TaskItem> items})> createTaskDetailed({
+    required String conversationId,
+    required String body,
+    String? messageId,
+    String? mediaUrl,
+    String? mimeType,
+    String? fileName,
+    List<Map<String, dynamic>>? attachments,
+    String? assignedTo,
+    String? parentId,
+  }) async {
+    final res = await http.post(
+      _u('/conversations/$conversationId/tasks'),
+      headers: _headers,
+      body: jsonEncode({
+        'body': body,
+        if (messageId != null) 'messageId': messageId,
+        if (mediaUrl != null) 'mediaUrl': mediaUrl,
+        if (mimeType != null) 'mimeType': mimeType,
+        if (fileName != null) 'fileName': fileName,
+        if (attachments != null) 'attachments': attachments,
+        if (assignedTo != null) 'assignedTo': assignedTo,
+        if (parentId != null) 'parentId': parentId,
+      }),
+    );
+    final data = _decode(res);
+    final items = (data['items'] as List)
+        .map((e) => TaskItem.fromJson(e as Map<String, dynamic>))
+        .toList();
+    final item = data['item'] is Map<String, dynamic>
+        ? TaskItem.fromJson(data['item'] as Map<String, dynamic>)
+        : items.last;
+    return (item: item, items: items);
+  }
+
   Future<List<TaskItem>> updateTask({
     required String taskId,
     String? body,
     bool? done,
+    bool? doneConfirmed,
+    String? assignedTo,
+    bool? pinned,
     String? mediaUrl,
     String? mimeType,
     String? fileName,
+    List<Map<String, dynamic>>? attachments,
     bool clearMedia = false,
   }) async {
     final res = await http.patch(
@@ -430,9 +496,13 @@ class ApiClient {
       body: jsonEncode({
         if (body != null) 'body': body,
         if (done != null) 'done': done,
+        if (doneConfirmed != null) 'doneConfirmed': doneConfirmed,
+        if (assignedTo != null) 'assignedTo': assignedTo,
+        if (pinned != null) 'pinned': pinned,
         if (mediaUrl != null) 'mediaUrl': mediaUrl,
         if (mimeType != null) 'mimeType': mimeType,
         if (fileName != null) 'fileName': fileName,
+        if (attachments != null) 'attachments': attachments,
         if (clearMedia) 'clearMedia': true,
       }),
     );
@@ -463,6 +533,175 @@ class ApiClient {
     return (data['items'] as List)
         .map((e) => TaskItem.fromJson(e as Map<String, dynamic>))
         .toList();
+  }
+
+  Future<List<TaskItem>> unpinAllTasks(String conversationId) async {
+    final res = await http.post(
+      _u('/conversations/$conversationId/tasks/unpin-all'),
+      headers: _headers,
+      body: '{}',
+    );
+    final data = _decode(res);
+    return (data['items'] as List)
+        .map((e) => TaskItem.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<List<PaymentReminder>> reminders(String conversationId) async {
+    final res = await http.get(
+      _u('/conversations/$conversationId/reminders'),
+      headers: _authHeaders,
+    );
+    final data = _decode(res);
+    return (data['items'] as List)
+        .map((e) => PaymentReminder.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<List<PaymentReminder>> reminderHistory(String conversationId) async {
+    final res = await http.get(
+      _u('/conversations/$conversationId/reminders/history'),
+      headers: _authHeaders,
+    );
+    final data = _decode(res);
+    return (data['items'] as List)
+        .map((e) => PaymentReminder.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<List<PaymentReminder>> createReminder({
+    required String conversationId,
+    required String kind,
+    int? amountCents,
+    required String currency,
+    required String direction,
+    required String dueDate,
+    String note = '',
+  }) async {
+    final res = await http.post(
+      _u('/conversations/$conversationId/reminders'),
+      headers: _headers,
+      body: jsonEncode({
+        'kind': kind,
+        if (amountCents != null) 'amountCents': amountCents,
+        'currency': currency,
+        'direction': direction,
+        'dueDate': dueDate,
+        'note': note,
+      }),
+    );
+    final data = _decode(res);
+    return (data['items'] as List)
+        .map((e) => PaymentReminder.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<List<PaymentReminder>> updateReminder({
+    required String reminderId,
+    int? amountCents,
+    String? currency,
+    String? direction,
+    String? dueDate,
+    String? note,
+    bool? paid,
+    String? snoozedUntil,
+    bool? pinned,
+  }) async {
+    final res = await http.patch(
+      _u('/reminders/$reminderId'),
+      headers: _headers,
+      body: jsonEncode({
+        if (amountCents != null) 'amountCents': amountCents,
+        if (currency != null) 'currency': currency,
+        if (direction != null) 'direction': direction,
+        if (dueDate != null) 'dueDate': dueDate,
+        if (note != null) 'note': note,
+        if (paid != null) 'paid': paid,
+        if (snoozedUntil != null) 'snoozedUntil': snoozedUntil,
+        if (pinned != null) 'pinned': pinned,
+      }),
+    );
+    final data = _decode(res);
+    return (data['items'] as List)
+        .map((e) => PaymentReminder.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<List<PaymentReminder>> deleteReminder(String reminderId) async {
+    final res = await http.delete(
+      _u('/reminders/$reminderId'),
+      headers: _authHeaders,
+    );
+    final data = _decode(res);
+    return (data['items'] as List)
+        .map((e) => PaymentReminder.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<({List<PaymentReminder> items, List<PaymentReminder> history})> createExpense({
+    required String paymentId,
+    required String label,
+    required int amountCents,
+  }) async {
+    final res = await http.post(
+      _u('/reminders/$paymentId/expenses'),
+      headers: _headers,
+      body: jsonEncode({
+        'label': label,
+        'amountCents': amountCents,
+      }),
+    );
+    final data = _decode(res);
+    return (
+      items: (data['items'] as List)
+          .map((e) => PaymentReminder.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      history: (data['history'] as List? ?? const [])
+          .map((e) => PaymentReminder.fromJson(e as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+
+  Future<({List<PaymentReminder> items, List<PaymentReminder> history})> updateExpense({
+    required String expenseId,
+    String? label,
+    int? amountCents,
+  }) async {
+    final res = await http.patch(
+      _u('/expenses/$expenseId'),
+      headers: _headers,
+      body: jsonEncode({
+        if (label != null) 'label': label,
+        if (amountCents != null) 'amountCents': amountCents,
+      }),
+    );
+    final data = _decode(res);
+    return (
+      items: (data['items'] as List)
+          .map((e) => PaymentReminder.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      history: (data['history'] as List? ?? const [])
+          .map((e) => PaymentReminder.fromJson(e as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+
+  Future<({List<PaymentReminder> items, List<PaymentReminder> history})> deleteExpense(
+    String expenseId,
+  ) async {
+    final res = await http.delete(
+      _u('/expenses/$expenseId'),
+      headers: _authHeaders,
+    );
+    final data = _decode(res);
+    return (
+      items: (data['items'] as List)
+          .map((e) => PaymentReminder.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      history: (data['history'] as List? ?? const [])
+          .map((e) => PaymentReminder.fromJson(e as Map<String, dynamic>))
+          .toList(),
+    );
   }
 
   Future<Conversation> openDm(String userId) async {

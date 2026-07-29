@@ -53,6 +53,7 @@ class RemoteControlChannel {
   Timer? _clipboardPoll;
   RemoteInputCapability _capability = RemoteInputCapability.unsupported;
   bool _incomingRequest = false;
+  bool _consentDialogOpen = false;
   String? _error;
   double? _pendingMoveX;
   double? _pendingMoveY;
@@ -71,7 +72,12 @@ class RemoteControlChannel {
 
   RemoteInputCapability get capability => _capability;
   bool get incomingRequest => _incomingRequest;
+  bool get consentDialogOpen => _consentDialogOpen;
   String? get error => _error;
+
+  void setConsentDialogOpen(bool open) {
+    _consentDialogOpen = open;
+  }
 
   bool get canRequestControl =>
       state.auth == RemoteControlAuth.idle ||
@@ -138,9 +144,12 @@ class RemoteControlChannel {
       notify();
       return;
     }
-    if (!canRequestControl && state.auth != RemoteControlAuth.requested) {
+    if (state.isGranted ||
+        (state.auth == RemoteControlAuth.requested &&
+            state.role == RemoteControlRole.controller)) {
       return;
     }
+    if (!canRequestControl) return;
     state.markRequested(asController: true);
     rt.requestControl(callId: callId, toUserId: peerId);
     notify();
@@ -149,6 +158,7 @@ class RemoteControlChannel {
   Future<void> rejectRequest(String message) async {
     _error = message;
     _incomingRequest = false;
+    _consentDialogOpen = false;
     if (state.auth == RemoteControlAuth.requested) {
       state.markDenied();
     }
@@ -199,6 +209,7 @@ class RemoteControlChannel {
 
   void denyControl({String reason = 'Remote control was denied.'}) {
     _incomingRequest = false;
+    _consentDialogOpen = false;
     state.markDenied();
     rt.denyControl(callId: callId, toUserId: peerId, reason: reason);
     notify();
@@ -208,7 +219,11 @@ class RemoteControlChannel {
     final wasGranted = state.isGranted;
     final wasHost = state.role == RemoteControlRole.host;
     final wasController = state.role == RemoteControlRole.controller;
+    final wasPendingHost = !wasGranted &&
+        wasHost &&
+        (state.auth == RemoteControlAuth.requested || _incomingRequest);
     _incomingRequest = false;
+    _consentDialogOpen = false;
     _stopTimers();
     if (wasHost) {
       try {
@@ -224,8 +239,16 @@ class RemoteControlChannel {
     peerDisplays = const [];
     activeDisplayId = null;
     lastClipboardFromPeer = null;
-    if (notifyPeer && wasGranted) {
-      rt.revokeControl(callId: callId, toUserId: peerId);
+    if (notifyPeer) {
+      if (wasGranted) {
+        rt.revokeControl(callId: callId, toUserId: peerId);
+      } else if (wasPendingHost) {
+        rt.denyControl(
+          callId: callId,
+          toUserId: peerId,
+          reason: 'Remote control was ended.',
+        );
+      }
     }
     notify();
   }
@@ -233,6 +256,13 @@ class RemoteControlChannel {
   void onPeerRequest() {
     // Only the screen-sharing host should see the consent dialog.
     if (!isSharingLocally()) return;
+    // Ignore duplicate requests while waiting, showing consent, or granted.
+    if (state.isGranted) return;
+    if (_incomingRequest || _consentDialogOpen) return;
+    if (state.auth == RemoteControlAuth.requested &&
+        state.role == RemoteControlRole.host) {
+      return;
+    }
     _incomingRequest = true;
     state.markRequested(asController: false);
     notify();

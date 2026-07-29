@@ -113,124 +113,131 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
   Future<void> _maybePrompt() async {
     if (!mounted || _dialogShown) return;
     if (!session.remoteControlIncomingRequest) return;
-    // Dedicated control invite already had Allow at ring time — grant silently.
-    if (session.isControlCall) {
-      _dialogShown = true;
-      await session.grantRemoteControl();
-      _dialogShown = false;
-      return;
-    }
 
-    final state = widget.state;
-    if (state != null && state.shouldAutoAllowControl(session.peer.id)) {
-      _dialogShown = true;
-      await session.grantRemoteControl();
-      _dialogShown = false;
-      return;
-    }
+    final rc = session.remoteControl;
+    if (rc?.consentDialogOpen == true) return;
 
+    // Claim immediately so concurrent session notifications cannot open
+    // multiple consent dialogs.
     _dialogShown = true;
-    final peer = session.peer.displayName;
-    await session.remoteControl?.refreshCapability();
-    if (!mounted) {
-      _dialogShown = false;
-      return;
-    }
-    final cap = session.remoteInputCapability;
-    final canInject = cap?.canInject == true;
-    var alwaysAllow = false;
-    final accepted = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setLocal) => AlertDialog(
-            backgroundColor: PrivetTheme.panel,
-            title: Text(
-              canInject
-                  ? 'Allow remote control?'
-                  : 'Cannot grant remote control',
-              style: GoogleFonts.syne(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
+    rc?.setConsentDialogOpen(true);
+
+    try {
+      // Dedicated control invite already had Allow at ring time — grant silently.
+      if (session.isControlCall) {
+        await session.grantRemoteControl();
+        return;
+      }
+
+      final state = widget.state;
+      if (state != null && state.shouldAutoAllowControl(session.peer.id)) {
+        await session.grantRemoteControl();
+        return;
+      }
+
+      final peer = session.peer.displayName;
+      await session.remoteControl?.refreshCapability();
+      if (!mounted) return;
+      final cap = session.remoteInputCapability;
+      final canInject = cap?.canInject == true;
+      var alwaysAllow = false;
+      final accepted = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) {
+          return StatefulBuilder(
+            builder: (ctx, setLocal) => AlertDialog(
+              backgroundColor: PrivetTheme.panel,
+              title: Text(
+                canInject
+                    ? 'Allow remote control?'
+                    : 'Cannot grant remote control',
+                style: GoogleFonts.syne(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
-            ),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  canInject
-                      ? '$peer is asking to control your shared screen — mouse and keyboard. '
-                          'You can revoke access at any time.'
-                      : remoteControlHostCannotInjectMessage(
-                          platform: cap?.platform ?? '',
-                          detail: cap?.detail ?? '',
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    canInject
+                        ? '$peer is asking to control your shared screen — mouse and keyboard. '
+                            'You can revoke access at any time.'
+                        : remoteControlHostCannotInjectMessage(
+                            platform: cap?.platform ?? '',
+                            detail: cap?.detail ?? '',
+                          ),
+                    style: GoogleFonts.dmSans(
+                      color: PrivetTheme.mist,
+                      height: 1.35,
+                    ),
+                  ),
+                  if (canInject) ...[
+                    const SizedBox(height: 14),
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: alwaysAllow,
+                      onChanged: (v) => setLocal(() => alwaysAllow = v == true),
+                      title: Text(
+                        'Always allow from $peer while Privet is open',
+                        style: GoogleFonts.dmSans(
+                          color: PrivetTheme.paper,
+                          fontSize: 13,
                         ),
-                  style: GoogleFonts.dmSans(
-                    color: PrivetTheme.mist,
-                    height: 1.35,
+                      ),
+                      controlAffinity: ListTileControlAffinity.leading,
+                      activeColor: PrivetTheme.signal,
+                    ),
+                  ],
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: Text(
+                    canInject ? 'Deny' : 'OK',
+                    style: GoogleFonts.dmSans(color: PrivetTheme.mist),
                   ),
                 ),
-                if (canInject) ...[
-                  const SizedBox(height: 14),
-                  CheckboxListTile(
-                    contentPadding: EdgeInsets.zero,
-                    value: alwaysAllow,
-                    onChanged: (v) => setLocal(() => alwaysAllow = v == true),
-                    title: Text(
-                      'Always allow from $peer while Privet is open',
-                      style: GoogleFonts.dmSans(
-                        color: PrivetTheme.paper,
-                        fontSize: 13,
-                      ),
+                if (canInject)
+                  FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: PrivetTheme.signal,
                     ),
-                    controlAffinity: ListTileControlAffinity.leading,
-                    activeColor: PrivetTheme.signal,
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: Text(
+                      'Allow',
+                      style: GoogleFonts.dmSans(fontWeight: FontWeight.w600),
+                    ),
                   ),
-                ],
               ],
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: Text(
-                  canInject ? 'Deny' : 'OK',
-                  style: GoogleFonts.dmSans(color: PrivetTheme.mist),
-                ),
-              ),
-              if (canInject)
-                FilledButton(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: PrivetTheme.signal,
-                  ),
-                  onPressed: () => Navigator.pop(ctx, true),
-                  child: Text(
-                    'Allow',
-                    style: GoogleFonts.dmSans(fontWeight: FontWeight.w600),
-                  ),
-                ),
-            ],
+          );
+        },
+      );
+      if (!mounted) return;
+      if (accepted == true) {
+        if (alwaysAllow) {
+          widget.state?.rememberAutoAllowControl(session.peer.id);
+        }
+        await session.grantRemoteControl();
+      } else if (canInject) {
+        session.denyRemoteControl();
+      } else {
+        session.denyRemoteControl(
+          reason: remoteControlHostCannotInjectMessage(
+            platform: cap?.platform ?? '',
+            detail: cap?.detail ?? '',
           ),
         );
-      },
-    );
-    _dialogShown = false;
-    if (!mounted) return;
-    if (accepted == true) {
-      if (alwaysAllow) {
-        widget.state?.rememberAutoAllowControl(session.peer.id);
       }
-      await session.grantRemoteControl();
-    } else if (canInject) {
-      session.denyRemoteControl();
-    } else {
-      session.denyRemoteControl(
-        reason: remoteControlHostCannotInjectMessage(
-          platform: cap?.platform ?? '',
-          detail: cap?.detail ?? '',
-        ),
-      );
+    } finally {
+      session.remoteControl?.setConsentDialogOpen(false);
+      if (mounted) {
+        _dialogShown = false;
+      }
     }
   }
 

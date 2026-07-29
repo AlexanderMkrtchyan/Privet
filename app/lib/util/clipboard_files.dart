@@ -18,6 +18,9 @@ class PickedBytes {
 
 Future<PickedBytes?> pickFileNative() => impl.pickFileNative();
 
+Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) =>
+    impl.pickMultipleFilesNative(maxFiles: maxFiles);
+
 int bindImagePaste(void Function(PickedBytes file) onImage) =>
     impl.bindImagePaste(onImage);
 

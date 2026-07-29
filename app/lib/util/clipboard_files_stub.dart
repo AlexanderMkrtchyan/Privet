@@ -4,6 +4,9 @@ import 'clipboard_files.dart';
 
 Future<PickedBytes?> pickFileNative() async => null;
 
+Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) async =>
+    const [];
+
 int bindImagePaste(void Function(PickedBytes file) onImage) => 0;
 
 void unbindImagePaste([int? id]) {}

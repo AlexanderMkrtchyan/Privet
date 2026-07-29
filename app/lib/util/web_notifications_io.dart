@@ -23,6 +23,7 @@ NotificationsClient? _notifyClient;
 bool _notificationsReady = false;
 bool _notificationsFailed = false;
 final Map<String, int> _replaceIdsByTag = {};
+final Map<String, Notification> _activeNotificationsByTag = {};
 
 bool get _isDesktop =>
     !kIsWeb &&
@@ -109,6 +110,7 @@ Future<void> _showLinuxNotification({
     );
     if (tag != null && tag.isNotEmpty) {
       _replaceIdsByTag[tag] = notification.id;
+      _activeNotificationsByTag[tag] = notification;
     }
 
     unawaited(() async {
@@ -164,14 +166,38 @@ void Function() onDocumentVisible(void Function() callback) {
 /// Install window focus hooks early (safe to call multiple times).
 void ensureDesktopFocusHooks() => _ensureFocusHooks();
 
+/// Re-read focus/visibility from the window manager (GTK events can lie).
+Future<void> refreshDesktopFocusState() async {
+  if (!_isDesktop) return;
+  _ensureFocusHooks();
+  try {
+    final visible = await windowManager.isVisible();
+    final focused = await windowManager.isFocused();
+    _windowHidden = !visible;
+    _windowFocused = focused && visible;
+  } catch (_) {}
+}
+
+/// Close a chat's OS notification so the dock badge cannot drift from tray.
+void dismissDesktopNotification(String tag) {
+  if (!_linuxNotifySupported || tag.isEmpty) return;
+  final notification = _activeNotificationsByTag.remove(tag);
+  _replaceIdsByTag.remove(tag);
+  if (notification != null) {
+    unawaited(notification.close().catchError((_) {}));
+  }
+}
+
 /// Called when we hide to tray / show from tray so focus state cannot stick.
 void setDesktopWindowVisible(bool visible) {
   if (!_isDesktop) return;
   _ensureFocusHooks();
   if (visible) {
     _windowHidden = false;
-    _windowFocused = true;
-    _fireVisible();
+    unawaited(() async {
+      await refreshDesktopFocusState();
+      _fireVisible();
+    }());
   } else {
     _windowHidden = true;
     _windowFocused = false;
@@ -211,6 +237,13 @@ class _DesktopFocusListener with WindowListener {
   _DesktopFocusListener._();
   static final instance = _DesktopFocusListener._();
 
+  void _onWindowShown() {
+    unawaited(() async {
+      await refreshDesktopFocusState();
+      _fireVisible();
+    }());
+  }
+
   @override
   void onWindowFocus() {
     _windowHidden = false;
@@ -231,9 +264,7 @@ class _DesktopFocusListener with WindowListener {
 
   @override
   void onWindowRestore() {
-    _windowHidden = false;
-    _windowFocused = true;
-    _fireVisible();
+    _onWindowShown();
   }
 
   @override
@@ -244,9 +275,7 @@ class _DesktopFocusListener with WindowListener {
         _windowFocused = false;
         _windowHidden = true;
       case 'show':
-        _windowHidden = false;
-        _windowFocused = true;
-        _fireVisible();
+        _onWindowShown();
       case 'blur':
         _windowFocused = false;
       case 'focus':
@@ -257,9 +286,7 @@ class _DesktopFocusListener with WindowListener {
         _windowFocused = false;
         _windowHidden = true;
       case 'restore':
-        _windowHidden = false;
-        _windowFocused = true;
-        _fireVisible();
+        _onWindowShown();
     }
   }
 }

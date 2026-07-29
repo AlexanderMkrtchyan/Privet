@@ -8,6 +8,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEnvFile } from './env.js';
 import { migrate, uploadsDir } from './db.js';
+import { getDueReminders, updateReminder } from './db/reminders.js';
+import { memberIds } from './db/chat.js';
+import { broadcastToUsers } from './ws/hub.js';
 
 loadEnvFile();
 import { registerRoutes } from './routes/api.js';
@@ -134,6 +137,35 @@ if (fs.existsSync(publicDir)) {
     return reply.code(404).send({ error: 'not found' });
   });
 }
+
+// Fire payment reminder notifications once per minute.
+function tickReminders() {
+  try {
+    const due = getDueReminders();
+    for (const r of due) {
+      const amount = (r.amountCents / 100).toFixed(2);
+      const symbol = r.currency === 'USD' ? '$' : r.currency;
+      const label = r.direction === 'owe'
+        ? `You owe ${symbol}${amount}`
+        : `${symbol}${amount} owed to you`;
+      broadcastToUsers([r.createdBy?.id].filter(Boolean), {
+        type: 'notify',
+        conversationId: r.conversationId,
+        title: '💸 Payment reminder',
+        body: `${label} — due ${r.dueDate}${r.note ? ': ' + r.note : ''}`,
+        tag: `reminder-${r.id}`,
+      });
+      // Snooze for 24 h so we don't spam on every tick.
+      const snoozeUntil = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      try {
+        updateReminder(r.id, r.createdBy?.id, { snoozedUntil: snoozeUntil });
+      } catch (_) { /* ignore */ }
+    }
+  } catch (err) {
+    console.error('[reminders] tick error', err);
+  }
+}
+setInterval(tickReminders, 60_000);
 
 try {
   await app.listen({ port, host });
