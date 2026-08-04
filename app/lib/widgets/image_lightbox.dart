@@ -72,9 +72,14 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   late final PageController _pageController;
   late final List<TransformationController> _transforms;
   late final List<List<ImageMark>> _marks;
-  late final List<GlobalKey> _captureKeys;
+  late final List<GlobalKey> _captureImageKeys;
+  late final List<GlobalKey> _captureAnnotKeys;
   late int _index;
   bool _zoomed = false;
+
+  /// Recorded snapshot of committed marks per page — rebuilt on commit/undo/
+  /// clear so draw ticks don't re-issue every stroke's path on web.
+  late final List<ui.Picture?> _markPictures;
 
   bool _annotateMode = false;
   ImageAnnotTool _tool = ImageAnnotTool.pencil;
@@ -126,6 +131,24 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     _cursorTick.value++;
   }
 
+  /// Re-record the committed-marks snapshot for [page]. Called only when the
+  /// marks list changes (commit/undo/clear), never during a stroke.
+  void _rebuildMarkPicture(int page) {
+    final old = _markPictures[page];
+    if (old != null) {
+      old.dispose();
+      _markPictures[page] = null;
+    }
+    final marks = _marks[page];
+    if (marks.isEmpty) return;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    for (final mark in marks) {
+      mark.paint(canvas);
+    }
+    _markPictures[page] = recorder.endRecording();
+  }
+
   void _syncHasCommittedMarks() {
     final next = _currentMarks.isNotEmpty;
     if (next != _hasCommittedMarks) {
@@ -143,7 +166,9 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
       (_) => TransformationController(),
     );
     _marks = List.generate(widget.urls.length, (_) => <ImageMark>[]);
-    _captureKeys = List.generate(widget.urls.length, (_) => GlobalKey());
+    _markPictures = List.generate(widget.urls.length, (_) => null);
+    _captureImageKeys = List.generate(widget.urls.length, (_) => GlobalKey());
+    _captureAnnotKeys = List.generate(widget.urls.length, (_) => GlobalKey());
   }
 
   @override
@@ -152,6 +177,9 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     _draftTick.dispose();
     _cursorTick.dispose();
     _pageController.dispose();
+    for (final p in _markPictures) {
+      p?.dispose();
+    }
     for (final t in _transforms) {
       t.dispose();
     }
@@ -271,6 +299,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     if (_currentMarks.isEmpty) return;
     _currentMarks.removeLast();
     _draft = null;
+    _rebuildMarkPicture(_index);
     _syncHasCommittedMarks();
     _bumpDraft();
     setState(() {});
@@ -281,12 +310,13 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     _currentMarks.clear();
     _draft = null;
     _hasCommittedMarks = false;
+    _rebuildMarkPicture(_index);
     _bumpDraft();
     setState(() {});
   }
 
   double get _strokeWidth {
-    final box = _captureKeys[_index].currentContext?.findRenderObject();
+    final box = _captureImageKeys[_index].currentContext?.findRenderObject();
     if (box is RenderBox && box.hasSize) {
       return annotationStrokeWidth(box.size);
     }
@@ -311,9 +341,13 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   void _onDrawUpdate(int page, Offset local) {
     if (_draft == null || page != _index) return;
     _cursorLocal = local;
-    _draft!.update(local);
-    _bumpDraft();
+    final changed = _draft!.update(local);
     _bumpCursor();
+    // Pencil only repaints the overlay when a new point was added; rect/arrow
+    // move their end point every update.
+    if (changed || _draft!.tool != ImageAnnotTool.pencil) {
+      _bumpDraft();
+    }
   }
 
   void _onDrawEnd(int page) {
@@ -323,6 +357,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     if (committed != null) {
       _marks[page].add(committed);
       _hasCommittedMarks = true;
+      _rebuildMarkPicture(page);
       setState(() {});
     }
     _bumpDraft();
@@ -359,25 +394,51 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
       data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
 
   Future<Uint8List?> _captureViaBoundary() async {
-    final boundary = _captureKeys[_index].currentContext?.findRenderObject()
-        as RenderRepaintBoundary?;
-    if (boundary == null || !boundary.hasSize || boundary.size.isEmpty) {
+    final imageBoundary = _captureImageKeys[_index].currentContext
+        ?.findRenderObject() as RenderRepaintBoundary?;
+    final annotBoundary = _captureAnnotKeys[_index].currentContext
+        ?.findRenderObject() as RenderRepaintBoundary?;
+    if (imageBoundary == null ||
+        annotBoundary == null ||
+        !imageBoundary.hasSize ||
+        !annotBoundary.hasSize ||
+        imageBoundary.size.isEmpty ||
+        annotBoundary.size.isEmpty) {
       return null;
     }
     final dpr = MediaQuery.devicePixelRatioOf(context).clamp(1.0, 2.5);
-    // Wait until the layer is painted; toImage throws if still dirty.
+    // Wait until the layers are painted; toImage throws if still dirty.
     for (var i = 0; i < 3; i++) {
       await WidgetsBinding.instance.endOfFrame;
       if (!mounted) return null;
-      if (!boundary.debugNeedsPaint) break;
+      if (!imageBoundary.debugNeedsPaint && !annotBoundary.debugNeedsPaint) {
+        break;
+      }
     }
-    final image = await boundary.toImage(pixelRatio: dpr);
+    final image = await imageBoundary.toImage(pixelRatio: dpr);
+    final annot = await annotBoundary.toImage(pixelRatio: dpr);
     try {
-      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-      if (byteData == null) return null;
-      return _pngBytes(byteData);
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      canvas.drawImage(
+        image,
+        Offset.zero,
+        Paint()..filterQuality = ui.FilterQuality.none,
+      );
+      canvas.drawImage(annot, Offset.zero, Paint());
+      final picture = recorder.endRecording();
+      final out = await picture.toImage(image.width, image.height);
+      picture.dispose();
+      try {
+        final byteData = await out.toByteData(format: ui.ImageByteFormat.png);
+        if (byteData == null) return null;
+        return _pngBytes(byteData);
+      } finally {
+        out.dispose();
+      }
     } finally {
       image.dispose();
+      annot.dispose();
     }
   }
 
@@ -400,7 +461,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   }
 
   Future<Uint8List?> _captureViaComposite() async {
-    final box = _captureKeys[_index].currentContext?.findRenderObject();
+    final box = _captureImageKeys[_index].currentContext?.findRenderObject();
     if (box is! RenderBox || !box.hasSize || box.size.isEmpty) return null;
 
     final displaySize = box.size;
@@ -453,6 +514,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
         if (committed != null) {
           _currentMarks.add(committed);
           _hasCommittedMarks = true;
+          _rebuildMarkPicture(_index);
         }
         _draft = null;
         _bumpDraft();
@@ -535,20 +597,22 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     return KeyEventResult.ignored;
   }
 
+  /// Crosshair layer. Drawn on a full-size, self-contained [RepaintBoundary]
+  /// instead of a `Positioned` widget: relocating a `Positioned` re-lays-out
+  /// the parent `Stack` and bubbles the paint invalidation up to the nearest
+  /// ancestor boundary (the whole dialog surface here). On single-context
+  /// CanvasKit (Chrome) that re-composited the app on every pointer move —
+  /// Firefox's multi-context rendering hid the same cost.
   Widget _toolCursor() {
     final pos = _cursorLocal;
     if (!_annotateMode || !_cursorOver || pos == null) {
       return const SizedBox.shrink();
     }
-    const size = 32.0;
-    return Positioned(
-      left: pos.dx - size / 2,
-      top: pos.dy - size / 2,
-      width: size,
-      height: size,
+    return RepaintBoundary(
       child: IgnorePointer(
         child: CustomPaint(
-          painter: _PlusCursorPainter(color: _ink),
+          painter: _CursorOverlayPainter(position: pos, color: _ink),
+          child: const SizedBox.expand(),
         ),
       ),
     );
@@ -575,41 +639,22 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
           child: Stack(
             fit: StackFit.passthrough,
             children: [
-              // Capture image + marks together. Paint ticks only rebuild the
-              // CustomPaint sibling so Image.network is not reconstructed.
+              // Image lives in its own repaint boundary so draw ticks (which
+              // only touch the annotation overlay) never re-rasterize it —
+              // on web that re-render of a large image was the freezing.
               RepaintBoundary(
-                key: _captureKeys[i],
-                child: Stack(
-                  fit: StackFit.passthrough,
-                  children: [
-                    Image.network(
-                      widget.urls[i],
-                      fit: BoxFit.contain,
-                      gaplessPlayback: true,
-                      errorBuilder: (_, error, stack) => Padding(
-                        padding: const EdgeInsets.all(32),
-                        child: Text(
-                          'Image unavailable',
-                          style: TextStyle(color: PrivetTheme.mist),
-                        ),
-                      ),
+                key: _captureImageKeys[i],
+                child: Image.network(
+                  widget.urls[i],
+                  fit: BoxFit.contain,
+                  gaplessPlayback: true,
+                  errorBuilder: (_, error, stack) => Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Text(
+                      'Image unavailable',
+                      style: TextStyle(color: PrivetTheme.mist),
                     ),
-                    Positioned.fill(
-                      child: ValueListenableBuilder<int>(
-                        valueListenable: _draftTick,
-                        builder: (context, _, child) {
-                          final draft = i == _index ? _draft : null;
-                          return CustomPaint(
-                            painter: ImageAnnotationPainter(
-                              marks: marks,
-                              draft: draft,
-                            ),
-                            child: const SizedBox.expand(),
-                          );
-                        },
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ),
               Positioned.fill(
@@ -622,7 +667,10 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                       setPrivetAnnotHover(true);
                       _cursorLocal = event.localPosition;
                       _cursorOver = true;
-                      _bumpCursor();
+                      // While drawing, onPanUpdate already tracks the pen —
+                      // skip the redundant hover tick (Chrome fires hover for
+                      // every pixel during a drag, doubling repaint rate).
+                      if (_draft == null) _bumpCursor();
                     },
                     onExit: (_) {
                       setPrivetAnnotHover(false);
@@ -644,7 +692,25 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                       child: Stack(
                         fit: StackFit.expand,
                         children: [
-                          const SizedBox.expand(),
+                          // Marks + in-progress stroke repaint in their own
+                          // small boundary — the image above stays cached.
+                          RepaintBoundary(
+                            key: _captureAnnotKeys[i],
+                            child: ValueListenableBuilder<int>(
+                              valueListenable: _draftTick,
+                              builder: (context, _, child) {
+                                final draft = i == _index ? _draft : null;
+                                return CustomPaint(
+                                  painter: ImageAnnotationPainter(
+                                    marks: marks,
+                                    draft: draft,
+                                    cachedPicture: _markPictures[i],
+                                  ),
+                                  child: const SizedBox.expand(),
+                                );
+                              },
+                            ),
+                          ),
                           if (i == _index)
                             ValueListenableBuilder<int>(
                               valueListenable: _cursorTick,
@@ -996,19 +1062,30 @@ class _ChromeIconButton extends StatelessWidget {
   }
 }
 
-/// Flameshot-style centered "+" crosshair (same for every draw tool).
-class _PlusCursorPainter extends CustomPainter {
-  _PlusCursorPainter({required this.color});
+/// Flameshot-style centered "+" crosshair (same for every draw tool). Drawn on
+/// a full-size overlay so pointer moves only repaint this small boundary — a
+/// `Positioned` cursor would relayout the parent `Stack` and bubble paint
+/// invalidations all the way up to the nearest ancestor RepaintBoundary.
+class _CursorOverlayPainter extends CustomPainter {
+  _CursorOverlayPainter({required this.position, required this.color});
 
+  final Offset position;
   final Color color;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final c = Offset(size.width / 2, size.height / 2);
-    final arm = size.shortestSide * 0.4;
+    const arm = 12.8; // 32px crosshair, same proportions as the old 32x32 box.
     void stroke(Paint paint) {
-      canvas.drawLine(Offset(c.dx - arm, c.dy), Offset(c.dx + arm, c.dy), paint);
-      canvas.drawLine(Offset(c.dx, c.dy - arm), Offset(c.dx, c.dy + arm), paint);
+      canvas.drawLine(
+        Offset(position.dx - arm, position.dy),
+        Offset(position.dx + arm, position.dy),
+        paint,
+      );
+      canvas.drawLine(
+        Offset(position.dx, position.dy - arm),
+        Offset(position.dx, position.dy + arm),
+        paint,
+      );
     }
 
     stroke(
@@ -1028,8 +1105,8 @@ class _PlusCursorPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _PlusCursorPainter oldDelegate) =>
-      oldDelegate.color != color;
+  bool shouldRepaint(covariant _CursorOverlayPainter oldDelegate) =>
+      oldDelegate.position != position || oldDelegate.color != color;
 }
 
 class _InkSwatchButton extends StatelessWidget {

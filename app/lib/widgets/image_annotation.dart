@@ -1,5 +1,5 @@
 import 'dart:math' as math;
-import 'dart:ui' show lerpDouble;
+import 'dart:ui' show lerpDouble, Picture;
 
 import 'package:flutter/material.dart';
 
@@ -21,9 +21,21 @@ class FreehandMark extends ImageMark {
     required this.points,
     required super.color,
     required super.strokeWidth,
-  });
+  }) : _path = _buildPath(points);
 
   final List<Offset> points;
+
+  /// Built once at commit — on web each `Path` op is a JS↔WASM interop call,
+  /// so re-building this path on every frame made long strokes stall.
+  final Path _path;
+
+  static Path _buildPath(List<Offset> pts) {
+    final path = Path()..moveTo(pts.first.dx, pts.first.dy);
+    for (var i = 1; i < pts.length; i++) {
+      path.lineTo(pts[i].dx, pts[i].dy);
+    }
+    return path;
+  }
 
   @override
   void paint(Canvas canvas) {
@@ -35,11 +47,7 @@ class FreehandMark extends ImageMark {
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;
-    final path = Path()..moveTo(points.first.dx, points.first.dy);
-    for (var i = 1; i < points.length; i++) {
-      path.lineTo(points[i].dx, points[i].dy);
-    }
-    canvas.drawPath(path, paint);
+    canvas.drawPath(_path, paint);
   }
 }
 
@@ -132,12 +140,20 @@ class ImageMarkDraft {
   final Color color;
   final double strokeWidth;
 
-  void update(Offset local) {
+  /// Incrementally grown pencil path — avoids rebuilding the whole path (and
+  /// its per-op interop cost on web) on every pointer move.
+  Path? _pencilPath;
+
+  /// Returns true when the pencil gained a new point (i.e. something changed).
+  bool update(Offset local) {
     end = local;
-    if (tool == ImageAnnotTool.pencil) {
-      final last = points.last;
-      if ((local - last).distance >= 1.5) points.add(local);
-    }
+    if (tool != ImageAnnotTool.pencil) return true;
+    final last = points.last;
+    if ((local - last).distance < 1.5) return false;
+    points.add(local);
+    (_pencilPath ??= Path()..moveTo(points.first.dx, points.first.dy))
+        .lineTo(local.dx, local.dy);
+    return true;
   }
 
   ImageMark? commit() {
@@ -169,26 +185,37 @@ class ImageMarkDraft {
   }
 
   void paint(Canvas canvas) {
-    final mark = switch (tool) {
-      ImageAnnotTool.pencil => FreehandMark(
-          points: points,
-          color: color,
-          strokeWidth: strokeWidth,
-        ),
-      ImageAnnotTool.rect => RectMark(
+    switch (tool) {
+      case ImageAnnotTool.pencil:
+        final path = _pencilPath;
+        if (path == null) return;
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = color
+            ..strokeWidth = strokeWidth
+            ..style = PaintingStyle.stroke
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..isAntiAlias = true,
+        );
+      case ImageAnnotTool.rect:
+        final mark = RectMark(
           a: start,
           b: end,
           color: color,
           strokeWidth: strokeWidth,
-        ),
-      ImageAnnotTool.arrow => ArrowMark(
+        );
+        mark.paint(canvas);
+      case ImageAnnotTool.arrow:
+        final mark = ArrowMark(
           a: start,
           b: end,
           color: color,
           strokeWidth: strokeWidth,
-        ),
-    };
-    mark.paint(canvas);
+        );
+        mark.paint(canvas);
+    }
   }
 }
 
@@ -196,15 +223,26 @@ class ImageAnnotationPainter extends CustomPainter {
   ImageAnnotationPainter({
     required this.marks,
     this.draft,
+    this.cachedPicture,
   });
 
   final List<ImageMark> marks;
   final ImageMarkDraft? draft;
 
+  /// Recorded snapshot of all committed marks, rebuilt only when marks change.
+  /// Drawing it each tick avoids re-building (and re-issuing) every stroke's
+  /// path per frame — the dominant web jank during drawing.
+  final Picture? cachedPicture;
+
   @override
   void paint(Canvas canvas, Size size) {
-    for (final mark in marks) {
-      mark.paint(canvas);
+    final cached = cachedPicture;
+    if (cached != null) {
+      canvas.drawPicture(cached);
+    } else {
+      for (final mark in marks) {
+        mark.paint(canvas);
+      }
     }
     draft?.paint(canvas);
   }

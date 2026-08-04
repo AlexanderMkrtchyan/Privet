@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
@@ -4665,15 +4666,26 @@ class _ConversationPaneState extends State<ConversationPane>
                   // Ctrl+scroll over the chat zooms the message font without
                   // scrolling the list. Topmost in the Stack so it registers
                   // with the pointer-signal resolver before the Scrollable.
+                  // Native desktop delivers Ctrl+wheel as a scroll signal; the
+                  // web engine converts it to a scale signal (and preventDefaults
+                  // the browser page zoom when a widget handles it).
                   Positioned.fill(
                     child: Listener(
                       behavior: HitTestBehavior.translucent,
                       onPointerSignal: (e) {
-                        if (e is! PointerScrollEvent) return;
                         if (!HardwareKeyboard.instance.isControlPressed) {
                           return;
                         }
-                        final dy = e.scrollDelta.dy;
+                        final double dy;
+                        if (e is PointerScrollEvent) {
+                          dy = e.scrollDelta.dy;
+                        } else if (e is PointerScaleEvent) {
+                          // Web: scale = exp(-deltaY / 200) → undo that map so
+                          // both platforms share the same step logic.
+                          dy = -200 * math.log(e.scale);
+                        } else {
+                          return;
+                        }
                         if (dy == 0) return;
                         final step = dy < 0 ? 0.5 : -0.5;
                         GestureBinding.instance.pointerSignalResolver.register(
