@@ -75,11 +75,19 @@ bool _westernTokenMatches(String slice, String token) {
 bool _westernLiveExpandOk(String text, int start, int cursor, String token) {
   // `:/` is handled on send — live expansion fights http(s):// typing.
   if (token == ':/' || token == ':-/') return false;
-
+  // Never expand inside a time like `11:34` / `11:3` while typing — the
+  // colon is glued to digits on both sides, not a deliberate emoticon.
+  if (start > 0 && _isDigitChar(text[start - 1])) return false;
   if (cursor < text.length && !_isEmoticonTailBoundary(text[cursor])) {
     return false;
   }
   return true;
+}
+
+bool _isDigitChar(String ch) {
+  if (ch.length != 1) return false;
+  final c = ch.codeUnitAt(0);
+  return c >= 48 && c <= 57;
 }
 
 bool _isEmoticonTailBoundary(String ch) {
@@ -126,12 +134,19 @@ String expandEmoticons(String input) {
     } else {
       out = out.replaceAllMapped(
         RegExp(RegExp.escape(token), caseSensitive: false),
-        (_) => emoji,
+        (m) => _westernSendMatchOk(out, m.start) ? emoji : m.group(0)!,
       );
     }
   }
 
   return out;
+}
+
+/// Skip western emoticons glued to a digit before the colon — `11:34` is a
+/// time, not `:3`. `:D` / `:)` / `:3` typed deliberately still expand.
+bool _westernSendMatchOk(String text, int matchStart) {
+  if (matchStart <= 0) return true;
+  return !_isDigitChar(text[matchStart - 1]);
 }
 
 /// Skype / Teams-style `(name)` codes. Sorted longest-first.

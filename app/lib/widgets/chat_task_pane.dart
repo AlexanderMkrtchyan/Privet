@@ -10,10 +10,15 @@ import '../theme.dart';
 import '../util/clipboard_files.dart';
 import '../util/perf.dart';
 import 'payment_spending_insights.dart';
+import 'privet_date_picker.dart';
 import 'web_attach_button.dart';
 
 /// Shared outer height for chat header chips (tasks, reminders, media, calls).
 const double kChatHeaderChipHeight = 43;
+
+/// Compact height for pinned reminder / task header chips — roughly half of
+/// the standard control buttons so up to three pins fit in the chat header.
+const double kChatHeaderChipCompactHeight = 24;
 
 /// Compact header control: pinned task name + 3/10 progress (or "Task done").
 class TaskHeaderChip extends StatelessWidget {
@@ -83,9 +88,9 @@ class TaskHeaderChip extends StatelessWidget {
             hoverColor: PrivetTheme.paper.withValues(alpha: 0.06),
             splashColor: PrivetTheme.paper.withValues(alpha: 0.08),
             child: Container(
-              height: kChatHeaderChipHeight,
-              constraints: const BoxConstraints(minWidth: 128, maxWidth: 280),
-              padding: const EdgeInsets.fromLTRB(12, 7, 8, 7),
+              height: kChatHeaderChipCompactHeight,
+              constraints: const BoxConstraints(minWidth: 72, maxWidth: 170),
+              padding: const EdgeInsets.fromLTRB(10, 3, 6, 3),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -97,17 +102,17 @@ class TaskHeaderChip extends StatelessWidget {
                         done
                             ? Icons.check_circle_rounded
                             : Icons.checklist_rtl_rounded,
-                        size: 16,
+                        size: 12,
                         color: fill,
                       ),
-                      const SizedBox(width: 6),
+                      const SizedBox(width: 4),
                       Flexible(
                         child: Text(
                           label,
                           overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.syne(
                             fontWeight: FontWeight.w700,
-                            fontSize: 13,
+                            fontSize: 11,
                             color:
                                 done ? PrivetTheme.signal : PrivetTheme.paper,
                           ),
@@ -119,10 +124,10 @@ class TaskHeaderChip extends StatelessWidget {
                           child: GestureDetector(
                             onTap: onUnpin,
                             child: Padding(
-                              padding: const EdgeInsets.only(left: 4),
+                              padding: const EdgeInsets.only(left: 3),
                               child: Icon(
                                 Icons.push_pin_rounded,
-                                size: 14,
+                                size: 11,
                                 color: fill,
                               ),
                             ),
@@ -130,7 +135,7 @@ class TaskHeaderChip extends StatelessWidget {
                         ),
                     ],
                   ),
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 2),
                   IgnorePointer(
                     child: ExcludeSemantics(
                       child: ClipRRect(
@@ -142,7 +147,7 @@ class TaskHeaderChip extends StatelessWidget {
                           builder: (context, value, _) {
                             return LinearProgressIndicator(
                               value: value.clamp(0.0, 1.0),
-                              minHeight: 5,
+                              minHeight: 3,
                               backgroundColor: track,
                               color: fill,
                             );
@@ -809,13 +814,13 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
 
               // ── REMINDERS TAB ──────────────────────────────────────────────
               _ReminderKindTab(
-                emptyIcon: Icons.notifications_none_rounded,
+                emptyIcon: Icons.notifications_active_outlined,
                 emptyColor: const Color(0xFF9B7EDE),
                 emptyTitle: 'No reminders yet',
                 emptySubtitle: 'Set a date reminder for this chat.\nPin one to show it in the chat header.',
                 active: activePlainReminders,
                 history: reminderHistory,
-                addLabel: '🔔 Add reminder',
+                addLabel: 'Add reminder',
                 onAdd: () => showReminderDialog(
                   context,
                   state: widget.state,
@@ -926,6 +931,7 @@ class _PaymentWalletTab extends StatelessWidget {
               cursor: SystemMouseCursors.click,
               child: _AddReminderBtn(
                 label: 'Add payment',
+                icon: Icons.account_balance_wallet_rounded,
                 onTap: () => showReminderDialog(
                   context,
                   state: state,
@@ -1551,7 +1557,11 @@ class _ReminderKindTab extends StatelessWidget {
             alignment: Alignment.centerLeft,
             child: MouseRegion(
               cursor: SystemMouseCursors.click,
-              child: _AddReminderBtn(label: addLabel, onTap: onAdd),
+              child: _AddReminderBtn(
+                label: addLabel,
+                icon: Icons.notifications_active_outlined,
+                onTap: onAdd,
+              ),
             ),
           ),
         ),
@@ -2028,6 +2038,7 @@ class _TaskRowState extends State<_TaskRow> {
                           item: sub,
                           mediaBase: widget.mediaBase,
                           editable: !isHistory,
+                          onPreview: _openPreview,
                           onToggle: widget.onToggleSubtask == null
                               ? null
                               : () => widget.onToggleSubtask!(sub),
@@ -2155,6 +2166,7 @@ class _SubtaskRow extends StatefulWidget {
     required this.onDelete,
     required this.onAttach,
     required this.onRemoveAttachment,
+    this.onPreview,
   });
 
   final TaskItem item;
@@ -2165,6 +2177,7 @@ class _SubtaskRow extends StatefulWidget {
   final VoidCallback? onDelete;
   final VoidCallback? onAttach;
   final ValueChanged<String>? onRemoveAttachment;
+  final void Function(MediaAttachment att)? onPreview;
 
   @override
   State<_SubtaskRow> createState() => _SubtaskRowState();
@@ -2330,20 +2343,32 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                   itemBuilder: (context, i) {
                     final att = media[i];
                     final url = _abs(att.mediaUrl);
+                    final clickable = _isImageAtt(att) && widget.onPreview != null;
                     return Stack(
                       clipBehavior: Clip.none,
                       children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(6),
-                          child: _isImageAtt(att)
-                              ? Image.network(
-                                  url,
-                                  width: 44,
-                                  height: 44,
-                                  fit: BoxFit.cover,
-                                  errorBuilder: (_, __, ___) => _fileThumb(att.fileName),
-                                )
-                              : _fileThumb(att.fileName),
+                        MouseRegion(
+                          cursor: clickable
+                              ? SystemMouseCursors.click
+                              : MouseCursor.defer,
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: clickable
+                                ? () => widget.onPreview!(att)
+                                : null,
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(6),
+                              child: _isImageAtt(att)
+                                  ? Image.network(
+                                      url,
+                                      width: 44,
+                                      height: 44,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (_, __, ___) => _fileThumb(att.fileName),
+                                    )
+                                  : _fileThumb(att.fileName),
+                            ),
+                          ),
                         ),
                         if (widget.editable && widget.onRemoveAttachment != null)
                           Positioned(
@@ -2411,9 +2436,15 @@ class _ReminderRow extends StatelessWidget {
         ? PrivetTheme.signal
         : overdue
             ? PrivetTheme.danger
-            : const Color(0xFFF0A83D);
+            : isPayment
+                ? const Color(0xFFF0A83D)
+                : const Color(0xFF9B7EDE);
 
-    final String emoji = paid ? '✅' : isPayment ? '💸' : '🔔';
+    final IconData icon = paid
+        ? Icons.check_circle_rounded
+        : isPayment
+            ? Icons.account_balance_wallet_rounded
+            : Icons.notifications_active_outlined;
     final String title = _buildTitle();
     final String sub = _buildSub();
 
@@ -2435,7 +2466,7 @@ class _ReminderRow extends StatelessWidget {
                 width: 40, height: 40,
                 decoration: BoxDecoration(color: accent.withValues(alpha: 0.12), shape: BoxShape.circle),
                 alignment: Alignment.center,
-                child: Text(emoji, style: const TextStyle(fontSize: 18)),
+                child: Icon(icon, size: 18, color: accent),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -2521,8 +2552,13 @@ class _ReminderRow extends StatelessWidget {
 }
 
 class _AddReminderBtn extends StatelessWidget {
-  const _AddReminderBtn({required this.label, required this.onTap});
+  const _AddReminderBtn({
+    required this.label,
+    required this.onTap,
+    this.icon = Icons.add_rounded,
+  });
   final String label;
+  final IconData icon;
   final VoidCallback onTap;
   @override
   Widget build(BuildContext context) => GestureDetector(
@@ -2535,7 +2571,7 @@ class _AddReminderBtn extends StatelessWidget {
         border: Border.all(color: PrivetTheme.line),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.add_rounded, size: 14, color: PrivetTheme.mist),
+        Icon(icon, size: 14, color: PrivetTheme.mist),
         const SizedBox(width: 5),
         Text(label, style: GoogleFonts.syne(fontSize: 12, fontWeight: FontWeight.w600, color: PrivetTheme.mist)),
       ]),
@@ -2626,9 +2662,9 @@ class ReminderHeaderChip extends StatelessWidget {
               mouseCursor: SystemMouseCursors.click,
               onTap: onTap,
               child: Container(
-                height: kChatHeaderChipHeight,
-                constraints: const BoxConstraints(minWidth: 96, maxWidth: 220),
-                padding: const EdgeInsets.fromLTRB(12, 0, 8, 0),
+                height: kChatHeaderChipCompactHeight,
+                constraints: const BoxConstraints(minWidth: 64, maxWidth: 150),
+                padding: const EdgeInsets.fromLTRB(10, 0, 6, 0),
                 alignment: Alignment.centerLeft,
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -2641,28 +2677,28 @@ class ReminderHeaderChip extends StatelessWidget {
                               : isPayment
                                   ? Icons.account_balance_wallet_rounded
                                   : Icons.notifications_active_outlined,
-                      size: 16,
+                      size: 12,
                       color: fill,
                     ),
-                    const SizedBox(width: 6),
+                    const SizedBox(width: 4),
                     Flexible(
                       child: Text(
                         label,
                         overflow: TextOverflow.ellipsis,
                         style: GoogleFonts.syne(
-                          fontSize: 13,
+                          fontSize: 11,
                           fontWeight: FontWeight.w700,
                           color: fill,
                         ),
                       ),
                     ),
                     if (onUnpin != null) ...[
-                      const SizedBox(width: 4),
+                      const SizedBox(width: 3),
                       MouseRegion(
                         cursor: SystemMouseCursors.click,
                         child: GestureDetector(
                           onTap: onUnpin,
-                          child: Icon(Icons.push_pin_rounded, size: 14, color: fill),
+                          child: Icon(Icons.push_pin_rounded, size: 11, color: fill),
                         ),
                       ),
                     ],
@@ -2761,21 +2797,12 @@ class _ReminderDialogState extends State<_ReminderDialog> {
   }
 
   Future<void> _pickDate() async {
-    final picked = await showDatePicker(
+    final picked = await showDialog<DateTime>(
       context: context,
-      initialDate: _dueDate,
-      firstDate: DateTime.now().subtract(const Duration(days: 365)),
-      lastDate: DateTime.now().add(const Duration(days: 365 * 5)),
-      builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: ColorScheme.dark(
-            primary: PrivetTheme.signal,
-            onPrimary: PrivetTheme.onAccent,
-            surface: PrivetTheme.panelElevated,
-            onSurface: PrivetTheme.mist,
-          ),
-        ),
-        child: child!,
+      builder: (ctx) => PrivetDateDialog(
+        initialDate: _dueDate,
+        firstDate: DateTime.now().subtract(const Duration(days: 365)),
+        lastDate: DateTime.now().add(const Duration(days: 365 * 5)),
       ),
     );
     if (picked != null) setState(() => _dueDate = picked);
@@ -2862,9 +2889,9 @@ class _ReminderDialogState extends State<_ReminderDialog> {
             if (!isEdit && widget.initialKind == null) ...[
               Row(
                 children: [
-                  _kindBtn('💸 Payment', 'payment'),
+                  _kindBtn('Payment', Icons.account_balance_wallet_rounded, 'payment'),
                   const SizedBox(width: 8),
-                  _kindBtn('🔔 Reminder', 'reminder'),
+                  _kindBtn('Reminder', Icons.notifications_active_outlined, 'reminder'),
                 ],
               ),
               const SizedBox(height: 14),
@@ -2987,9 +3014,10 @@ class _ReminderDialogState extends State<_ReminderDialog> {
     );
   }
 
-  Widget _kindBtn(String label, String value) => MouseRegion(
+  Widget _kindBtn(String label, IconData icon, String value) => MouseRegion(
         cursor: SystemMouseCursors.click,
         child: ChoiceChip(
+        avatar: Icon(icon, size: 15, color: _kind == value ? PrivetTheme.signal : PrivetTheme.paper),
         label: Text(label, style: GoogleFonts.syne(fontSize: 12)),
         selected: _kind == value,
         selectedColor: PrivetTheme.signal.withValues(alpha: 0.25),

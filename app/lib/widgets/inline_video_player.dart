@@ -1,12 +1,22 @@
+import 'dart:async';
+import 'dart:io' show Platform;
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../theme.dart';
+import '../util/agent_debug.dart';
 
 /// Plays a remote video inline in the chat bubble.
 ///
 /// Controllers are created only after the user taps play (or [autoInit] is
 /// true). At most one active player is kept warm via [_activePlayer].
+///
+/// On desktop there is no `video_player` platform implementation (Linux and
+/// Windows have no official backend), so tapping a video falls back to the
+/// system default player / browser via [launchUrl].
 class InlineVideoPlayer extends StatefulWidget {
   const InlineVideoPlayer({
     super.key,
@@ -46,6 +56,9 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
 
   Future<void> _ensureController() async {
     if (_controller != null || _initializing || _failed) return;
+    // Desktop has no video_player backend — never attempt init here; _toggle
+    // opens the URL externally instead.
+    if (!kIsWeb && (Platform.isLinux || Platform.isWindows)) return;
     _initializing = true;
     if (mounted) setState(() {});
     final controller = VideoPlayerController.networkUrl(Uri.parse(widget.url))
@@ -61,8 +74,25 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
       _ready = true;
       _initializing = false;
       setState(() {});
-    } catch (_) {
-      await controller.dispose();
+    } catch (e) {
+      // #region agent log
+      agentDebugLog(
+        hypothesisId: 'H6',
+        location: 'inline_video_player.dart:_ensureController',
+        message: 'video init failed',
+        data: {
+          'error': '$e',
+          'kIsWeb': kIsWeb,
+          'platform': kIsWeb ? 'web' : Platform.operatingSystem,
+          'url': widget.url,
+        },
+      );
+      // #endregion
+      // Never await dispose() here: when init() throws before the controller's
+      // internal _creatingCompleter completes (e.g. MissingPluginException on
+      // a platform without a backend), dispose() awaits that completer forever
+      // and deadlocks the tap handler.
+      unawaited(controller.dispose());
       if (!mounted) return;
       _failed = true;
       _initializing = false;
@@ -105,15 +135,68 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
   }
 
   Future<void> _toggle() async {
+    // #region agent log
+    agentDebugLog(
+      hypothesisId: 'H7',
+      location: 'inline_video_player.dart:_toggle',
+      message: 'video toggle tapped',
+      data: {
+        'kIsWeb': kIsWeb,
+        'platform': kIsWeb ? 'web' : Platform.operatingSystem,
+        'ready': _ready,
+        'failed': _failed,
+        'initializing': _initializing,
+        'controllerNull': _controller == null,
+        'url': widget.url,
+      },
+    );
+    // #endregion
+    // Desktop: no video_player backend — open in the system player/browser
+    // immediately instead of waiting for a failed init attempt.
+    if (!kIsWeb && (Platform.isLinux || Platform.isWindows)) {
+      // #region agent log
+      agentDebugLog(
+        hypothesisId: 'H7',
+        location: 'inline_video_player.dart:_toggle',
+        message: 'desktop: opening externally',
+        data: {'url': widget.url},
+      );
+      // #endregion
+      await _openExternally();
+      return;
+    }
     await _ensureController();
     final controller = _controller;
-    if (controller == null || !_ready) return;
+    if (controller == null || !_ready) {
+      // Web init failed — open the URL in a new tab instead of dead-ending.
+      if (_failed) {
+        // #region agent log
+        agentDebugLog(
+          hypothesisId: 'H7',
+          location: 'inline_video_player.dart:_toggle',
+          message: 'web failed: opening externally',
+          data: {'url': widget.url},
+        );
+        // #endregion
+        await _openExternally();
+      }
+      return;
+    }
     if (controller.value.isPlaying) {
       await controller.pause();
       return;
     }
     await _claimActive();
     await controller.play();
+  }
+
+  Future<void> _openExternally() async {
+    try {
+      await launchUrl(
+        Uri.parse(widget.url),
+        mode: LaunchMode.externalApplication,
+      );
+    } catch (_) {}
   }
 
   @override
@@ -136,14 +219,7 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
         child: SizedBox(
           width: widget.width,
           height: widget.height,
-          child: _failed
-              ? Center(
-                  child: Text(
-                    'Video unavailable',
-                    style: TextStyle(color: PrivetTheme.mist, fontSize: 13),
-                  ),
-                )
-              : !_ready
+          child: !_ready
               ? Material(
                   color: Colors.transparent,
                   child: InkWell(
@@ -166,8 +242,10 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
                                 shape: BoxShape.circle,
                               ),
                               child: Icon(
-                                Icons.play_arrow_rounded,
-                                size: 36,
+                                _failed
+                                    ? Icons.open_in_new_rounded
+                                    : Icons.play_arrow_rounded,
+                                size: 32,
                                 color: PrivetTheme.signal,
                               ),
                             ),

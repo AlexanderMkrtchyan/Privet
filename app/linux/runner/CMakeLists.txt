@@ -10,6 +10,7 @@ add_executable(${BINARY_NAME}
   "main.cc"
   "my_application.cc"
   "remote_input_plugin.cc"
+  "glib_compat.cc"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
 )
 
@@ -23,6 +24,11 @@ add_definitions(-DAPPLICATION_ID="${APPLICATION_ID}")
 # Add dependency libraries. Add any application-specific dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter)
 target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::GTK)
+
+# Export the executable's symbols so the DT_NEEDED plugin libraries resolve
+# glib_compat.cc's g_once_init_enter_pointer / g_once_init_leave_pointer
+# (glib >= 2.80 headers emit refs that do not exist on Ubuntu 22.04's glib).
+target_link_options(${BINARY_NAME} PRIVATE "-Wl,--export-dynamic")
 
 # X11 + XTest for remote input on X11 sessions.
 find_package(PkgConfig REQUIRED)

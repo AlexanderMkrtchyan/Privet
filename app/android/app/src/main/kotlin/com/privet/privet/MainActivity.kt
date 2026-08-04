@@ -23,5 +23,25 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "privet/realtime",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "start" -> {
+                    RealtimeConnectionService.start(this)
+                    result.success(null)
+                }
+                "stop" -> {
+                    RealtimeConnectionService.stop(this)
+                    result.success(null)
+                }
+                "requestBatteryExemption" -> {
+                    val ok = RealtimeConnectionService.requestIgnoreBatteryOptimizations(this)
+                    result.success(ok)
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 }

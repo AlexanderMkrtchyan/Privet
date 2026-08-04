@@ -52,7 +52,7 @@ class AppClipboard {
     if (kIsWeb) return peek();
     try {
       final data = await Clipboard.getData(Clipboard.kTextPlain)
-          .timeout(const Duration(milliseconds: 200));
+          .timeout(const Duration(milliseconds: 500));
       final t = data?.text;
       if (t != null && t.isNotEmpty) {
         remember(t);

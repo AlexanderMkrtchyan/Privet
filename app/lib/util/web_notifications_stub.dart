@@ -11,10 +11,11 @@ void showWebNotification({
   required String body,
   String? tag,
   void Function()? onClick,
+  bool isCall = false,
 }) {}
 
 /// No-op off web. Returns a disposer.
-void Function() onDocumentVisible(void Function() callback) => () {}
+void Function() onDocumentVisible(void Function() callback) => () {};
 
 Future<void> refreshDesktopFocusState() async {}
 

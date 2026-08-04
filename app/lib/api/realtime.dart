@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -13,12 +14,29 @@ class RealtimeClient {
   StreamSubscription? _sub;
   final _handlers = <WsHandler>[];
   bool _authSent = false;
+  String? _authToken;
+  Timer? _reconnectTimer;
+  int _reconnectAttempt = 0;
+  bool _manualDisconnect = false;
+
+  /// Fired after an automatic reconnect succeeds (e.g. app resume / network flap).
+  void Function()? onReconnected;
 
   void addHandler(WsHandler handler) => _handlers.add(handler);
   void removeHandler(WsHandler handler) => _handlers.remove(handler);
 
   Future<void> connect(String token) async {
-    await disconnect();
+    _manualDisconnect = false;
+    _authToken = token;
+    await _openConnection(token);
+  }
+
+  Future<void> _openConnection(String token) async {
+    await _sub?.cancel();
+    _sub = null;
+    try {
+      await _channel?.sink.close();
+    } catch (_) {}
     _channel = WebSocketChannel.connect(Uri.parse(url));
     _authSent = false;
     _sub = _channel!.stream.listen(
@@ -28,11 +46,40 @@ class RealtimeClient {
           h(data);
         }
       },
-      onDone: () {},
-      onError: (_) {},
+      onDone: _onConnectionLost,
+      onError: (_) => _onConnectionLost(),
     );
     send({'type': 'auth', 'token': token});
     _authSent = true;
+    _reconnectAttempt = 0;
+  }
+
+  void _onConnectionLost() {
+    if (_manualDisconnect || _authToken == null) return;
+    _scheduleReconnect();
+  }
+
+  void _scheduleReconnect() {
+    if (_manualDisconnect || _authToken == null) return;
+    _reconnectTimer?.cancel();
+    final delaySec = math.min(30, 1 << _reconnectAttempt);
+    _reconnectAttempt = math.min(_reconnectAttempt + 1, 5);
+    _reconnectTimer = Timer(Duration(seconds: delaySec), () async {
+      if (_manualDisconnect || _authToken == null) return;
+      try {
+        await _openConnection(_authToken!);
+        onReconnected?.call();
+      } catch (_) {
+        _scheduleReconnect();
+      }
+    });
+  }
+
+  /// Re-open the socket if it dropped (foreground resume, network flap).
+  Future<void> ensureConnected(String token) async {
+    _authToken = token;
+    if (isConnected) return;
+    await connect(token);
   }
 
   void send(Map<String, dynamic> payload) {
@@ -87,10 +134,11 @@ class RealtimeClient {
   }
 
   void deleteMessage({required String messageId}) {
-    send({
-      'type': 'message.delete',
-      'messageId': messageId,
-    });
+    send({'type': 'message.delete', 'messageId': messageId});
+  }
+
+  void typing(String conversationId) {
+    send({'type': 'typing', 'conversationId': conversationId});
   }
 
   void markRead({
@@ -104,10 +152,6 @@ class RealtimeClient {
       if (messageId != null) 'messageId': messageId,
       'focused': focused,
     });
-  }
-
-  void typing(String conversationId) {
-    send({'type': 'typing', 'conversationId': conversationId});
   }
 
   void inviteCall({
@@ -251,9 +295,16 @@ class RealtimeClient {
   }
 
   Future<void> disconnect() async {
+    _manualDisconnect = true;
+    _authToken = null;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectAttempt = 0;
     await _sub?.cancel();
     _sub = null;
-    await _channel?.sink.close();
+    try {
+      await _channel?.sink.close();
+    } catch (_) {}
     _channel = null;
     _authSent = false;
   }

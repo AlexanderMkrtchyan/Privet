@@ -8,6 +8,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../remote_control/protocol.dart';
 import '../state.dart';
 import '../theme.dart';
+import '../util/agent_debug.dart';
 import '../util/app_clipboard.dart';
 import '../util/fullscreen.dart';
 
@@ -50,6 +51,7 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
     super.initState();
     session.addListener(_onSession);
     HardwareKeyboard.instance.addHandler(_onHardwareKey);
+    HardwareKeyboard.instance.addHandler(_debugHardwareKey);
     _syncFlags();
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybePrompt());
   }
@@ -69,6 +71,7 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
   void dispose() {
     session.removeListener(_onSession);
     HardwareKeyboard.instance.removeHandler(_onHardwareKey);
+    HardwareKeyboard.instance.removeHandler(_debugHardwareKey);
     _focus.dispose();
     super.dispose();
   }
@@ -269,7 +272,60 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
     return true;
   }
 
+  /// Focus-independent key observer: runs for every key the engine receives,
+  /// before focus dispatch. Tells us whether a Space keydown ever reaches the
+  /// controller and whether it then makes it to [_onKey] (a focused Material
+  /// button can swallow Space between the two).
+  // #region agent log
+  bool _debugHardwareKey(KeyEvent event) {
+    if (!session.isRemoteController) return false;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
+    final phys = event.physicalKey.debugName;
+    final logical = event.logicalKey.debugName ?? '';
+    final code = (phys != null && phys.isNotEmpty)
+        ? phys.replaceAll(' ', '')
+        : logical.replaceAll(' ', '');
+    agentDebugLog(
+      hypothesisId: 'H1',
+      location: 'remote_control_layer.dart:_debugHardwareKey',
+      message: 'controller hardware key',
+      data: {
+        'event': event.runtimeType.toString(),
+        'char': event.character,
+        'physCode': code,
+        'logical': logical,
+        'keyId': event.logicalKey.keyId,
+      },
+    );
+    return false;
+  }
+  // #endregion
+
+
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    // #region agent log
+    if (event is KeyDownEvent || event is KeyRepeatEvent) {
+      final isSpace = event.logicalKey == LogicalKeyboardKey.space ||
+          event.character == ' ';
+      if (isSpace) {
+        agentDebugLog(
+          hypothesisId: 'H1',
+          location: 'remote_control_layer.dart:_onKey@entry',
+          message: 'space reached _onKey',
+          data: {
+            'isController': session.isRemoteController,
+            'event': event.runtimeType.toString(),
+            'char': event.character,
+            'phys': event.physicalKey.debugName,
+            'logical': event.logicalKey.debugName,
+            'keyId': event.logicalKey.keyId,
+            'keyLabel': event.logicalKey.keyLabel,
+            'computedCode': _webCode(event),
+          },
+        );
+      }
+    }
+    // #endregion
     if (!session.isRemoteController) return KeyEventResult.ignored;
     // OS auto-repeat floods the channel; dropped KeyUps leave stuck keys
     // (endless "p"). Host sees a held key from the initial KeyDown alone.
@@ -281,6 +337,25 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
     if (code.isEmpty) return KeyEventResult.ignored;
     final mods = _mods();
     final down = event is KeyDownEvent;
+
+    // #region agent log
+    if (code == 'Space') {
+      agentDebugLog(
+        hypothesisId: 'H1',
+        location: 'remote_control_layer.dart:_onKey',
+        message: 'space key reached _onKey',
+        data: {
+          'event': event.runtimeType.toString(),
+          'char': event.character,
+          'code': code,
+          'mods': mods,
+          'down': down,
+          'focusHasFocus': _focus.hasFocus,
+          'isController': session.isRemoteController,
+        },
+      );
+    }
+    // #endregion
 
     // Esc exits fullscreen / does not revoke control.
     if (down &&
@@ -360,6 +435,10 @@ class _RemoteControlLayerState extends State<RemoteControlLayer> {
     if (logical != null && logical.isNotEmpty) {
       return logical.replaceAll(' ', '');
     }
+    // Flutter web can leave debugName empty for every key; the label is the
+    // only reliable source. Space's label is a single space character, which
+    // would collapse to an empty code below — map it explicitly.
+    if (event.logicalKey == LogicalKeyboardKey.space) return 'Space';
     return event.logicalKey.keyLabel.replaceAll(' ', '');
   }
 

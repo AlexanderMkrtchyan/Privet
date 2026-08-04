@@ -1496,6 +1496,7 @@ class InboxPane extends StatelessWidget {
     final updateStatusFuture = AppUpdate.check(baseUrl: state.api.baseUrl);
     final nameCtrl = TextEditingController(text: me.displayName);
     var enabled = state.aiEnabled && state.aiActive;
+    var chatFontSize = state.chatFontSize;
     Uint8List? pendingAvatarBytes;
     String? pendingAvatarFilename;
     String pendingAvatarMime = 'image/jpeg';
@@ -1918,6 +1919,66 @@ class InboxPane extends StatelessWidget {
                             state.setAccent(c);
                             setSheet(() {});
                           },
+                        ),
+                        const SizedBox(height: 20),
+                        Text(
+                          'Message font size',
+                          style: TextStyle(
+                            color: PrivetTheme.mist,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Slider(
+                                value: chatFontSize,
+                                min: 11,
+                                max: 24,
+                                divisions: 26,
+                                label: chatFontSize.toStringAsFixed(1),
+                                activeColor: PrivetTheme.signal,
+                                inactiveColor: PrivetTheme.line,
+                                onChanged: (v) {
+                                  setSheet(() => chatFontSize = v);
+                                  unawaited(state.setChatFontSize(v));
+                                },
+                              ),
+                            ),
+                            SizedBox(
+                              width: 40,
+                              child: Text(
+                                chatFontSize % 1 == 0
+                                    ? chatFontSize.toStringAsFixed(0)
+                                    : chatFontSize.toStringAsFixed(1),
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: 'Reset to default (15)',
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () {
+                                setSheet(() => chatFontSize = 15);
+                                unawaited(state.setChatFontSize(15));
+                              },
+                              icon: const Icon(
+                                Icons.restart_alt_rounded,
+                                size: 20,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Text(
+                          'Ctrl + scroll in a chat adjusts this too.',
+                          style: TextStyle(
+                            color: PrivetTheme.mist,
+                            fontSize: 11,
+                          ),
                         ),
                         const SizedBox(height: 12),
                         SizedBox(
@@ -2773,6 +2834,14 @@ class _ConversationPaneState extends State<ConversationPane>
     final left = globalPos.dx.clamp(8.0, media.width - menuW - 8);
     final top = globalPos.dy.clamp(8.0, media.height - menuH - 8);
 
+    Future<void> _pasteFromSystemClipboard() async {
+      final text = await AppClipboard.getText();
+      if (text == null || text.isEmpty) return;
+      insertTextIntoController(_controller, text);
+      _composerFocus.requestFocus();
+      widget.state.notifyTyping();
+    }
+
     void paste() {
       var text = AppClipboard.peek();
       if (text == null || text.isEmpty) {
@@ -2786,8 +2855,11 @@ class _ConversationPaneState extends State<ConversationPane>
         insertTextIntoController(_controller, text);
         _composerFocus.requestFocus();
         widget.state.notifyTyping();
+        _dismissComposerCtxMenu();
+      } else {
+        _dismissComposerCtxMenu();
+        unawaited(_pasteFromSystemClipboard());
       }
-      _dismissComposerCtxMenu();
     }
 
     void copy() {
@@ -4168,8 +4240,17 @@ class _ConversationPaneState extends State<ConversationPane>
                           constraints: const BoxConstraints(maxWidth: 200),
                           child: _buildChatTitleColumn(state, chat),
                         ),
-                        const Spacer(),
-                        ...desktopActions,
+                        Expanded(
+                          child: Align(
+                            alignment: Alignment.centerRight,
+                            child: SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: Row(
+                                children: desktopActions,
+                              ),
+                            ),
+                          ),
+                        ),
                       ],
                     ),
             ),
@@ -4458,6 +4539,7 @@ class _ConversationPaneState extends State<ConversationPane>
                           selfId: state.user?.id,
                           showSender: true,
                           highlighted: highlighted,
+                          fontScale: state.chatFontSize / 15.0,
                           readByPeer:
                               mine &&
                               (chat?.isReadByPeer(m, selfId: state.user?.id) ??
@@ -4578,6 +4660,29 @@ class _ConversationPaneState extends State<ConversationPane>
                           ),
                         ),
                       ),
+                    ),
+                  ),
+                  // Ctrl+scroll over the chat zooms the message font without
+                  // scrolling the list. Topmost in the Stack so it registers
+                  // with the pointer-signal resolver before the Scrollable.
+                  Positioned.fill(
+                    child: Listener(
+                      behavior: HitTestBehavior.translucent,
+                      onPointerSignal: (e) {
+                        if (e is! PointerScrollEvent) return;
+                        if (!HardwareKeyboard.instance.isControlPressed) {
+                          return;
+                        }
+                        final dy = e.scrollDelta.dy;
+                        if (dy == 0) return;
+                        final step = dy < 0 ? 0.5 : -0.5;
+                        GestureBinding.instance.pointerSignalResolver.register(
+                          e,
+                          (_) => unawaited(
+                            state.setChatFontSize(state.chatFontSize + step),
+                          ),
+                        );
+                      },
                     ),
                   ),
                 ],
@@ -6840,18 +6945,18 @@ class _AddChipButton extends StatelessWidget {
               });
             },
             child: SizedBox(
-              height: kChatHeaderChipHeight,
+              height: kChatHeaderChipCompactHeight,
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.add_rounded, size: 16, color: PrivetTheme.mist),
-                    const SizedBox(width: 6),
+                    Icon(Icons.add_rounded, size: 12, color: PrivetTheme.mist),
+                    const SizedBox(width: 4),
                     Text(
                       'Add',
                       style: GoogleFonts.syne(
-                        fontSize: 13,
+                        fontSize: 11,
                         fontWeight: FontWeight.w700,
                         color: PrivetTheme.mist,
                       ),

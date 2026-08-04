@@ -30,11 +30,13 @@ payload = {
     "windows_setup_url": "/downloads/Privet-Setup.exe",
     "linux_deb_url": "/downloads/privet-linux-amd64.deb",
     "linux_tar_url": "/downloads/privet-linux-x64.tar.gz",
+    "android_apk_url": "/downloads/privet-android.apk",
     "windows": {"setup_url": "/downloads/Privet-Setup.exe"},
     "linux": {
         "deb_url": "/downloads/privet-linux-amd64.deb",
         "tar_url": "/downloads/privet-linux-x64.tar.gz",
     },
+    "android": {"apk_url": "/downloads/privet-android.apk"},
 }
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(payload, indent=2) + "\n")

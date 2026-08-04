@@ -17,3 +17,9 @@ void setPrivetDragHover(bool hovering) {}
 
 /// No-op on non-web.
 void setPrivetAnnotHover(bool hovering) {}
+
+/// Debug: is the message-select I-beam body cursor active right now?
+bool privetWebSelectHoverActive() => false;
+
+/// Debug: current `body.style.cursor` value (web) or placeholder.
+String privetWebBodyCursor() => '(stub)';

@@ -33,6 +33,9 @@ dependencies:
   tray_manager: ^0.5.1
   desktop_notifications: ^0.6.3
   dbus: ^0.7.11
+  flutter_local_notifications: ^18.0.1
+  firebase_core: ^3.8.1
+  firebase_messaging: ^15.1.5
 
 dev_dependencies:
   flutter_test:

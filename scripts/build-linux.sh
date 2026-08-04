@@ -193,6 +193,99 @@ else
   echo "WARNING: could not locate flutter_webrtc to patch" >&2
 fi
 
+# glibc-compat fix: the build machine (Ubuntu 24.04, glibc 2.39, GCC 13)
+# emits references that don't exist on Ubuntu 22.04 (glibc 2.35, GCC 11):
+#   - __isoc23_strtol / __isoc23_sscanf / __isoc23_strtoul  (GLIBC_2.38)
+#     ← glibc headers redirect when _GNU_SOURCE + new C23 mode; we pin
+#     __GLIBC_USE_C2X_STRTOL=0 via a forced header (features.h has an include
+#     guard, so it sticks) for the plugin's own code.
+#   - _ZSt21ios_base_library_initv  (GLIBCXX_3.4.32)    ← GCC 13 libstdc++
+#     headers emit it; statically linking libstdc++ into the plugin removes
+#     the runtime dependency on the distro's libstdc++ version.
+#   - arc4random (GLIBC_2.36) / __isoc23_strtoul (GLIBC_2.38)  ← pulled in
+#     by the statically-linked GCC 13 libstdc++.a internals; we provide local
+#     shim definitions so they resolve inside the plugin.
+# Only libflutter_webrtc_plugin.so is affected; every other bundle lib already
+# stays within glibc 2.34 / GLIBCXX_3.4.29 (present on Ubuntu 22.04).
+WEBRTC_LINUX_CMAKE="$(find "$HOME/.pub-cache/hosted" -path '*flutter_webrtc-*/linux/CMakeLists.txt' 2>/dev/null | sort | tail -1 || true)"
+if [[ -n "$WEBRTC_LINUX_CMAKE" ]]; then
+  PLUGIN_LINUX_DIR="$(dirname "$WEBRTC_LINUX_CMAKE")"
+  cat >"$PLUGIN_LINUX_DIR/privet_compat_no_c23.h" <<'HDR'
+#ifndef PRIVET_COMPAT_NO_C23_H
+#define PRIVET_COMPAT_NO_C23_H
+// Force the pre-2.38 strtol/sscanf ABI. glibc 2.38+ headers redirect these
+// to __isoc23_* symbols when _GNU_SOURCE is defined. features.h is include-
+// guarded, so this include-first header pins __GLIBC_USE_C2X_STRTOL=0 for all
+// subsequent libc headers in this translation unit, keeping the GLIBC_2.2.5
+// symbols that exist on Ubuntu 22.04 (glibc 2.35).
+#include <features.h>
+#undef __GLIBC_USE_C2X_STRTOL
+#define __GLIBC_USE_C2X_STRTOL 0
+#endif
+HDR
+  cat >"$PLUGIN_LINUX_DIR/privet_compat_shims.cc" <<'SHIM'
+#include <stdint.h>
+#include <stdlib.h>
+#include <sys/random.h>
+#include <time.h>
+
+extern "C" {
+
+// glibc 2.36+ symbol, absent on Ubuntu 22.04 (glibc 2.35). The statically
+// linked GCC 13 libstdc++ (random_device) references it; getrandom has been
+// available since glibc 2.25, so this is a drop-in entropy source.
+unsigned int arc4random(void) {
+  uint32_t v = 0;
+  if (getrandom(&v, sizeof(v), 0) == sizeof(v)) return v;
+  v = (uint32_t)rand();
+  v ^= (uint32_t)(clock() << 16);
+  v ^= (uint32_t)(uintptr_t)&v;
+  return v ? v : 0x9e3779b9u;
+}
+
+// glibc 2.38+ symbol, absent on Ubuntu 22.04. libstdc++ uses it for numeric
+// string conversion; plain strtoul is ABI-equivalent for those call sites.
+unsigned long int __isoc23_strtoul(const char* nptr, char** endptr, int base) {
+  return strtoul(nptr, endptr, base);
+}
+
+}
+SHIM
+  python3 - "$WEBRTC_LINUX_CMAKE" "$PLUGIN_LINUX_DIR" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+plugin_dir = sys.argv[2]
+text = path.read_text()
+if 'privet_compat_no_c23.h' in text:
+    print(f'flutter_webrtc glibc-compat already patched ({path})')
+else:
+    include_flag = '-include%s/privet_compat_no_c23.h' % plugin_dir
+    text = text.replace(
+        '  "flutter_webrtc_plugin.cc"',
+        '  "flutter_webrtc_plugin.cc"\n'
+        '  "%s/privet_compat_shims.cc"' % plugin_dir,
+        1,
+    )
+    text = text.replace(
+        "set_target_properties(${PLUGIN_NAME} PROPERTIES\n  CXX_VISIBILITY_PRESET hidden)",
+        "set_target_properties(${PLUGIN_NAME} PROPERTIES\n  CXX_VISIBILITY_PRESET hidden)\n"
+        "# glibc-compat: pin __GLIBC_USE_C2X_STRTOL=0 (avoids __isoc23_* refs that\n"
+        "# require glibc 2.38, absent on Ubuntu 22.04) and statically link libstdc++\n"
+        "# so the plugin does not depend on the distro's libstdc++ version\n"
+        "# (GCC 13's GLIBCXX_3.4.32 does not exist on Ubuntu 22.04).\n"
+        "target_compile_options(${PLUGIN_NAME} PRIVATE \"%s\")\n"
+        "target_link_options(${PLUGIN_NAME} PRIVATE -static-libstdc++ -static-libgcc)"
+        % include_flag,
+        1,
+    )
+    path.write_text(text)
+    print(f'patched glibc-compat {path}')
+PY
+else
+  echo "WARNING: could not locate flutter_webrtc linux CMakeLists to patch" >&2
+fi
+
 flutter build linux --release \
   --dart-define=PRIVET_BUILD="$STAMP" \
   --dart-define=PRIVET_API="$PRIVET_API_DEFINE"
@@ -319,11 +412,31 @@ if [[ -e /dev/nvidia0 ]]; then
   export __GL_SYNC_TO_VBLANK="${__GL_SYNC_TO_VBLANK:-0}"
   unset __GL_MaxFramesAllowed
 fi
-# MUST use OpenGL: Flutter's software backend has no external-texture GL
-# callback, so flutter_webrtc RTCVideoView (screen share / camera) paints black.
-# Prefer OpenGL even if NVIDIA+X11 present is ~20–30fps — invisible video is worse.
-# Override only for debugging: FLUTTER_LINUX_RENDERER=software.
-export FLUTTER_LINUX_RENDERER="${FLUTTER_LINUX_RENDERER:-opengl}"
+# Detect OpenGL version. Flutter's opengl renderer requires GL ≥ 3.0.
+# Ancient GPUs like Radeon HD 2xxx (GL 2.0) will crash — fall back to software.
+_detect_gl() {
+  if command -v glxinfo >/dev/null 2>&1; then
+    local ver
+    ver="$(glxinfo 2>/dev/null | grep 'OpenGL version' | grep -oP '\d+\.\d+' | head -1 || true)"
+    if [[ -n "$ver" ]]; then
+      local major="${ver%%.*}"
+      if [[ "$major" -lt 3 ]]; then
+        echo "Privet: OpenGL $ver too old for hardware rendering (need 3.0+)."
+        echo "Privet: Falling back to software renderer. Video calls will show black."
+        echo "Privet: Install Mesa drivers or use a newer GPU for hardware video."
+        return 1
+      fi
+    fi
+  fi
+  return 0
+}
+if [[ -z "${FLUTTER_LINUX_RENDERER:-}" ]]; then
+  if _detect_gl; then
+    export FLUTTER_LINUX_RENDERER=opengl
+  else
+    export FLUTTER_LINUX_RENDERER=software
+  fi
+fi
 cd "$APP_DIR"
 exec "$APP_DIR/privet" "$@"
 EOF
@@ -415,11 +528,31 @@ if [[ -e /dev/nvidia0 ]]; then
   export __GL_SYNC_TO_VBLANK="\${__GL_SYNC_TO_VBLANK:-0}"
   unset __GL_MaxFramesAllowed
 fi
-# MUST use OpenGL: Flutter's software backend has no external-texture GL
-# callback, so flutter_webrtc RTCVideoView (screen share / camera) paints black.
-# Prefer OpenGL even if NVIDIA+X11 present is ~20–30fps — invisible video is worse.
-# Override only for debugging: FLUTTER_LINUX_RENDERER=software.
-export FLUTTER_LINUX_RENDERER="\${FLUTTER_LINUX_RENDERER:-opengl}"
+# Detect OpenGL version. Flutter's opengl renderer requires GL >= 3.0.
+# Ancient GPUs like Radeon HD 2xxx (GL 2.0) will crash — fall back to software.
+_detect_gl() {
+  if command -v glxinfo >/dev/null 2>&1; then
+    local ver
+    ver="\$(glxinfo 2>/dev/null | grep 'OpenGL version' | grep -oP '\d+\.\d+' | head -1 || true)"
+    if [[ -n "\$ver" ]]; then
+      local major="\${ver%%.*}"
+      if [[ "\$major" -lt 3 ]]; then
+        echo "Privet: OpenGL \$ver too old for hardware rendering (need 3.0+)."
+        echo "Privet: Falling back to software renderer. Video calls will show black."
+        echo "Privet: Install Mesa drivers or use a newer GPU for hardware video."
+        return 1
+      fi
+    fi
+  fi
+  return 0
+}
+if [[ -z "\${FLUTTER_LINUX_RENDERER:-}" ]]; then
+  if _detect_gl; then
+    export FLUTTER_LINUX_RENDERER=opengl
+  else
+    export FLUTTER_LINUX_RENDERER=software
+  fi
+fi
 exec "$INSTALL_DIR/privet" "\$@"
 EOF
 chmod +x "$INSTALL_DIR/privet-launch.sh"

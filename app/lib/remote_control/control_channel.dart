@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../api/realtime.dart';
+import '../util/agent_debug.dart';
 import '../util/app_clipboard.dart';
 import '../util/remote_input.dart';
 import 'protocol.dart';
@@ -375,6 +376,25 @@ class RemoteControlChannel {
     // on the host; still avoid sending the most dangerous combos.
     final blocked = _isBlockedChord(code: code, mods: mods);
     if (blocked) return;
+
+    // #region agent log
+    if (code == 'Space') {
+      agentDebugLog(
+        hypothesisId: 'H2',
+        location: 'control_channel.dart:sendKey',
+        message: 'controller sendKey space',
+        data: {
+          'code': code,
+          'down': down,
+          'mods': mods,
+          'key': key,
+          'blocked': blocked,
+          'channelState': _channel?.state.toString(),
+        },
+      );
+    }
+    // #endregion
+
     _sendRaw(RemoteControlProtocol.keyEvent(
       code: code,
       down: down,
@@ -616,9 +636,28 @@ class RemoteControlChannel {
           final down = msg['down'] as bool?;
           if (code == null || down == null) return;
           // Key-ups must always land or OS auto-repeat sticks forever.
-          if (!state.acceptHostEvent(DateTime.now(), force: !down)) return;
+          final accepted = state.acceptHostEvent(DateTime.now(), force: !down);
+          if (!accepted) return;
           final mods = msg['mods'] as int? ?? 0;
-          if (_isBlockedChord(code: code, mods: mods)) return;
+          final blocked = _isBlockedChord(code: code, mods: mods);
+          if (blocked) return;
+          // #region agent log
+          if (code == 'Space') {
+            agentDebugLog(
+              hypothesisId: 'H3',
+              location: 'control_channel.dart:_onChannelMessage',
+              message: 'host received key',
+              data: {
+                'code': code,
+                'down': down,
+                'mods': mods,
+                'key': msg['key'] as String?,
+                'accepted': accepted,
+                'blocked': blocked,
+              },
+            );
+          }
+          // #endregion
           await RemoteInput.keyEvent(
             code: code,
             down: down,

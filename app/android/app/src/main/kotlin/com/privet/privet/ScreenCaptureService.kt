@@ -9,7 +9,6 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
-import androidx.core.app.ContextCompat
 
 class ScreenCaptureService : Service() {
     companion object {
@@ -17,10 +16,12 @@ class ScreenCaptureService : Service() {
         private const val NOTIFICATION_ID = 2407
 
         fun start(context: Context) {
-            ContextCompat.startForegroundService(
-                context,
-                Intent(context, ScreenCaptureService::class.java),
-            )
+            val intent = Intent(context, ScreenCaptureService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
         }
 
         fun stop(context: Context) {

@@ -34,7 +34,7 @@ import {
   fetchLinkPreview,
 } from '../media/linkPreview.js';
 import { noteConversationMessage, shouldAcceptMarkRead } from '../readGate.js';
-import { pushToUser } from '../push/fcm.js';
+import { pushCallToUser, pushMessageToUser, pushToUser } from '../push/fcm.js';
 import {
   buildControlSignalOutbound,
   canGrantControl,
@@ -95,17 +95,16 @@ function notifyMessage(message, { excludeUserId } = {}) {
       body,
       messageId: message.id,
     });
-    // Push when user has no live socket (background / killed app).
-    if (!isOnline(uid)) {
-      void pushToUser(uid, {
-        title,
-        body,
-        data: {
-          conversationId: message.conversationId,
-          messageId: message.id,
-        },
-      });
-    }
+    // FCM for mobile — phone may be backgrounded while desktop socket is "online".
+    void pushMessageToUser(uid, {
+      title,
+      body,
+      data: {
+        type: 'message',
+        conversationId: message.conversationId,
+        messageId: message.id,
+      },
+    });
   }
 }
 
@@ -587,10 +586,28 @@ export function registerWebsocket(app) {
           const from = publicUser(getUserById(userId));
           const payload = publicCall(call);
           // Ring all of callee's devices; media will bind the accepting socket.
+          // WS ring on every live socket.
           sendToUser(toUserId, {
             type: 'call.incoming',
             call: payload,
             from,
+          });
+          // FCM to all mobile tokens — user may be "online" on desktop while
+          // the phone is in YouTube/background, or the app may be killed.
+          const modeLabel =
+            mode === 'audio'
+              ? 'Incoming audio call'
+              : mode === 'screen'
+                ? 'Incoming screen share'
+                : 'Incoming call';
+          void pushCallToUser(toUserId, {
+            title: `${from.displayName || from.handle || 'Someone'} is calling`,
+            body: modeLabel,
+            data: {
+              type: 'call.incoming',
+              callId,
+              conversationId,
+            },
           });
           sendToSocket(socket, { type: 'call.ringing', call: payload });
           return;

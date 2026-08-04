@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
@@ -13,11 +14,17 @@ import 'theme.dart';
 import 'util/desktop_single_instance.dart';
 import 'util/desktop_tray.dart';
 import 'util/low_resource.dart';
+import 'util/mobile_app_lifecycle.dart';
+import 'util/mobile_push_background.dart';
+import 'util/mobile_push_config.dart';
 import 'util/perf.dart';
 import 'util/web_bootstrap.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (MobilePushConfig.isConfigured) {
+    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+  }
   // Web only: expose semantics so assistive tech (and attach overlays) work.
   // On Linux/GTK a forced app-wide semantics tree adds per-frame overhead for
   // no desktop benefit (accessibility still works via the platform embedder).
@@ -140,6 +147,14 @@ class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
   void didChangePlatformBrightness() {
     // Re-derive palette when the OS switches light/dark (themeMode == system).
     if (_state.themeMode == ThemeMode.system) setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    setMobileAppInForeground(state == AppLifecycleState.resumed);
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_state.onAppResumed());
+    }
   }
 
   @override

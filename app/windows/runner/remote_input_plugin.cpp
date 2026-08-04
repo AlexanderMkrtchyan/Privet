@@ -412,6 +412,13 @@ void HandleMethod(
       SHORT mapped = VkKeyScanA(code[0]);
       if (mapped != -1) vk = LOBYTE(mapped);
     }
+    if (!vk) {
+      const std::string key = str("key");
+      if (key.size() == 1) {
+        SHORT mapped = VkKeyScanA(key[0]);
+        if (mapped != -1) vk = LOBYTE(mapped);
+      }
+    }
     SendVk(vk, down);
     result->Success();
     return;

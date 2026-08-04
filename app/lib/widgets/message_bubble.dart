@@ -12,6 +12,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../models.dart';
 import '../theme.dart';
+import '../util/agent_debug.dart';
 import '../util/ai_turn.dart';
 import '../util/app_clipboard.dart';
 import '../util/call_history.dart';
@@ -98,6 +99,7 @@ class MessageBubble extends StatelessWidget {
     this.onEdit,
     this.onDelete,
     this.onSeenBy,
+    this.fontScale = 1.0,
   });
 
   final ChatMessage message;
@@ -108,6 +110,10 @@ class MessageBubble extends StatelessWidget {
   final bool highlighted;
   final bool readByPeer;
   final String? seenByLabel;
+
+  /// Scales the message content text (body, captions, reply quote, big emoji)
+  /// around the 15px default. Set from [PrivetState.chatFontSize].
+  final double fontScale;
 
   /// True when a shared task item was created from this message.
   final bool addedToTask;
@@ -247,6 +253,7 @@ class MessageBubble extends StatelessWidget {
                 else
                   _LinkifiedText(
                     text: answer,
+                    fontScale: fontScale,
                     onReply: onReply == null
                         ? null
                         : (selected) =>
@@ -355,7 +362,7 @@ class MessageBubble extends StatelessWidget {
                   ),
                 ],
                 if (message.replyTo != null) ...[
-                  _ReplyQuote(reply: message.replyTo!),
+                  _ReplyQuote(reply: message.replyTo!, fontScale: fontScale),
                   const SizedBox(height: 6),
                 ],
                 Align(
@@ -942,6 +949,7 @@ class MessageBubble extends StatelessWidget {
         items: items,
         mediaBase: mediaBase,
         caption: message.body,
+        fontScale: fontScale,
         onReplySelection: onReply == null ? null : replyWithSelection,
         onForwardSelection: onForward == null ? null : forwardWithSelection,
       );
@@ -952,16 +960,18 @@ class MessageBubble extends StatelessWidget {
         mediaBase: mediaBase,
         caption: message.body,
         voiceLabel: message.kind == 'voice',
+        fontScale: fontScale,
         onReplySelection: onReply == null ? null : replyWithSelection,
         onForwardSelection: onForward == null ? null : forwardWithSelection,
       );
     }
     final onlyEmoji = _emojiOnlyPayload(message.body);
     if (onlyEmoji != null) {
-      return _BigEmoji(text: onlyEmoji);
+      return _BigEmoji(text: onlyEmoji, fontScale: fontScale);
     }
     return _LinkifiedText(
       text: message.body,
+      fontScale: fontScale,
       onReply: onReply == null ? null : replyWithSelection,
       onForward: onForward == null ? null : forwardWithSelection,
     );
@@ -1064,9 +1074,10 @@ String? _emojiOnlyPayload(String raw) {
 }
 
 class _BigEmoji extends StatefulWidget {
-  const _BigEmoji({required this.text});
+  const _BigEmoji({required this.text, this.fontScale = 1.0});
 
   final String text;
+  final double fontScale;
 
   @override
   State<_BigEmoji> createState() => _BigEmojiState();
@@ -1116,7 +1127,8 @@ class _BigEmojiState extends State<_BigEmoji>
 
   @override
   Widget build(BuildContext context) {
-    final size = widget.text.characters.length == 1 ? 64.0 : 48.0;
+    final base = widget.text.characters.length == 1 ? 64.0 : 48.0;
+    final size = base * widget.fontScale;
     final scale = _scale;
     if (privetLowResource || scale == null) {
       return PrivetEmoji(widget.text, size: size, animate: false);
@@ -1133,6 +1145,7 @@ class _AlbumBody extends StatelessWidget {
     required this.items,
     required this.mediaBase,
     required this.caption,
+    this.fontScale = 1.0,
     this.onReplySelection,
     this.onForwardSelection,
   });
@@ -1140,6 +1153,7 @@ class _AlbumBody extends StatelessWidget {
   final List<MediaAttachment> items;
   final String mediaBase;
   final String caption;
+  final double fontScale;
   final ValueChanged<String>? onReplySelection;
   final ValueChanged<String>? onForwardSelection;
 
@@ -1215,6 +1229,7 @@ class _AlbumBody extends StatelessWidget {
           const SizedBox(height: 8),
           _LinkifiedText(
             text: caption,
+            fontScale: fontScale,
             onReply: onReplySelection,
             onForward: onForwardSelection,
           ),
@@ -1230,6 +1245,7 @@ class _SingleMediaBody extends StatelessWidget {
     required this.mediaBase,
     required this.caption,
     required this.voiceLabel,
+    this.fontScale = 1.0,
     this.onReplySelection,
     this.onForwardSelection,
   });
@@ -1238,6 +1254,7 @@ class _SingleMediaBody extends StatelessWidget {
   final String mediaBase;
   final String caption;
   final bool voiceLabel;
+  final double fontScale;
   final ValueChanged<String>? onReplySelection;
   final ValueChanged<String>? onForwardSelection;
 
@@ -1261,6 +1278,7 @@ class _SingleMediaBody extends StatelessWidget {
 
   Widget _captionText() => _LinkifiedText(
     text: caption,
+    fontScale: fontScale,
     onReply: onReplySelection,
     onForward: onForwardSelection,
   );
@@ -1282,6 +1300,19 @@ class _SingleMediaBody extends StatelessWidget {
                 child: MouseRegion(
                   cursor: SystemMouseCursors.click,
                   hitTestBehavior: HitTestBehavior.opaque,
+                  // #region agent log
+                  onEnter: (_) {
+                    agentDebugLog(
+                      hypothesisId: 'H5',
+                      location: 'message_bubble.dart:_SingleMediaBody(image)',
+                      message: 'hover image',
+                      data: {
+                        'selectActive': privetWebSelectHoverActive(),
+                        'bodyCursor': privetWebBodyCursor(),
+                      },
+                    );
+                  },
+                  // #endregion
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onTap: () => showImageLightbox(
@@ -1362,30 +1393,38 @@ class _SingleMediaBody extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ExcludeSemantics(
-                  child: Icon(
-                    Icons.attach_file_rounded,
-                    color: PrivetTheme.signal,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ExcludeSemantics(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 200),
-                    child: Text(
-                      item.fileName ?? caption,
-                      style: const TextStyle(fontSize: 14, height: 1.3),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
+            MouseRegion(
+              cursor: SystemMouseCursors.click,
+              hitTestBehavior: HitTestBehavior.opaque,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => downloadMedia(_url, filename: _downloadName),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ExcludeSemantics(
+                      child: Icon(
+                        Icons.attach_file_rounded,
+                        color: PrivetTheme.signal,
+                      ),
                     ),
-                  ),
+                    const SizedBox(width: 8),
+                    ExcludeSemantics(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 200),
+                        child: Text(
+                          item.fileName ?? caption,
+                          style: const TextStyle(fontSize: 14, height: 1.3),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    _DownloadChip(url: _url, filename: _downloadName),
+                  ],
                 ),
-                const SizedBox(width: 6),
-                _DownloadChip(url: _url, filename: _downloadName),
-              ],
+              ),
             ),
             if (caption.isNotEmpty && item.kind != 'file') ...[
               const SizedBox(height: 6),
@@ -1436,6 +1475,50 @@ class _AttachmentTile extends StatelessWidget {
     };
   }
 
+  Widget _clickableFileTile({required IconData icon, required String label}) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      hitTestBehavior: HitTestBehavior.opaque,
+      // #region agent log
+      onEnter: (_) {
+        agentDebugLog(
+          hypothesisId: 'H5',
+          location: 'message_bubble.dart:_AttachmentTile(file tile)',
+          message: 'hover file tile',
+          data: {
+            'selectActive': privetWebSelectHoverActive(),
+            'bodyCursor': privetWebBodyCursor(),
+          },
+        );
+      },
+      // #endregion
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => downloadMedia(url, filename: _downloadName),
+        child: ColoredBox(
+          color: PrivetTheme.ink,
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Row(
+              children: [
+                Icon(icon, color: PrivetTheme.signal),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    label,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     Widget content;
@@ -1479,85 +1562,17 @@ class _AttachmentTile extends StatelessWidget {
           ),
         );
       case 'video':
-        content = compact
-            ? ColoredBox(
-                color: PrivetTheme.ink,
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.play_circle_fill_rounded,
-                        color: PrivetTheme.signal,
-                        size: 28,
-                      ),
-                      if (item.fileName != null)
-                        Padding(
-                          padding: const EdgeInsets.only(
-                            top: 4,
-                            left: 4,
-                            right: 4,
-                          ),
-                          child: Text(
-                            item.fileName!,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: PrivetTheme.mist,
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              )
-            : InlineVideoPlayer(url: url, width: width, height: height);
+        content = InlineVideoPlayer(url: url, width: width, height: height);
       case 'audio':
       case 'voice':
-        content = ColoredBox(
-          color: PrivetTheme.ink,
-          child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: Row(
-              children: [
-                Icon(Icons.audiotrack_rounded, color: PrivetTheme.signal),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    item.fileName ?? 'Audio',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                ),
-              ],
-            ),
-          ),
+        content = _clickableFileTile(
+          icon: Icons.audiotrack_rounded,
+          label: item.fileName ?? 'Audio',
         );
       default:
-        content = ColoredBox(
-          color: PrivetTheme.ink,
-          child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: Row(
-              children: [
-                Icon(
-                  Icons.insert_drive_file_rounded,
-                  color: PrivetTheme.signal,
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    item.fileName ?? 'File',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                ),
-              ],
-            ),
-          ),
+        content = _clickableFileTile(
+          icon: Icons.insert_drive_file_rounded,
+          label: item.fileName ?? 'File',
         );
     }
 
@@ -1927,9 +1942,10 @@ class _MessageStatusNote extends StatelessWidget {
 }
 
 class _ReplyQuote extends StatelessWidget {
-  const _ReplyQuote({required this.reply});
+  const _ReplyQuote({required this.reply, this.fontScale = 1.0});
 
   final ReplyPreview reply;
+  final double fontScale;
 
   @override
   Widget build(BuildContext context) {
@@ -1950,7 +1966,7 @@ class _ReplyQuote extends StatelessWidget {
           Text(
             name,
             style: GoogleFonts.syne(
-              fontSize: 11,
+              fontSize: 11 * fontScale,
               fontWeight: FontWeight.w700,
               color: PrivetTheme.signal,
             ),
@@ -1961,7 +1977,7 @@ class _ReplyQuote extends StatelessWidget {
             reply.body,
             maxLines: 2,
             style: TextStyle(
-              fontSize: 12,
+              fontSize: 12 * fontScale,
               height: 1.25,
               color: PrivetTheme.mist.withValues(alpha: 0.95),
             ),
@@ -1984,11 +2000,19 @@ Future<void> _openExternal(String url) async {
 }
 
 class _LinkifiedText extends StatefulWidget {
-  const _LinkifiedText({required this.text, this.onReply, this.onForward});
+  const _LinkifiedText({
+    required this.text,
+    this.onReply,
+    this.onForward,
+    this.fontScale = 1.0,
+  });
 
   final String text;
   final ValueChanged<String>? onReply;
   final ValueChanged<String>? onForward;
+
+  /// Multiplier around the 15px default body size (see [PrivetState.chatFontSize]).
+  final double fontScale;
 
   @override
   State<_LinkifiedText> createState() => _LinkifiedTextState();
@@ -2003,11 +2027,13 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
   TextSpan? _cachedSpan;
   String? _cachedSpanText;
   bool _cachedWithRecognizers = false;
+  double? _cachedSpanScale;
 
   // Web: TextPainter-owned selection (never SelectableText).
   TextSelection _webSel = const TextSelection.collapsed(offset: -1);
   TextPainter? _webPainter;
   double _webMaxWidth = 0;
+  double _webPainterScale = 1.0;
   final _WebSelRepaint _webSelRepaint = _WebSelRepaint();
 
   // Web pointer-driven select (Listener — does not fight ListView pan arena).
@@ -2218,9 +2244,12 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     overlay.insert(_toolbar!);
   }
 
-  static TextStyle _baseStyleFor({required bool hovering}) => TextStyle(
+  static TextStyle _baseStyleFor({
+    required bool hovering,
+    required double scale,
+  }) => TextStyle(
     height: 1.35,
-    fontSize: 15,
+    fontSize: 15 * scale,
     color: hovering ? PrivetTheme.signal : PrivetTheme.paper,
   );
 
@@ -2232,6 +2261,7 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     // Hover recolors — don't use the recognizer cache for hover frames.
     if (!hovering &&
         _cachedSpanText == text &&
+        _cachedSpanScale == widget.fontScale &&
         _cachedSpan != null &&
         _cachedWithRecognizers == withRecognizers) {
       return _cachedSpan!;
@@ -2241,12 +2271,16 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     }
     _linkRecognizers.clear();
 
-    final base = _baseStyleFor(hovering: hovering);
+    final base = _baseStyleFor(
+      hovering: hovering,
+      scale: widget.fontScale,
+    );
     final matches = _urlPattern.allMatches(text).toList();
     if (matches.isEmpty) {
       final span = TextSpan(text: text, style: base);
       if (!hovering) {
         _cachedSpanText = text;
+        _cachedSpanScale = widget.fontScale;
         _cachedWithRecognizers = withRecognizers;
         _cachedSpan = span;
       }
@@ -2274,7 +2308,7 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
             decoration: TextDecoration.underline,
             decorationColor: PrivetTheme.signal.withValues(alpha: 0.7),
             height: 1.35,
-            fontSize: 15,
+            fontSize: 15 * widget.fontScale,
           ),
           recognizer: recognizer,
         ),
@@ -2292,6 +2326,7 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     final span = TextSpan(style: base, children: spans);
     if (!hovering) {
       _cachedSpanText = text;
+      _cachedSpanScale = widget.fontScale;
       _cachedWithRecognizers = withRecognizers;
       _cachedSpan = span;
     }
@@ -2302,6 +2337,8 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     if (_webPainter != null &&
         _webMaxWidth == maxWidth &&
         _cachedSpanText == widget.text &&
+        _cachedSpanScale == widget.fontScale &&
+        _webPainterScale == widget.fontScale &&
         !_cachedWithRecognizers &&
         _webPainterHover == hovering) {
       return;
@@ -2309,6 +2346,7 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     _webPainter?.dispose();
     _webMaxWidth = maxWidth;
     _webPainterHover = hovering;
+    _webPainterScale = widget.fontScale;
     _webPainter = TextPainter(
       text: _spanFor(widget.text, withRecognizers: false, hovering: hovering),
       textDirection: ui.TextDirection.ltr,

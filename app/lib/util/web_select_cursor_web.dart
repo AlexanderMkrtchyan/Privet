@@ -61,6 +61,12 @@ flt-semantics[style*="cursor: all-scroll"] {
 flt-semantics[style*="cursor: text"] {
   cursor: ${_ibeamCursor(_accent)} !important;
 }
+/* Pointer-cursor elements (images, files, buttons, calendar cells) must win
+   over the body-level I-beam set with !important for message selection. */
+[style*="cursor: pointer"],
+flt-semantics[style*="cursor: pointer"] {
+  cursor: pointer !important;
+}
 ''';
   if (existing is html.StyleElement) {
     existing.text = css;
@@ -138,4 +144,15 @@ void _setBodyCursor(String? value) {
   } else {
     body.style.removeProperty('cursor');
   }
+}
+
+/// Debug: is the message-select I-beam body cursor active right now?
+bool privetWebSelectHoverActive() => _messageSelectHovering;
+
+/// Debug: current `body.style.cursor` value.
+String privetWebBodyCursor() {
+  final body = html.document.body;
+  if (body == null) return '(no-body)';
+  final v = body.style.cursor;
+  return (v == null || v.isEmpty) ? '(unset)' : v;
 }

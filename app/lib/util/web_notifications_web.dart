@@ -79,6 +79,7 @@ void showWebNotification({
   required String body,
   String? tag,
   void Function()? onClick,
+  bool isCall = false,
 }) {
   if (!notificationsGranted) return;
   try {

@@ -16,6 +16,7 @@ server/.env
 # Flutter / Dart
 app/.dart_tool/
 app/build/
+app/android/build/
 app/.flutter-plugins-dependencies
 app/.packages
 app/.pub-cache/
@@ -28,6 +29,7 @@ server/public/downloads/*.deb
 server/public/downloads/*.exe
 server/public/downloads/*.msi
 server/public/downloads/*.zip
+server/public/downloads/*.apk
 server/public/BUILD_STAMP.txt
 server/public/main.*.js
 dist/

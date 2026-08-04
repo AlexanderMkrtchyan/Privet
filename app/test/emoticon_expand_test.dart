@@ -49,5 +49,25 @@ void main() {
       expect(tryExpandEmoticonAtCursor('http://', 7), isNull);
       expect(tryExpandEmoticonAtCursor(':/', 2), isNull);
     });
+
+    test('does not turn a time like 11:3 into :3', () {
+      expect(tryExpandEmoticonAtCursor('11:3', 4), isNull);
+      expect(tryExpandEmoticonAtCursor('11:34', 4), isNull);
+      expect(tryExpandEmoticonAtCursor('09:3', 4), isNull);
+      // Deliberate :3 still expands (space before it).
+      expect(tryExpandEmoticonAtCursor('hey :3', 6)?.emoji, '😊');
+      expect(tryExpandEmoticonAtCursor(':3', 2)?.emoji, '😊');
+    });
+
+    test('does not expand time on send', () {
+      expect(expandEmoticons('11:34'), '11:34');
+      expect(expandEmoticons('at 12:30 sharp'), 'at 12:30 sharp');
+      expect(expandEmoticons('9:3'), '9:3');
+      // Deliberate emoticons still expand on send.
+      expect(expandEmoticons('hey :D'), 'hey 😃');
+      expect(expandEmoticons('hi :)'), 'hi 🙂');
+      expect(expandEmoticons('ok :3'), 'ok 😊');
+      expect(expandEmoticons(':3'), '😊');
+    });
   });
 }

@@ -5,6 +5,7 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_windows
   emoji_picker_flutter
+  firebase_core
   flutter_webrtc
   record_windows
   screen_retriever_windows

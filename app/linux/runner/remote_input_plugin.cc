@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <unordered_set>
@@ -19,6 +20,34 @@
 namespace {
 
 constexpr const char* kChannelName = "privet/remote_input";
+
+// Debug-mode instrumentation: append NDJSON to the shared debug log (this dev
+// machine) and to a host-local scratch file (any machine), plus stderr.
+void AgentLog(const char* hypothesis_id, const char* location,
+              const char* message, const std::string& data_json) {
+  gint64 micros = g_get_real_time();
+  long long ms = micros / 1000;
+  char line[2048];
+  int n = snprintf(
+      line, sizeof(line),
+      "{\"sessionId\":\"7d3d83\",\"id\":\"log_%lld\",\"timestamp\":%lld,"
+      "\"location\":\"%s\",\"message\":\"%s\",\"data\":{%s},"
+      "\"hypothesisId\":\"%s\"}\n",
+      ms, ms, location, message, data_json.c_str(), hypothesis_id);
+  if (n <= 0) return;
+  const char* paths[] = {
+      "/home/alex/Privet/.cursor/debug-7d3d83.log",
+      "/tmp/privet_remote_input_debug.log",
+  };
+  for (const char* path : paths) {
+    FILE* f = fopen(path, "a");
+    if (f) {
+      fwrite(line, 1, static_cast<size_t>(n), f);
+      fclose(f);
+    }
+  }
+  fprintf(stderr, "%s", line);
+}
 
 enum class Backend { Unavailable, X11, Portal };
 
@@ -484,6 +513,8 @@ void ProbeBackend() {
         XTestQueryExtension(dpy, &event_base, &error_base, &major, &minor)) {
       g_backend = Backend::X11;
       g_detail.clear();
+      AgentLog("H4", "remote_input_plugin.cc:ProbeBackend", "backend probe",
+               "\"backend\":\"x11\",\"detail\":\"XTest available\"");
       return;
     }
 #endif
@@ -497,6 +528,8 @@ void ProbeBackend() {
       g_detail =
           "Wayland host control uses xdg-desktop-portal RemoteDesktop "
           "(permission prompt on first grant).";
+      AgentLog("H4", "remote_input_plugin.cc:ProbeBackend", "backend probe",
+               "\"backend\":\"portal\",\"detail\":\"xdg-desktop-portal\"");
       return;
     }
     g_backend = Backend::Unavailable;
@@ -508,6 +541,8 @@ void ProbeBackend() {
   }
   g_backend = Backend::Unavailable;
   g_detail = "Unsupported display server for remote input.";
+  AgentLog("H4", "remote_input_plugin.cc:ProbeBackend", "backend probe",
+           "\"backend\":\"none\",\"detail\":\"unsupported display\"");
 }
 
 FlMethodResponse* OnProbe() {
@@ -631,12 +666,40 @@ FlMethodResponse* OnMethod(FlMethodCall* method_call) {
 
   if (strcmp(name, "keyEvent") == 0) {
     const std::string code = ArgString(args, "code");
+    const std::string key = ArgString(args, "key");
     const bool down = ArgBool(args, "down", false);
     guint keyval = KeyvalFromCode(code);
+    // Fallback: if the key-code map missed (e.g. "Space" on a non-US layout
+    // or an old build without the entry), inject the literal character the
+    // controller reported. Space arrives as a single space character.
+    if (!keyval) {
+      if (key.size() == 1) {
+        keyval = gdk_unicode_to_keyval(static_cast<guint>(
+            static_cast<unsigned char>(key[0])));
+      }
+    }
+    bool injected = false;
     if (g_backend == Backend::X11)
-      X11Key(keyval, down);
+      injected = X11Key(keyval, down);
     else
-      PortalKey(keyval, down);
+      injected = PortalKey(keyval, down);
+    // #region agent log
+    {
+      std::string backend = g_backend == Backend::X11
+                                ? "x11"
+                                : (g_backend == Backend::Portal ? "portal"
+                                                                : "none");
+      char buf[1024];
+      snprintf(buf, sizeof(buf),
+               "\"code\":\"%s\",\"key\":\"%s\",\"keyval\":%u,"
+               "\"keyvalHex\":\"0x%x\",\"down\":%s,\"backend\":\"%s\","
+               "\"injected\":%s",
+               code.c_str(), key.c_str(), keyval, keyval,
+               down ? "true" : "false", backend.c_str(),
+               injected ? "true" : "false");
+      AgentLog("H4", "remote_input_plugin.cc:keyEvent", "plugin keyEvent", buf);
+    }
+    // #endregion
     return FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
   }
 
@@ -661,17 +724,49 @@ FlMethodResponse* OnMethod(FlMethodCall* method_call) {
 
   if (strcmp(name, "getClipboardImagePng") == 0) {
     GtkClipboard* clip = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
-    if (clip == nullptr || !gtk_clipboard_wait_is_image_available(clip)) {
+    if (clip == nullptr) {
       return FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
     }
-    GdkPixbuf* pixbuf = gtk_clipboard_wait_for_image(clip);
-    if (pixbuf == nullptr) {
-      return FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
-    }
+
+    GdkPixbuf* pixbuf = nullptr;
     gchar* buffer = nullptr;
     gsize buffer_size = 0;
     GError* error = nullptr;
-    const gboolean ok = gdk_pixbuf_save_to_buffer(
+    gboolean ok = FALSE;
+
+    // 1) Standard path: GTK detects the clipboard as an image.
+    if (gtk_clipboard_wait_is_image_available(clip)) {
+      pixbuf = gtk_clipboard_wait_for_image(clip);
+    }
+
+    // 2) Fallback: some screenshot tools or clipboard managers use MIME
+    //    targets that GTK's wait_is_image_available does not recognize.
+    //    Try to load raw image/png bytes from the clipboard directly.
+    if (pixbuf == nullptr) {
+      GtkSelectionData* sel =
+          gtk_clipboard_wait_for_contents(clip, gdk_atom_intern("image/png", FALSE));
+      if (sel != nullptr) {
+        const guchar* data = gtk_selection_data_get_data(sel);
+        gint len = gtk_selection_data_get_length(sel);
+        if (data != nullptr && len > 0) {
+          GInputStream* stream = g_memory_input_stream_new_from_data(data, len, nullptr);
+          pixbuf = gdk_pixbuf_new_from_stream(stream, nullptr, nullptr);
+          g_object_unref(stream);
+        }
+        gtk_selection_data_free(sel);
+      }
+    }
+
+    // 3) Try a raw GDK pixbuf get even when wait_is_image_available was false.
+    if (pixbuf == nullptr) {
+      pixbuf = gtk_clipboard_wait_for_image(clip);
+    }
+
+    if (pixbuf == nullptr) {
+      return FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+    }
+
+    ok = gdk_pixbuf_save_to_buffer(
         pixbuf, &buffer, &buffer_size, "png", &error, nullptr);
     g_object_unref(pixbuf);
     if (!ok || buffer == nullptr || buffer_size == 0) {
