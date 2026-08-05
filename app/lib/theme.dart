@@ -3,6 +3,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import 'util/low_resource.dart';
 import 'util/web_select_cursor.dart';
+import 'widgets/privet_splash.dart';
 
 /// A named accent the user can pick from the Appearance settings. [seed] is a
 /// hue reference; the actual accent used per theme mode is derived from it so
@@ -203,7 +204,14 @@ class PrivetTheme {
       useMaterial3: true,
       brightness: p.brightness,
       scaffoldBackgroundColor: p.ink,
-      splashFactory: low ? NoSplash.splashFactory : InkSplash.splashFactory,
+      // Privet's wave splash: a soft accent ring + glow that expands with an
+      // ease-out curve instead of the stock ~225 ms solid-disk pop. Low-RAM /
+      // software-rasterized boxes keep the no-splash mode.
+      splashFactory: low ? NoSplash.splashFactory : PrivetSplash.splashFactory,
+      splashColor: p.signal.withValues(alpha: 0.42),
+      highlightColor: p.signal.withValues(alpha: 0.10),
+      hoverColor: p.signal.withValues(alpha: 0.08),
+      focusColor: p.signal.withValues(alpha: 0.10),
       colorScheme: ColorScheme(
         brightness: p.brightness,
         primary: p.signal,
