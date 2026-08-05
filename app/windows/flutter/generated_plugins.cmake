@@ -7,6 +7,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   emoji_picker_flutter
   firebase_core
   flutter_webrtc
+  fvp
   record_windows
   screen_retriever_windows
   tray_manager

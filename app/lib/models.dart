@@ -360,14 +360,10 @@ class ConversationTasks {
   List<TaskItem> get rootItems =>
       items.where((i) => !i.isSubtask).toList();
 
-  /// Open root tasks (server filters; client-side guard for incomplete groups).
-  List<TaskItem> get activeItems => rootItems.where((i) {
-        if (i.doneConfirmed) return false;
-        if (!i.done) return true;
-        // Parent checked off but subtasks may still be open — server keeps it active.
-        final subs = subtasksOf(i.id);
-        return subs.any((s) => !s.done);
-      }).toList();
+  /// Root tasks still on the board — everything not confirmed done.
+  /// Tasks marked done stay visible until the creator approves them.
+  List<TaskItem> get activeItems =>
+      rootItems.where((i) => !i.doneConfirmed).toList();
 
   /// Undone subtasks only (for remaining-work counts).
   List<TaskItem> activeSubtasksOf(String parentId) => items
@@ -401,11 +397,11 @@ class ConversationTasks {
     return (done: parent.done ? 1 : 0, total: 1);
   }
 
-  /// Board progress: only counts remaining (undone) work items.
+  /// Board total: work units across every active (non-confirmed) root.
   int get total {
     var n = 0;
     for (final t in activeItems) {
-      final kids = activeSubtasksOf(t.id);
+      final kids = subtasksOf(t.id);
       n += kids.isEmpty ? 1 : kids.length;
     }
     return n;
@@ -414,13 +410,11 @@ class ConversationTasks {
   int get doneCount {
     var n = 0;
     for (final t in activeItems) {
-      final total = t.subtaskTotal ?? 0;
-      final done = t.subtaskDone ?? 0;
-      if (total > 0) {
-        n += done;
+      final kids = subtasksOf(t.id);
+      if (kids.isEmpty) {
+        if (t.done) n += 1;
       } else {
-        final kids = activeSubtasksOf(t.id);
-        if (kids.isEmpty && t.done) n++;
+        n += kids.where((s) => s.done).length;
       }
     }
     return n;
@@ -428,11 +422,8 @@ class ConversationTasks {
 
   bool get isComplete => total == 0;
   double get progress {
-    final remaining = total;
-    final completed = doneCount;
-    final all = remaining + completed;
-    if (all == 0) return 1.0;
-    return completed / all;
+    if (total == 0) return 1.0;
+    return doneCount / total;
   }
 
   factory ConversationTasks.fromJsonList(List<dynamic> list) =>
@@ -542,6 +533,28 @@ class PaymentReminder {
     if (a == null) return currencySymbol;
     return a % 1 == 0 ? '$currencySymbol${a.toInt()}' : '$currencySymbol${a.toStringAsFixed(2)}';
   }
+
+  /// Amount squeezed into the pinned header chip — at most 4 digits, using
+  /// k/M suffixes so even large sums fit the compact pill.
+  String get compactAmount {
+    final a = amountDouble;
+    final sym = currencySymbol;
+    if (a == null) return sym;
+    final abs = a.abs();
+    if (abs >= 1000000) {
+      final m = (a / 1000000).toStringAsFixed(1);
+      return '$sym${_trimZero(m)}M';
+    }
+    if (abs >= 10000) {
+      final k = (a / 1000).toStringAsFixed(1);
+      return '$sym${_trimZero(k)}k';
+    }
+    if (abs >= 100) return '$sym${a.toInt()}';
+    return a % 1 == 0 ? '$sym${a.toInt()}' : '$sym${a.toStringAsFixed(2)}';
+  }
+
+  String _trimZero(String s) =>
+      s.endsWith('.0') ? s.substring(0, s.length - 2) : s;
 
   bool get isOverdue {
     if (paid) return false;

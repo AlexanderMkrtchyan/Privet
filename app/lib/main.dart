@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
+import 'package:fvp/fvp.dart' show registerWith;
 import 'package:google_fonts/google_fonts.dart';
 
 import 'screens/login_screen.dart';
@@ -22,6 +23,23 @@ import 'util/web_bootstrap.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Desktop video: fvp registers a video_player backend that bundles
+  // libmdk/FFmpeg, so Linux & Windows play videos inline instead of opening
+  // the browser. Web keeps the official <video> backend (fvp is a no-op there).
+  //
+  // Linux decoder list: fvp's default tries VAAPI first. On hybrid GPU boxes
+  // (Intel iGPU + NVIDIA dGPU) VAAPI decodes on the iGPU but its frames come
+  // out black on the dGPU GL context, and because VAAPI "opens" successfully
+  // FFmpeg never falls back — so videos show black with audio only. Force
+  // CUDA/VDPAU (dGPU) then software FFmpeg. Windows keeps fvp's default
+  // MFT/D3D11/DXVA decoders.
+  if (!kIsWeb) {
+    registerWith(options: {
+      'platforms': ['windows', 'linux'],
+      if (defaultTargetPlatform == TargetPlatform.linux)
+        'video.decoders': const ['CUDA', 'VDPAU', 'FFmpeg', 'dav1d'],
+    });
+  }
   if (MobilePushConfig.isConfigured) {
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   }

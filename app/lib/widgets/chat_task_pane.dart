@@ -16,9 +16,74 @@ import 'web_attach_button.dart';
 /// Shared outer height for chat header chips (tasks, reminders, media, calls).
 const double kChatHeaderChipHeight = 43;
 
-/// Compact height for pinned reminder / task header chips — roughly half of
-/// the standard control buttons so up to three pins fit in the chat header.
-const double kChatHeaderChipCompactHeight = 24;
+/// Wraps a pinned header chip and reveals a close (unpin) button at its top
+/// right corner while hovered.
+class _HeaderChipHoverClose extends StatefulWidget {
+  const _HeaderChipHoverClose({required this.onClose, required this.child});
+
+  final VoidCallback? onClose;
+  final Widget child;
+
+  @override
+  State<_HeaderChipHoverClose> createState() => _HeaderChipHoverCloseState();
+}
+
+class _HeaderChipHoverCloseState extends State<_HeaderChipHoverClose> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final onClose = widget.onClose;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          widget.child,
+          if (_hovering && onClose != null)
+            Positioned(
+              top: -6,
+              right: -6,
+              child: Semantics(
+                button: true,
+                label: 'Unpin',
+                child: Tooltip(
+                  message: 'Unpin',
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: onClose,
+                    child: Container(
+                      width: 18,
+                      height: 18,
+                      decoration: BoxDecoration(
+                        color: PrivetTheme.ink,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: PrivetTheme.line),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.35),
+                            blurRadius: 4,
+                            offset: const Offset(0, 1),
+                          ),
+                        ],
+                      ),
+                      child: Icon(
+                        Icons.close_rounded,
+                        size: 13,
+                        color: PrivetTheme.paper,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
 
 /// Compact header control: pinned task name + 3/10 progress (or "Task done").
 class TaskHeaderChip extends StatelessWidget {
@@ -44,10 +109,10 @@ class TaskHeaderChip extends StatelessWidget {
         ? board.progressFor(pinned)
         : (done: board.doneCount, total: board.total);
     final done = prog.total == 0 || prog.done >= prog.total;
-    final fill = done ? PrivetTheme.signal : const Color(0xFF3D9CF0);
+    final fill = done ? PrivetTheme.signal : PrivetTheme.signalDim;
     final track = done
         ? PrivetTheme.signal.withValues(alpha: 0.22)
-        : const Color(0xFF3D9CF0).withValues(alpha: 0.18);
+        : PrivetTheme.signalDim.withValues(alpha: 0.18);
     final name = (pinned?.body.trim().isNotEmpty == true)
         ? pinned!.body.trim()
         : 'Task';
@@ -61,108 +126,114 @@ class TaskHeaderChip extends StatelessWidget {
       label: done
           ? 'Task "$name" done. Open task board'
           : 'Task "$name": ${prog.done} of ${prog.total} done. Open task board',
-      child: Tooltip(
-      message: done
-          ? 'Open tasks — $name complete'
-          : 'Open tasks — $name · ${prog.done} of ${prog.total} done',
-      child: Material(
-        color: Colors.transparent,
-        child: Ink(
-          decoration: BoxDecoration(
-            color: active
-                ? PrivetTheme.panelElevated
-                : PrivetTheme.ink.withValues(alpha: 0.35),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: active
-                  ? fill.withValues(alpha: 0.7)
-                  : done
-                      ? PrivetTheme.signal.withValues(alpha: 0.45)
-                      : PrivetTheme.line,
-            ),
-          ),
-          child: InkWell(
-            onTap: onTap,
-            mouseCursor: SystemMouseCursors.click,
-            borderRadius: BorderRadius.circular(12),
-            hoverColor: PrivetTheme.paper.withValues(alpha: 0.06),
-            splashColor: PrivetTheme.paper.withValues(alpha: 0.08),
-            child: Container(
-              height: kChatHeaderChipCompactHeight,
-              constraints: const BoxConstraints(minWidth: 72, maxWidth: 170),
-              padding: const EdgeInsets.fromLTRB(10, 3, 6, 3),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        done
-                            ? Icons.check_circle_rounded
-                            : Icons.checklist_rtl_rounded,
-                        size: 12,
-                        color: fill,
-                      ),
-                      const SizedBox(width: 4),
-                      Flexible(
-                        child: Text(
-                          label,
-                          overflow: TextOverflow.ellipsis,
-                          style: GoogleFonts.syne(
-                            fontWeight: FontWeight.w700,
-                            fontSize: 11,
-                            color:
-                                done ? PrivetTheme.signal : PrivetTheme.paper,
-                          ),
-                        ),
-                      ),
-                      if (onUnpin != null)
-                        MouseRegion(
-                          cursor: SystemMouseCursors.click,
-                          child: GestureDetector(
-                            onTap: onUnpin,
-                            child: Padding(
-                              padding: const EdgeInsets.only(left: 3),
-                              child: Icon(
-                                Icons.push_pin_rounded,
-                                size: 11,
-                                color: fill,
+                      child: Tooltip(
+                        message: done
+                            ? 'Open tasks — $name complete'
+                            : 'Open tasks — $name · ${prog.done} of ${prog.total} done',
+                        child: _HeaderChipHoverClose(
+                          onClose: onUnpin,
+                          child: Material(
+                            color: Colors.transparent,
+                            child: Ink(
+                              decoration: BoxDecoration(
+                                color: active
+                                    ? PrivetTheme.panelElevated
+                                    : PrivetTheme.ink.withValues(alpha: 0.35),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: active
+                                      ? fill.withValues(alpha: 0.7)
+                                      : done
+                                          ? PrivetTheme.signal.withValues(
+                                              alpha: 0.45,
+                                            )
+                                          : PrivetTheme.line,
+                                ),
+                              ),
+                              child: InkWell(
+                                onTap: onTap,
+                                mouseCursor: SystemMouseCursors.click,
+                                borderRadius: BorderRadius.circular(12),
+                                hoverColor: PrivetTheme.paper.withValues(
+                                  alpha: 0.06,
+                                ),
+                                splashColor: PrivetTheme.paper.withValues(
+                                  alpha: 0.08,
+                                ),
+                                child: Container(
+                                  height: kChatHeaderChipHeight,
+                                  constraints: const BoxConstraints(
+                                    minWidth: 72,
+                                    maxWidth: 170,
+                                  ),
+                                  padding: const EdgeInsets.fromLTRB(10, 3, 6, 3),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                                    children: [
+                                      Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(
+                                            done
+                                                ? Icons.check_circle_rounded
+                                                : Icons.checklist_rtl_rounded,
+                                            size: 12,
+                                            color: fill,
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Flexible(
+                                            child: Text(
+                                              label,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: GoogleFonts.syne(
+                                                fontWeight: FontWeight.w700,
+                                                fontSize: 11,
+                                                color: done
+                                                    ? PrivetTheme.signal
+                                                    : PrivetTheme.paper,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 2),
+                                      IgnorePointer(
+                                        child: ExcludeSemantics(
+                                          child: ClipRRect(
+                                            borderRadius: BorderRadius.circular(
+                                              99,
+                                            ),
+                                            child: TweenAnimationBuilder<double>(
+                                              tween: Tween(
+                                                begin: 0,
+                                                end: progressValue,
+                                              ),
+                                              duration: const Duration(
+                                                milliseconds: 280,
+                                              ),
+                                              curve: Curves.easeOutCubic,
+                                              builder: (context, value, _) {
+                                                return LinearProgressIndicator(
+                                                  value: value.clamp(0.0, 1.0),
+                                                  minHeight: 3,
+                                                  backgroundColor: track,
+                                                  color: fill,
+                                                );
+                                              },
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
                               ),
                             ),
                           ),
                         ),
-                    ],
-                  ),
-                  const SizedBox(height: 2),
-                  IgnorePointer(
-                    child: ExcludeSemantics(
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(99),
-                        child: TweenAnimationBuilder<double>(
-                          tween: Tween(begin: 0, end: progressValue),
-                          duration: const Duration(milliseconds: 280),
-                          curve: Curves.easeOutCubic,
-                          builder: (context, value, _) {
-                            return LinearProgressIndicator(
-                              value: value.clamp(0.0, 1.0),
-                              minHeight: 3,
-                              backgroundColor: track,
-                              color: fill,
-                            );
-                          },
-                        ),
                       ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-      ),
     );
   }
 }
@@ -220,6 +291,15 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     if (pos.pixels >= pos.maxScrollExtent - 160) {
       _loadMoreTaskHistory();
     }
+  }
+
+  /// Only the task creator can approve a done task (server enforces it too).
+  bool _canApprove(TaskItem item) {
+    final uid = widget.state.user?.id;
+    return uid != null &&
+        item.createdBy?.id == uid &&
+        item.done &&
+        !item.doneConfirmed;
   }
 
   Future<void> _loadMoreTaskHistory() async {
@@ -475,7 +555,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                         const Text('Tasks'),
                         if (activeItems.isNotEmpty) ...[
                           const SizedBox(width: 6),
-                          _CountBadge(activeItems.length, color: const Color(0xFF3D9CF0)),
+                          _CountBadge(activeItems.length, color: PrivetTheme.signal),
                         ],
                       ],
                     ),
@@ -491,7 +571,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                             activePayments.length,
                             color: activePayments.any((r) => r.isOverdue)
                                 ? PrivetTheme.danger
-                                : const Color(0xFFF0A83D),
+                                : PrivetTheme.signal,
                           ),
                         ],
                       ],
@@ -508,7 +588,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                             activePlainReminders.length,
                             color: activePlainReminders.any((r) => r.isOverdue)
                                 ? PrivetTheme.danger
-                                : const Color(0xFF9B7EDE),
+                                : PrivetTheme.signal,
                           ),
                         ],
                       ],
@@ -565,7 +645,9 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                                       ? '${prog.done}/${prog.total}'
                                       : null,
                                   onToggle: () => widget.state.toggleTaskDone(e.value),
-                                  onConfirmDone: null,
+                                  onConfirmDone: _canApprove(e.value)
+                                      ? () => widget.state.confirmTaskDone(e.value)
+                                      : null,
                                   onSaveBody: (body) => widget.state.updateTaskBody(e.value, body),
                                   onDelete: () => widget.state.deleteTask(e.value),
                                   onRemoveAttachment: (url) =>
@@ -578,6 +660,9 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                                     parentId: e.value.id,
                                   ),
                                   onToggleSubtask: (sub) => widget.state.toggleTaskDone(sub),
+                                  onConfirmSubtask: (sub) => _canApprove(sub)
+                                      ? () => widget.state.confirmTaskDone(sub)
+                                      : null,
                                   onSaveSubtaskBody: (sub, body) =>
                                       widget.state.updateTaskBody(sub, body),
                                   onDeleteSubtask: (sub) => widget.state.deleteTask(sub),
@@ -614,6 +699,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                                 onPin: null,
                                 onAddSubtask: null,
                                 onToggleSubtask: null,
+                                onConfirmSubtask: null,
                                 onSaveSubtaskBody: null,
                                 onDeleteSubtask: null,
                                 onAttachSubtask: null,
@@ -815,7 +901,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
               // ── REMINDERS TAB ──────────────────────────────────────────────
               _ReminderKindTab(
                 emptyIcon: Icons.notifications_active_outlined,
-                emptyColor: const Color(0xFF9B7EDE),
+                emptyColor: PrivetTheme.signal,
                 emptyTitle: 'No reminders yet',
                 emptySubtitle: 'Set a date reminder for this chat.\nPin one to show it in the chat header.',
                 active: activePlainReminders,
@@ -877,9 +963,9 @@ class _PaymentWalletTab extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(12, 10, 12, 16),
             children: [
               if (active.isEmpty && history.isEmpty)
-                const _EmptyState(
+                _EmptyState(
                   icon: Icons.account_balance_wallet_outlined,
-                  color: Color(0xFFF0A83D),
+                  color: PrivetTheme.signal,
                   title: 'No payments yet',
                   subtitle: 'Add a payment, mark it paid, then log\nwhat you spent — beer, taxi, bills…',
                 )
@@ -1077,7 +1163,7 @@ class _PaymentWalletCardState extends State<_PaymentWalletCard> {
         ? PrivetTheme.signal
         : overdue
             ? PrivetTheme.danger
-            : const Color(0xFFF0A83D);
+            : PrivetTheme.signal;
     final remaining = payment.remainingCents;
     final spent = payment.spentCents;
 
@@ -1124,7 +1210,6 @@ class _PaymentWalletCardState extends State<_PaymentWalletCard> {
                               fontWeight: FontWeight.w700,
                               fontSize: 16,
                               color: paid ? PrivetTheme.mist : PrivetTheme.paper,
-                              decoration: paid ? TextDecoration.lineThrough : null,
                             ),
                           ),
                           const SizedBox(height: 2),
@@ -1617,7 +1702,7 @@ class _TaskProgressBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final done = board.isComplete;
-    final fill = done ? PrivetTheme.signal : const Color(0xFF3D9CF0);
+    final fill = done ? PrivetTheme.signal : PrivetTheme.signalDim;
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       Row(children: [
         Text(done ? 'Complete' : 'Progress', style: GoogleFonts.ibmPlexSans(fontSize: 12, fontWeight: FontWeight.w600, color: PrivetTheme.mist)),
@@ -1638,6 +1723,74 @@ class _TaskProgressBar extends StatelessWidget {
   }
 }
 
+/// Explicit edit dialog for a task's text (Save on the button or Enter).
+Future<void> _promptEditTaskText(
+  BuildContext context, {
+  required String title,
+  required String initial,
+  required ValueChanged<String> onSave,
+}) async {
+  final ctrl = TextEditingController(text: initial);
+  final saved = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: PrivetTheme.panelElevated,
+      title: Text(
+        title,
+        style: GoogleFonts.syne(
+          color: PrivetTheme.mist,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      content: SizedBox(
+        width: 340,
+        child: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLines: 3,
+          style: GoogleFonts.ibmPlexSans(
+            color: PrivetTheme.paper,
+            fontSize: 14,
+          ),
+          cursorColor: PrivetTheme.signal,
+          decoration: const InputDecoration(
+            hintText: 'Task text',
+            isDense: true,
+            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          ),
+          onSubmitted: (_) => Navigator.of(ctx).pop(true),
+        ),
+      ),
+      actions: [
+        MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(
+              'Cancel',
+              style: TextStyle(color: PrivetTheme.mist),
+            ),
+          ),
+        ),
+        MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: PrivetTheme.signal),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(
+              'Save',
+              style: TextStyle(color: PrivetTheme.onAccent),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+  final value = ctrl.text.trim();
+  ctrl.dispose();
+  if (saved == true && value.isNotEmpty) onSave(value);
+}
+
 class _TaskRow extends StatefulWidget {
   const _TaskRow({
     required this.number,
@@ -1655,6 +1808,7 @@ class _TaskRow extends StatefulWidget {
     required this.onPin,
     required this.onAddSubtask,
     required this.onToggleSubtask,
+    required this.onConfirmSubtask,
     required this.onSaveSubtaskBody,
     required this.onDeleteSubtask,
     required this.onAttachSubtask,
@@ -1676,6 +1830,8 @@ class _TaskRow extends StatefulWidget {
   final VoidCallback? onPin;
   final Future<void> Function(String body)? onAddSubtask;
   final ValueChanged<TaskItem>? onToggleSubtask;
+  /// Returns the confirm handler for a subtask, or null when it can't be approved.
+  final VoidCallback? Function(TaskItem item)? onConfirmSubtask;
   final void Function(TaskItem item, String body)? onSaveSubtaskBody;
   final ValueChanged<TaskItem>? onDeleteSubtask;
   final ValueChanged<TaskItem>? onAttachSubtask;
@@ -1781,6 +1937,18 @@ class _TaskRowState extends State<_TaskRow> {
     setState(() => _addingSub = false);
   }
 
+  void _openEditDialog() {
+    _promptEditTaskText(
+      context,
+      title: 'Edit task',
+      initial: _ctrl.text,
+      onSave: (next) {
+        widget.onSaveBody?.call(next);
+        _ctrl.text = next;
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final item = widget.item;
@@ -1808,16 +1976,27 @@ class _TaskRowState extends State<_TaskRow> {
                   if (widget.onToggle != null)
                     MouseRegion(
                       cursor: SystemMouseCursors.click,
-                      child: GestureDetector(
-                        onTap: widget.onToggle,
-                        child: Padding(
-                          padding: const EdgeInsets.only(top: 2),
-                          child: Icon(
-                            item.done
-                                ? Icons.check_box_rounded
-                                : Icons.check_box_outline_blank_rounded,
-                            color: item.done ? PrivetTheme.signal : PrivetTheme.mist,
-                            size: 22,
+                      child: Tooltip(
+                        message: item.doneConfirmed
+                            ? 'Done'
+                            : (item.done
+                                ? 'Done — awaiting approval · tap to reopen'
+                                : 'Mark done'),
+                        child: GestureDetector(
+                          onTap: widget.onToggle,
+                          child: Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: Icon(
+                              item.done
+                                  ? Icons.check_box_rounded
+                                  : Icons.check_box_outline_blank_rounded,
+                              color: item.doneConfirmed
+                                  ? PrivetTheme.signal
+                                  : (item.done
+                                      ? const Color(0xFFF0A83D)
+                                      : PrivetTheme.mist),
+                              size: 22,
+                            ),
                           ),
                         ),
                       ),
@@ -1846,10 +2025,10 @@ class _TaskRowState extends State<_TaskRow> {
                                       maxLines: null,
                                       style: GoogleFonts.ibmPlexSans(
                                         fontSize: 14,
-                                        decoration: item.done
+                                        decoration: item.doneConfirmed
                                             ? TextDecoration.lineThrough
                                             : null,
-                                        color: item.done
+                                        color: item.doneConfirmed
                                             ? PrivetTheme.mist
                                             : PrivetTheme.paper,
                                       ),
@@ -1880,22 +2059,43 @@ class _TaskRowState extends State<_TaskRow> {
                                   style: GoogleFonts.syne(
                                     fontSize: 12,
                                     fontWeight: FontWeight.w700,
-                                    color: const Color(0xFF3D9CF0),
+                                    color: PrivetTheme.signal,
                                   ),
                                 ),
                               ),
                           ],
                         ),
-                        if (item.createdBy != null || item.assignedTo != null)
+                        if (item.createdBy != null ||
+                            item.assignedTo != null ||
+                            (item.done && !item.doneConfirmed))
                           Padding(
                             padding: const EdgeInsets.only(top: 3),
-                            child: Text(
-                              [
-                                if (item.createdBy != null)
-                                  'by ${item.createdBy!.displayName}',
-                                if (item.assignedTo != null)
-                                  '→ ${item.assignedTo!.displayName}',
-                              ].join(' '),
+                            child: Text.rich(
+                              TextSpan(
+                                children: [
+                                  if (item.createdBy != null)
+                                    TextSpan(
+                                      text: 'by ${item.createdBy!.displayName}',
+                                    ),
+                                  if (item.createdBy != null &&
+                                      item.assignedTo != null)
+                                    const TextSpan(text: ' '),
+                                  if (item.assignedTo != null)
+                                    TextSpan(
+                                      text:
+                                          '→ ${item.assignedTo!.displayName}',
+                                    ),
+                                  if (item.done && !item.doneConfirmed)
+                                    TextSpan(
+                                      text: ' · awaiting approval',
+                                      style: GoogleFonts.ibmPlexSans(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                        color: const Color(0xFFF0A83D),
+                                      ),
+                                    ),
+                                ],
+                              ),
                               style: GoogleFonts.ibmPlexSans(
                                 fontSize: 11,
                                 color: PrivetTheme.mist.withValues(alpha: 0.55),
@@ -1938,6 +2138,17 @@ class _TaskRowState extends State<_TaskRow> {
                         visualDensity: VisualDensity.compact,
                       ),
                     ),
+                  if (widget.onSaveBody != null)
+                    MouseRegion(
+                      cursor: SystemMouseCursors.click,
+                      child: IconButton(
+                        tooltip: 'Edit text',
+                        onPressed: _openEditDialog,
+                        icon: const Icon(Icons.edit_outlined, size: 18),
+                        color: PrivetTheme.mist,
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
                   if (widget.onDelete != null)
                     MouseRegion(
                       cursor: SystemMouseCursors.click,
@@ -1947,6 +2158,55 @@ class _TaskRowState extends State<_TaskRow> {
                         icon: const Icon(Icons.close_rounded, size: 18),
                         color: PrivetTheme.mist,
                         visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                  if (widget.onConfirmDone != null)
+                    MouseRegion(
+                      cursor: SystemMouseCursors.click,
+                      child: Tooltip(
+                        message: 'Approve — cross out and move to history',
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(10),
+                          onTap: widget.onConfirmDone,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 5,
+                            ),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                color: PrivetTheme.signal.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: PrivetTheme.signal.withValues(alpha: 0.5),
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.done_all_rounded,
+                                    size: 14,
+                                    color: PrivetTheme.signal,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    'Approve',
+                                    style: GoogleFonts.syne(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                      color: PrivetTheme.signal,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                 ],
@@ -2042,6 +2302,9 @@ class _TaskRowState extends State<_TaskRow> {
                           onToggle: widget.onToggleSubtask == null
                               ? null
                               : () => widget.onToggleSubtask!(sub),
+                          onConfirm: widget.onConfirmSubtask == null
+                              ? null
+                              : widget.onConfirmSubtask!(sub),
                           onSaveBody: widget.onSaveSubtaskBody == null
                               ? null
                               : (body) =>
@@ -2162,6 +2425,7 @@ class _SubtaskRow extends StatefulWidget {
     required this.mediaBase,
     required this.editable,
     required this.onToggle,
+    required this.onConfirm,
     required this.onSaveBody,
     required this.onDelete,
     required this.onAttach,
@@ -2173,6 +2437,7 @@ class _SubtaskRow extends StatefulWidget {
   final String mediaBase;
   final bool editable;
   final VoidCallback? onToggle;
+  final VoidCallback? onConfirm;
   final ValueChanged<String>? onSaveBody;
   final VoidCallback? onDelete;
   final VoidCallback? onAttach;
@@ -2237,6 +2502,18 @@ class _SubtaskRowState extends State<_SubtaskRow> {
         name.endsWith('.webp');
   }
 
+  void _openEditDialog() {
+    _promptEditTaskText(
+      context,
+      title: 'Edit subtask',
+      initial: _ctrl.text,
+      onSave: (next) {
+        widget.onSaveBody?.call(next);
+        _ctrl.text = next;
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final item = widget.item;
@@ -2264,7 +2541,11 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                           ? Icons.check_box_rounded
                           : Icons.check_box_outline_blank_rounded,
                       size: 18,
-                      color: item.done ? PrivetTheme.signal : PrivetTheme.mist,
+                      color: item.doneConfirmed
+                          ? PrivetTheme.signal
+                          : (item.done
+                              ? const Color(0xFFF0A83D)
+                              : PrivetTheme.mist),
                     ),
                   ),
                 )
@@ -2282,9 +2563,12 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                         focusNode: _focus,
                         style: GoogleFonts.ibmPlexSans(
                           fontSize: 13,
-                          decoration:
-                              item.done ? TextDecoration.lineThrough : null,
-                          color: item.done ? PrivetTheme.mist : PrivetTheme.paper,
+                          decoration: item.doneConfirmed
+                              ? TextDecoration.lineThrough
+                              : null,
+                          color: item.doneConfirmed
+                              ? PrivetTheme.mist
+                              : PrivetTheme.paper,
                         ),
                         decoration: const InputDecoration(
                           isDense: true,
@@ -2317,6 +2601,20 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                     padding: EdgeInsets.zero,
                   ),
                 ),
+              if (widget.editable && widget.onSaveBody != null)
+                MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: IconButton(
+                    tooltip: 'Edit text',
+                    onPressed: _openEditDialog,
+                    icon: const Icon(Icons.edit_outlined, size: 16),
+                    color: PrivetTheme.mist,
+                    visualDensity: VisualDensity.compact,
+                    constraints:
+                        const BoxConstraints(minWidth: 28, minHeight: 28),
+                    padding: EdgeInsets.zero,
+                  ),
+                ),
               if (widget.onDelete != null)
                 MouseRegion(
                   cursor: SystemMouseCursors.click,
@@ -2327,6 +2625,52 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                     visualDensity: VisualDensity.compact,
                     constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
                     padding: EdgeInsets.zero,
+                  ),
+                ),
+              if (widget.editable && widget.onConfirm != null)
+                MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: Tooltip(
+                    message: 'Approve subtask',
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(8),
+                      onTap: widget.onConfirm,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 7,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: PrivetTheme.signal.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: PrivetTheme.signal.withValues(alpha: 0.5),
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.done_all_rounded,
+                                size: 12,
+                                color: PrivetTheme.signal,
+                              ),
+                              const SizedBox(width: 3),
+                              Text(
+                                'Approve',
+                                style: GoogleFonts.syne(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                  color: PrivetTheme.signal,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
             ],
@@ -2437,8 +2781,8 @@ class _ReminderRow extends StatelessWidget {
         : overdue
             ? PrivetTheme.danger
             : isPayment
-                ? const Color(0xFFF0A83D)
-                : const Color(0xFF9B7EDE);
+                ? PrivetTheme.signal
+                : PrivetTheme.signalDim;
 
     final IconData icon = paid
         ? Icons.check_circle_rounded
@@ -2473,7 +2817,7 @@ class _ReminderRow extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(title, style: GoogleFonts.syne(fontWeight: FontWeight.w700, fontSize: 14, color: paid ? PrivetTheme.mist : PrivetTheme.paper, decoration: paid ? TextDecoration.lineThrough : null)),
+                    Text(title, style: GoogleFonts.syne(fontWeight: FontWeight.w700, fontSize: 14, color: paid ? PrivetTheme.mist : PrivetTheme.paper, decoration: isPayment ? null : (paid ? TextDecoration.lineThrough : null))),
                     const SizedBox(height: 2),
                     Text(sub, style: GoogleFonts.ibmPlexSans(fontSize: 12, color: accent)),
                     if (reminder.note.isNotEmpty && isPayment)
@@ -2592,7 +2936,7 @@ class _NumberBadge extends StatelessWidget {
       width: size, height: size,
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: const Color(0xFF3D9CF0),
+        color: PrivetTheme.signal,
         borderRadius: BorderRadius.circular(size / 3),
         boxShadow: tiny ? null : [BoxShadow(color: Colors.black.withValues(alpha: 0.25), blurRadius: 4, offset: const Offset(0, 1))],
       ),
@@ -2627,8 +2971,8 @@ class ReminderHeaderChip extends StatelessWidget {
         : overdue
             ? PrivetTheme.danger
             : isPayment
-                ? const Color(0xFFF0A83D)
-                : const Color(0xFF9B7EDE);
+                ? PrivetTheme.signal
+                : PrivetTheme.signalDim;
 
     final String label = _buildLabel();
 
@@ -2639,70 +2983,66 @@ class ReminderHeaderChip extends StatelessWidget {
         message: paid
             ? 'Done — tap to open'
             : overdue
-                ? 'Overdue! — tap to open · pin to unpin'
+                ? 'Overdue! — tap to open'
                 : isPayment
                     ? '${reminder.formattedAmount} — tap to open wallet'
                     : 'Due ${reminder.dueDate} — tap to open',
-        child: Material(
-          color: Colors.transparent,
-          child: Ink(
-            decoration: BoxDecoration(
-              color: PrivetTheme.ink.withValues(alpha: 0.35),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: paid
-                    ? PrivetTheme.signal.withValues(alpha: 0.55)
-                    : overdue
-                        ? PrivetTheme.danger.withValues(alpha: 0.7)
-                        : fill.withValues(alpha: 0.55),
+        child: _HeaderChipHoverClose(
+          onClose: onUnpin,
+          child: Material(
+            color: Colors.transparent,
+            child: Ink(
+              decoration: BoxDecoration(
+                color: PrivetTheme.ink.withValues(alpha: 0.35),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: paid
+                      ? PrivetTheme.signal.withValues(alpha: 0.55)
+                      : overdue
+                          ? PrivetTheme.danger.withValues(alpha: 0.7)
+                          : fill.withValues(alpha: 0.55),
+                ),
               ),
-            ),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(12),
-              mouseCursor: SystemMouseCursors.click,
-              onTap: onTap,
-              child: Container(
-                height: kChatHeaderChipCompactHeight,
-                constraints: const BoxConstraints(minWidth: 64, maxWidth: 150),
-                padding: const EdgeInsets.fromLTRB(10, 0, 6, 0),
-                alignment: Alignment.centerLeft,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      paid
-                          ? Icons.check_circle_rounded
-                          : overdue
-                              ? Icons.error_rounded
-                              : isPayment
-                                  ? Icons.account_balance_wallet_rounded
-                                  : Icons.notifications_active_outlined,
-                      size: 12,
-                      color: fill,
-                    ),
-                    const SizedBox(width: 4),
-                    Flexible(
-                      child: Text(
-                        label,
-                        overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.syne(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: fill,
-                        ),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                mouseCursor: SystemMouseCursors.click,
+                onTap: onTap,
+                child: Container(
+                  height: kChatHeaderChipHeight,
+                  constraints: BoxConstraints(
+                    minWidth: isPayment ? 52 : 64,
+                    maxWidth: isPayment ? 100 : 150,
+                  ),
+                  padding: const EdgeInsets.fromLTRB(10, 0, 6, 0),
+                  alignment: Alignment.centerLeft,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        paid
+                            ? Icons.check_circle_rounded
+                            : overdue
+                                ? Icons.error_rounded
+                                : isPayment
+                                    ? Icons.account_balance_wallet_rounded
+                                    : Icons.notifications_active_outlined,
+                        size: 12,
+                        color: fill,
                       ),
-                    ),
-                    if (onUnpin != null) ...[
-                      const SizedBox(width: 3),
-                      MouseRegion(
-                        cursor: SystemMouseCursors.click,
-                        child: GestureDetector(
-                          onTap: onUnpin,
-                          child: Icon(Icons.push_pin_rounded, size: 11, color: fill),
+                      const SizedBox(width: 4),
+                      Flexible(
+                        child: Text(
+                          label,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.syne(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: fill,
+                          ),
                         ),
                       ),
                     ],
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -2717,7 +3057,7 @@ class ReminderHeaderChip extends StatelessWidget {
       final text = reminder.note.isNotEmpty ? reminder.note : 'Reminder';
       return text.length > 18 ? '${text.substring(0, 16)}…' : text;
     }
-    return reminder.formattedAmount;
+    return reminder.compactAmount;
   }
 }
 

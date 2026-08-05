@@ -112,8 +112,8 @@ function nextSortOrder(conversationId, parentId = null) {
     .get(conversationId).m + 1;
 }
 
-// Active tasks: open groups only — parent not fully done, or parent done but subtasks remain.
-// Includes done subtasks under an still-open parent (they stay until the whole group completes).
+// Active tasks: everything not yet confirmed done. Tasks marked done stay on the
+// board until the creator approves them (doneConfirmed) — Jira-style done/review.
 export function listTaskItems(conversationId) {
   const roots = db
     .prepare(
@@ -121,13 +121,6 @@ export function listTaskItems(conversationId) {
        WHERE t.conversation_id = ?
          AND t.parent_id IS NULL
          AND t.done_confirmed = 0
-         AND (
-           t.done = 0
-           OR EXISTS (
-             SELECT 1 FROM task_items s
-             WHERE s.parent_id = t.id AND s.done = 0
-           )
-         )
        ORDER BY t.pinned DESC, t.sort_order ASC, t.created_at ASC`,
     )
     .all(conversationId);
@@ -172,18 +165,14 @@ export function listTaskItems(conversationId) {
   });
 }
 
-// History: fully completed groups — parent done and every subtask done (or no subtasks).
+// History: confirmed-complete groups only (creator approved them).
 export function listDoneTaskItems(conversationId, { limit = 20, before = null } = {}) {
   const lim = Math.min(Math.max(Number(limit) || 20, 1), 50);
   let sql = `
     SELECT * FROM task_items t
     WHERE t.conversation_id = ?
       AND t.parent_id IS NULL
-      AND (t.done = 1 OR t.done_confirmed = 1)
-      AND NOT EXISTS (
-        SELECT 1 FROM task_items s
-        WHERE s.parent_id = t.id AND s.done = 0
-      )
+      AND t.done_confirmed = 1
   `;
   const params = [conversationId];
   if (before) {
@@ -301,10 +290,10 @@ export function updateTaskItem(id, userId, patch) {
       throw new Error('empty task');
     }
   }
-  // Any member can toggle done (optimistic check mark).
+  // Any member can toggle done (optimistic check mark). Done keeps the task on
+  // the board awaiting approval, so it stays pinned if it was pinned.
   if (patch.done !== undefined) {
     done = patch.done ? 1 : 0;
-    if (done) pinned = 0;
   }
   // Only the creator (setter) can confirm-done, which removes it from active list.
   if (patch.doneConfirmed !== undefined) {
@@ -394,14 +383,8 @@ export function updateTaskItem(id, userId, patch) {
     id,
   );
 
-  // Checking off a parent task completes every subtask and moves the group to history.
-  if (patch.done === true && !existing.parent_id) {
-    db.prepare(
-      `UPDATE task_items
-       SET done = 1, pinned = 0, updated_at = ?
-       WHERE parent_id = ?`,
-    ).run(now, id);
-  }
+  // Marking a parent done just flags it for approval — subtasks stay as they are
+  // (no cascade; the creator's approval archives the whole group instead).
 
   return getTaskItem(id);
 }

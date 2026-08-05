@@ -728,9 +728,7 @@ class MessageBubble extends StatelessWidget {
                                           Icon(
                                             Icons.playlist_add_check_rounded,
                                             size: 18,
-                                            color: const Color(
-                                              0xFF3D9CF0,
-                                            ).withValues(alpha: 0.95),
+                                            color: PrivetTheme.signal,
                                           ),
                                           const SizedBox(width: 10),
                                           Text(

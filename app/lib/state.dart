@@ -2329,12 +2329,15 @@ class PrivetState extends ChangeNotifier {
   /// [chatTick]: messages / reactions / uploads in the open chat.
   /// [typingTick]: peer typing indicator only.
   /// [callTick]: ringing / active call / mini-call chrome.
+  /// [reopenChatTick]: tapping the already-active chat in the sidebar — the open
+  /// ConversationPane closes its pane overlays (tasks / shared media) and shows the chat.
   final ValueNotifier<int> sessionTick = ValueNotifier(0);
   final ValueNotifier<int> shellTick = ValueNotifier(0);
   final ValueNotifier<int> inboxTick = ValueNotifier(0);
   final ValueNotifier<int> chatTick = ValueNotifier(0);
   final ValueNotifier<int> typingTick = ValueNotifier(0);
   final ValueNotifier<int> callTick = ValueNotifier(0);
+  final ValueNotifier<int> reopenChatTick = ValueNotifier(0);
 
   /// Epoch until first real pointer/keyboard activity (see [noteUserPresence]).
   DateTime _lastUserPresence = DateTime.fromMillisecondsSinceEpoch(0);
@@ -3505,6 +3508,14 @@ class PrivetState extends ChangeNotifier {
     String query,
   ) => _api.searchInConversation(conversationId, query);
 
+  /// Tapping the already-active conversation in the sidebar — closes any open
+  /// pane overlays (tasks / payments / reminders / shared media) and returns to
+  /// the chat. Mirrors the effect of the pane's X button.
+  void reopenActiveConversation() {
+    if (activeConversationId == null) return;
+    reopenChatTick.value++;
+  }
+
   Future<void> openConversation(String id) async {
     // Opening a chat is intentional presence so attachChatSurface can mark-read.
     _lastUserPresence = DateTime.now();
@@ -4061,33 +4072,16 @@ class PrivetState extends ChangeNotifier {
   }
 
   Future<void> toggleTaskDone(TaskItem item) async {
-    final markingDone = !item.done;
-    final items = await _api.updateTask(taskId: item.id, done: markingDone);
+    final items = await _api.updateTask(taskId: item.id, done: !item.done);
     _setTasks(item.conversationId, items);
-    if (markingDone) {
-      if (!item.isSubtask) {
-        // Parent done cascades to all subtasks on the server → group enters history.
-        await refreshTaskHistory(item.conversationId);
-      } else {
-        final board = ConversationTasks(items: items);
-        final rootId = item.parentId!;
-        final root = board.rootItems.where((t) => t.id == rootId).firstOrNull;
-        if (root != null) {
-          final subs = board.subtasksOf(rootId);
-          final fullyDone =
-              root.done && (subs.isEmpty || subs.every((s) => s.done));
-          if (fullyDone) {
-            await refreshTaskHistory(item.conversationId);
-          }
-        }
-      }
-    }
   }
 
-  /// Only the task creator can call this — fully dismisses the task from the active list.
+  /// Only the task creator can call this — approves a done task and moves it
+  /// to history (crossed out, off the active board).
   Future<void> confirmTaskDone(TaskItem item) async {
     final items = await _api.updateTask(taskId: item.id, doneConfirmed: true);
     _setTasks(item.conversationId, items);
+    await refreshTaskHistory(item.conversationId);
   }
 
   Future<void> updateTaskBody(TaskItem item, String body) async {

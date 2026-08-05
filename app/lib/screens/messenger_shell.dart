@@ -509,7 +509,15 @@ class InboxPane extends StatelessWidget {
                         ? PrivetTheme.panelElevated
                         : Colors.transparent,
                     child: InkWell(
-                      onTap: () => state.openConversation(c.id),
+                      onTap: () {
+                        if (c.id == state.activeConversationId) {
+                          // Same chat re-tapped — drop any open pane overlay
+                          // (tasks / payments / reminders / media) and show chat.
+                          state.reopenActiveConversation();
+                        } else {
+                          state.openConversation(c.id);
+                        }
+                      },
                       mouseCursor: SystemMouseCursors.click,
                       onSecondaryTapUp: (details) {
                         _openConversationMenu(
@@ -2708,6 +2716,7 @@ class _ConversationPaneState extends State<ConversationPane>
     _controller.addListener(_onComposerTextChanged);
     _scroll.addListener(_onScrollForOlder);
     HardwareKeyboard.instance.addHandler(_onGlobalKey);
+    widget.state.reopenChatTick.addListener(_onReopenChat);
     unawaited(
       ComposerAutocorrectDictionary.instance.ensureLoaded().then((_) {
         if (mounted) _controller.refreshSpelling();
@@ -3417,8 +3426,10 @@ class _ConversationPaneState extends State<ConversationPane>
     );
   }
 
-  /// Header: [+Add] → Payment (if pinned) → Reminder (if pinned) → Tasks (if pinned).
-  List<Widget> _buildReminderChips(PrivetState state) {
+  /// Header center actions: pinned chips → Search → [+]. Pinned reminders/tasks
+  /// sit at the far left; folder, call, video, screen share, and remote control
+  /// buttons follow this group in the desktop header row.
+  List<Widget> _buildHeaderCenterActions(PrivetState state) {
     final convId = state.activeConversationId;
     if (convId == null) return const [];
 
@@ -3429,31 +3440,6 @@ class _ConversationPaneState extends State<ConversationPane>
     final pinnedReminder = reminders.where((r) => !r.isPayment && r.pinned).firstOrNull;
 
     final chips = <Widget>[];
-
-    chips.add(Padding(
-      padding: const EdgeInsets.fromLTRB(4, 0, 4, 0),
-      child: _AddChipButton(
-        onAddTask: () => _toggleTasks(tab: 0),
-        onAddPayment: () {
-          _toggleTasks(tab: 1);
-          showReminderDialog(
-            context,
-            state: state,
-            conversationId: convId,
-            initialKind: 'payment',
-          );
-        },
-        onAddReminder: () {
-          _toggleTasks(tab: 2);
-          showReminderDialog(
-            context,
-            state: state,
-            conversationId: convId,
-            initialKind: 'reminder',
-          );
-        },
-      ),
-    ));
 
     if (pinnedPayment != null) {
       chips.add(Padding(
@@ -3491,6 +3477,36 @@ class _ConversationPaneState extends State<ConversationPane>
       ));
     }
 
+    chips.add(_CallActionButton(
+      tooltip: 'Search in chat',
+      icon: _searchOpen ? Icons.search_off_rounded : Icons.search_rounded,
+      active: true,
+      enabled: true,
+      onPressed: _toggleSearch,
+    ));
+
+    chips.add(_AddChipButton(
+      onAddTask: () => _toggleTasks(tab: 0),
+      onAddPayment: () {
+        _toggleTasks(tab: 1);
+        showReminderDialog(
+          context,
+          state: state,
+          conversationId: convId,
+          initialKind: 'payment',
+        );
+      },
+      onAddReminder: () {
+        _toggleTasks(tab: 2);
+        showReminderDialog(
+          context,
+          state: state,
+          conversationId: convId,
+          initialKind: 'reminder',
+        );
+      },
+    ));
+
     return chips;
   }
 
@@ -3499,14 +3515,7 @@ class _ConversationPaneState extends State<ConversationPane>
     Conversation? chat,
   ) {
     return [
-      _CallActionButton(
-        tooltip: 'Search in chat',
-        icon: _searchOpen ? Icons.search_off_rounded : Icons.search_rounded,
-        active: _searchOpen,
-        enabled: true,
-        onPressed: _toggleSearch,
-      ),
-      ..._buildReminderChips(state),
+      ..._buildHeaderCenterActions(state),
       _CallActionButton(
         tooltip: 'Shared media',
         icon: Icons.folder_outlined,
@@ -3970,6 +3979,16 @@ class _ConversationPaneState extends State<ConversationPane>
     }
   }
 
+  /// The user tapped the already-active chat in the sidebar — close any open
+  /// pane overlays (tasks / payments / reminders / shared media) and show the chat.
+  void _onReopenChat() {
+    if (!mounted) return;
+    setState(() {
+      _mediaFolder = null;
+      _showTasks = false;
+    });
+  }
+
   Future<void> _refreshMediaPermissions() async {
     final status = await queryMediaPermissions();
     if (!mounted) return;
@@ -3990,6 +4009,7 @@ class _ConversationPaneState extends State<ConversationPane>
   @override
   void dispose() {
     cancelMediaDeviceChanges();
+    widget.state.reopenChatTick.removeListener(_onReopenChat);
     final id = _draftConversationId;
     if (id != null) widget.state.detachChatSurface(id);
     _draftDebounce.flush(_persistDraft);
@@ -6892,88 +6912,84 @@ class _AddChipButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Tooltip(
-      message: 'Add task, payment, or reminder',
-      child: Material(
-        color: Colors.transparent,
-        child: Ink(
-          decoration: BoxDecoration(
-            color: PrivetTheme.ink.withValues(alpha: 0.35),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: PrivetTheme.line),
-          ),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(12),
-            mouseCursor: SystemMouseCursors.click,
-            onTap: () {
-              final RenderBox box = context.findRenderObject()! as RenderBox;
-              final Offset offset = box.localToGlobal(Offset.zero);
-              showMenu<String>(
-                context: context,
-                color: PrivetTheme.panelElevated,
-                position: RelativeRect.fromLTRB(
-                  offset.dx, offset.dy + box.size.height + 4,
-                  offset.dx + box.size.width, 0,
-                ),
-                items: [
-                  PopupMenuItem(
-                    value: 'task',
-                    mouseCursor: SystemMouseCursors.click,
-                    child: Row(
-                      children: [
-                        Icon(Icons.checklist_rounded, size: 16, color: PrivetTheme.signal),
-                        const SizedBox(width: 8),
-                        Text('Task list', style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13)),
-                      ],
-                    ),
+    return Padding(
+      padding: const EdgeInsets.only(left: 4),
+      child: Tooltip(
+        message: 'Add task, payment, or reminder',
+        waitDuration: const Duration(milliseconds: 280),
+        child: Material(
+          color: Colors.transparent,
+          child: Ink(
+            decoration: BoxDecoration(
+              color: PrivetTheme.panelElevated,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: PrivetTheme.signal.withValues(alpha: 0.7),
+              ),
+            ),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              mouseCursor: SystemMouseCursors.click,
+              hoverColor: PrivetTheme.paper.withValues(alpha: 0.06),
+              splashColor: PrivetTheme.paper.withValues(alpha: 0.08),
+              onTap: () {
+                final RenderBox box = context.findRenderObject()! as RenderBox;
+                final Offset offset = box.localToGlobal(Offset.zero);
+                showMenu<String>(
+                  context: context,
+                  color: PrivetTheme.panelElevated,
+                  position: RelativeRect.fromLTRB(
+                    offset.dx, offset.dy + box.size.height + 4,
+                    offset.dx + box.size.width, 0,
                   ),
-                  PopupMenuItem(
-                    value: 'payment',
-                    mouseCursor: SystemMouseCursors.click,
-                    child: Row(
-                      children: [
-                        Icon(Icons.account_balance_wallet_rounded, size: 16, color: const Color(0xFFF0A83D)),
-                        const SizedBox(width: 8),
-                        Text('Payment', style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13)),
-                      ],
+                  items: [
+                    PopupMenuItem(
+                      value: 'task',
+                      mouseCursor: SystemMouseCursors.click,
+                      child: Row(
+                        children: [
+                          Icon(Icons.checklist_rounded, size: 16, color: PrivetTheme.signal),
+                          const SizedBox(width: 8),
+                          Text('Task list', style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13)),
+                        ],
+                      ),
                     ),
-                  ),
-                  PopupMenuItem(
-                    value: 'reminder',
-                    mouseCursor: SystemMouseCursors.click,
-                    child: Row(
-                      children: [
-                        Icon(Icons.notifications_active_outlined, size: 16, color: const Color(0xFF9B7EDE)),
-                        const SizedBox(width: 8),
-                        Text('Reminder', style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13)),
-                      ],
+                    PopupMenuItem(
+                      value: 'payment',
+                      mouseCursor: SystemMouseCursors.click,
+                      child: Row(
+                        children: [
+                          Icon(Icons.account_balance_wallet_rounded, size: 16, color: PrivetTheme.signal),
+                          const SizedBox(width: 8),
+                          Text('Payment', style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13)),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
-              ).then((val) {
-                if (val == 'task') onAddTask();
-                if (val == 'payment') onAddPayment();
-                if (val == 'reminder') onAddReminder();
-              });
-            },
-            child: SizedBox(
-              height: kChatHeaderChipCompactHeight,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.add_rounded, size: 12, color: PrivetTheme.mist),
-                    const SizedBox(width: 4),
-                    Text(
-                      'Add',
-                      style: GoogleFonts.syne(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                        color: PrivetTheme.mist,
+                    PopupMenuItem(
+                      value: 'reminder',
+                      mouseCursor: SystemMouseCursors.click,
+                      child: Row(
+                        children: [
+                          Icon(Icons.notifications_active_outlined, size: 16, color: PrivetTheme.signal),
+                          const SizedBox(width: 8),
+                          Text('Reminder', style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13)),
+                        ],
                       ),
                     ),
                   ],
+                ).then((val) {
+                  if (val == 'task') onAddTask();
+                  if (val == 'payment') onAddPayment();
+                  if (val == 'reminder') onAddReminder();
+                });
+              },
+              child: SizedBox(
+                height: kChatHeaderChipHeight,
+                width: kChatHeaderChipHeight,
+                child: Icon(
+                  Icons.add_rounded,
+                  size: 18,
+                  color: PrivetTheme.signal,
                 ),
               ),
             ),

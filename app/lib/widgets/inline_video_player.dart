@@ -8,15 +8,16 @@ import 'package:video_player/video_player.dart';
 
 import '../theme.dart';
 import '../util/agent_debug.dart';
+import 'video_fullscreen.dart';
 
 /// Plays a remote video inline in the chat bubble.
 ///
 /// Controllers are created only after the user taps play (or [autoInit] is
 /// true). At most one active player is kept warm via [_activePlayer].
 ///
-/// On desktop there is no `video_player` platform implementation (Linux and
-/// Windows have no official backend), so tapping a video falls back to the
-/// system default player / browser via [launchUrl].
+/// Web uses the official `video_player` backend; Linux & Windows use the
+/// bundled fvp backend (libmdk/FFmpeg), so videos play natively instead of
+/// opening the browser. If init still fails the URL is opened externally.
 class InlineVideoPlayer extends StatefulWidget {
   const InlineVideoPlayer({
     super.key,
@@ -56,9 +57,6 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
 
   Future<void> _ensureController() async {
     if (_controller != null || _initializing || _failed) return;
-    // Desktop has no video_player backend — never attempt init here; _toggle
-    // opens the URL externally instead.
-    if (!kIsWeb && (Platform.isLinux || Platform.isWindows)) return;
     _initializing = true;
     if (mounted) setState(() {});
     final controller = VideoPlayerController.networkUrl(Uri.parse(widget.url))
@@ -151,24 +149,11 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
       },
     );
     // #endregion
-    // Desktop: no video_player backend — open in the system player/browser
-    // immediately instead of waiting for a failed init attempt.
-    if (!kIsWeb && (Platform.isLinux || Platform.isWindows)) {
-      // #region agent log
-      agentDebugLog(
-        hypothesisId: 'H7',
-        location: 'inline_video_player.dart:_toggle',
-        message: 'desktop: opening externally',
-        data: {'url': widget.url},
-      );
-      // #endregion
-      await _openExternally();
-      return;
-    }
     await _ensureController();
     final controller = _controller;
     if (controller == null || !_ready) {
-      // Web init failed — open the URL in a new tab instead of dead-ending.
+      // Init failed (e.g. unsupported codec) — open the URL externally
+      // instead of dead-ending.
       if (_failed) {
         // #region agent log
         agentDebugLog(
@@ -199,6 +184,24 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
     } catch (_) {}
   }
 
+  Future<void> _openFullscreen() async {
+    final controller = _controller;
+    if (controller == null || !_ready) return;
+    final wasPlaying = controller.value.isPlaying;
+    final position = controller.value.position;
+    await controller.pause();
+    if (!mounted) return;
+    await showVideoFullscreen(
+      context,
+      url: widget.url,
+      initialPosition: position,
+    );
+    if (!mounted) return;
+    if (wasPlaying && _controller != null && _ready) {
+      await _controller!.play();
+    }
+  }
+
   @override
   void dispose() {
     if (identical(_activePlayer, this)) _activePlayer = null;
@@ -224,6 +227,7 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
                   color: Colors.transparent,
                   child: InkWell(
                     onTap: _toggle,
+                    mouseCursor: SystemMouseCursors.click,
                     child: Center(
                       child: _initializing
                           ? SizedBox(
@@ -267,6 +271,7 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
                       color: Colors.transparent,
                       child: InkWell(
                         onTap: _toggle,
+                        mouseCursor: SystemMouseCursors.click,
                         child: AnimatedOpacity(
                           opacity: _playing ? 0 : 1,
                           duration: const Duration(milliseconds: 160),
@@ -297,6 +302,33 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
                           playedColor: PrivetTheme.signal,
                           bufferedColor: Color(0x55A8E6C3),
                           backgroundColor: Color(0x44FFFFFF),
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      right: 8,
+                      bottom: 30,
+                      child: MouseRegion(
+                        cursor: SystemMouseCursors.click,
+                        child: Material(
+                          color: Colors.black.withValues(alpha: 0.45),
+                          shape: const CircleBorder(),
+                          child: InkWell(
+                            customBorder: const CircleBorder(),
+                            mouseCursor: SystemMouseCursors.click,
+                            onTap: _openFullscreen,
+                            child: const Tooltip(
+                              message: 'Fullscreen',
+                              child: Padding(
+                                padding: EdgeInsets.all(6),
+                                child: Icon(
+                                  Icons.fullscreen_rounded,
+                                  size: 18,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     ),

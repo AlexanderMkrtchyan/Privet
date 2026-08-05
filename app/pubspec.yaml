@@ -1,7 +1,7 @@
 name: privet
 description: Privet messenger — Android, Web, Windows, Linux
 publish_to: 'none'
-version: 0.1.11+1
+version: 0.1.13+1
 
 environment:
   sdk: ^3.12.2
@@ -26,6 +26,9 @@ dependencies:
   path_provider: ^2.1.5
   url_launcher: ^6.3.1
   video_player: ^2.9.5
+  # Bundles libmdk/FFmpeg so video_player works natively on Linux & Windows
+  # (official video_player only supports Android/iOS/macOS/web).
+  fvp: ^0.37.3
   animated_emoji: ^3.2.1
   web: ^1.1.1
   package_info_plus: ^9.0.1
