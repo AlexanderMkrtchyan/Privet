@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "68480198832",
+    "project_id": "privet-6919b",
+    "storage_bucket": "privet-6919b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:68480198832:android:d926a3aff0fc88ce1ab375",
+        "android_client_info": {
+          "package_name": "com.privet.privet"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC3k4EUO1Md0eb-4BtEvv6IDkR-kxYuSvo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -921,6 +921,11 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                 ),
                 onMarkDone: (r) => widget.state.markReminderPaid(r),
                 onPin: (r) => widget.state.toggleReminderPin(r),
+                onDelete: (r) => _confirmDeleteReminder(
+                  context,
+                  state: widget.state,
+                  reminder: r,
+                ),
               ),
             ],
           ),
@@ -1154,6 +1159,10 @@ class _PaymentWalletCardState extends State<_PaymentWalletCard> {
     }
   }
 
+  Future<void> _deletePayment() async {
+    await _confirmDeleteReminder(context, state: widget.state, reminder: widget.payment);
+  }
+
   @override
   Widget build(BuildContext context) {
     final payment = widget.payment;
@@ -1327,7 +1336,25 @@ class _PaymentWalletCardState extends State<_PaymentWalletCard> {
                     ),
                   ),
                 ],
-                const SizedBox(width: 6),
+                const SizedBox(width: 2),
+                MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: Tooltip(
+                    message: 'Delete payment',
+                    child: GestureDetector(
+                      onTap: _deletePayment,
+                      child: Padding(
+                        padding: const EdgeInsets.all(6),
+                        child: Icon(
+                          Icons.delete_outline_rounded,
+                          size: 17,
+                          color: PrivetTheme.danger.withValues(alpha: 0.75),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 2),
               ],
             ),
           ),
@@ -1570,6 +1597,7 @@ class _ReminderKindTab extends StatelessWidget {
     required this.onOpen,
     required this.onMarkDone,
     required this.onPin,
+    required this.onDelete,
   });
 
   final IconData emptyIcon;
@@ -1583,6 +1611,7 @@ class _ReminderKindTab extends StatelessWidget {
   final void Function(PaymentReminder) onOpen;
   final void Function(PaymentReminder) onMarkDone;
   final void Function(PaymentReminder) onPin;
+  final void Function(PaymentReminder) onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -1611,6 +1640,7 @@ class _ReminderKindTab extends StatelessWidget {
                       onTap: () => onOpen(r),
                       onMarkDone: () => onMarkDone(r),
                       onPin: () => onPin(r),
+                      onDelete: () => onDelete(r),
                     ),
                   )),
                 ],
@@ -1625,6 +1655,7 @@ class _ReminderKindTab extends StatelessWidget {
                       onTap: null,
                       onMarkDone: null,
                       onPin: null,
+                      onDelete: () => onDelete(r),
                     ),
                   )),
                 ],
@@ -2105,110 +2136,16 @@ class _TaskRowState extends State<_TaskRow> {
                       ],
                     ),
                   ),
-                  if (!isHistory && widget.onAttach != null)
-                    MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: IconButton(
-                        tooltip: media.length >= 10
-                            ? 'Max 10 files'
-                            : 'Attach files (up to 10)',
-                        onPressed: media.length >= 10 ? null : widget.onAttach,
-                        icon: const Icon(Icons.attach_file_rounded, size: 20),
-                        color: PrivetTheme.mist,
-                        visualDensity: VisualDensity.compact,
-                      ),
-                    ),
-                  if (widget.onPin != null)
-                    MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: IconButton(
-                        tooltip: item.pinned
-                            ? 'Unpin from header'
-                            : 'Pin to header',
-                        onPressed: widget.onPin,
-                        icon: Icon(
-                          item.pinned
-                              ? Icons.push_pin_rounded
-                              : Icons.push_pin_outlined,
-                          size: 18,
-                          color: item.pinned
-                              ? PrivetTheme.signal
-                              : PrivetTheme.mist,
-                        ),
-                        visualDensity: VisualDensity.compact,
-                      ),
-                    ),
-                  if (widget.onSaveBody != null)
-                    MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: IconButton(
-                        tooltip: 'Edit text',
-                        onPressed: _openEditDialog,
-                        icon: const Icon(Icons.edit_outlined, size: 18),
-                        color: PrivetTheme.mist,
-                        visualDensity: VisualDensity.compact,
-                      ),
-                    ),
-                  if (widget.onDelete != null)
-                    MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: IconButton(
-                        tooltip: isHistory ? 'Remove from history' : 'Remove',
-                        onPressed: widget.onDelete,
-                        icon: const Icon(Icons.close_rounded, size: 18),
-                        color: PrivetTheme.mist,
-                        visualDensity: VisualDensity.compact,
-                      ),
-                    ),
-                  if (widget.onConfirmDone != null)
-                    MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: Tooltip(
-                        message: 'Approve — cross out and move to history',
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(10),
-                          onTap: widget.onConfirmDone,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 5,
-                            ),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 3,
-                              ),
-                              decoration: BoxDecoration(
-                                color: PrivetTheme.signal.withValues(alpha: 0.15),
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(
-                                  color: PrivetTheme.signal.withValues(alpha: 0.5),
-                                ),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    Icons.done_all_rounded,
-                                    size: 14,
-                                    color: PrivetTheme.signal,
-                                  ),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    'Approve',
-                                    style: GoogleFonts.syne(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w700,
-                                      color: PrivetTheme.signal,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
+                  _TaskRowActions(
+                    onAttach: !isHistory ? widget.onAttach : null,
+                    attachDisabled: media.length >= 10,
+                    pinned: item.pinned,
+                    onPin: widget.onPin,
+                    onEdit: widget.onSaveBody != null ? _openEditDialog : null,
+                    onDelete: widget.onDelete,
+                    onConfirmDone: widget.onConfirmDone,
+                    history: isHistory,
+                  ),
                 ],
               ),
               if (media.isNotEmpty)
@@ -2419,6 +2356,239 @@ class _TaskRowState extends State<_TaskRow> {
       );
 }
 
+/// Trailing actions for a task row. Desktop shows them inline; mobile
+/// (compact) collapses them behind one overflow menu so long task text keeps
+/// the full row width instead of wrapping at a few px per line.
+class _TaskRowActions extends StatelessWidget {
+  const _TaskRowActions({
+    required this.onAttach,
+    required this.attachDisabled,
+    required this.pinned,
+    required this.onPin,
+    required this.onEdit,
+    required this.onDelete,
+    required this.onConfirmDone,
+    required this.history,
+  });
+
+  final VoidCallback? onAttach;
+  final bool attachDisabled;
+  final bool pinned;
+  final VoidCallback? onPin;
+  final VoidCallback? onEdit;
+  final VoidCallback? onDelete;
+  final VoidCallback? onConfirmDone;
+  final bool history;
+
+  @override
+  Widget build(BuildContext context) {
+    if (PrivetTheme.isCompact(context)) {
+      if (onAttach == null &&
+          onPin == null &&
+          onEdit == null &&
+          onDelete == null &&
+          onConfirmDone == null) {
+        return const SizedBox.shrink();
+      }
+      return MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: IconButton(
+          tooltip: 'More',
+          onPressed: () => _showMenu(context),
+          icon: const Icon(Icons.more_horiz_rounded, size: 20),
+          color: PrivetTheme.mist,
+          visualDensity: VisualDensity.compact,
+        ),
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (onAttach != null)
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: IconButton(
+              tooltip:
+                  attachDisabled ? 'Max 10 files' : 'Attach files (up to 10)',
+              onPressed: attachDisabled ? null : onAttach,
+              icon: const Icon(Icons.attach_file_rounded, size: 20),
+              color: PrivetTheme.mist,
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
+        if (onPin != null)
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: IconButton(
+              tooltip: pinned ? 'Unpin from header' : 'Pin to header',
+              onPressed: onPin,
+              icon: Icon(
+                pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined,
+                size: 18,
+                color: pinned ? PrivetTheme.signal : PrivetTheme.mist,
+              ),
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
+        if (onEdit != null)
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: IconButton(
+              tooltip: 'Edit text',
+              onPressed: onEdit,
+              icon: const Icon(Icons.edit_outlined, size: 18),
+              color: PrivetTheme.mist,
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
+        if (onDelete != null)
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: IconButton(
+              tooltip: history ? 'Remove from history' : 'Remove',
+              onPressed: onDelete,
+              icon: const Icon(Icons.close_rounded, size: 18),
+              color: PrivetTheme.mist,
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
+        if (onConfirmDone != null)
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: Tooltip(
+              message: 'Approve — cross out and move to history',
+              child: InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: onConfirmDone,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 5,
+                  ),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: PrivetTheme.signal.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: PrivetTheme.signal.withValues(alpha: 0.5),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.done_all_rounded,
+                          size: 14,
+                          color: PrivetTheme.signal,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Approve',
+                          style: GoogleFonts.syne(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: PrivetTheme.signal,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  void _showMenu(BuildContext context) {
+    final tiles = <Widget>[];
+    void addTile({
+      required IconData icon,
+      required String label,
+      VoidCallback? onTap,
+      bool disabled = false,
+      Color? color,
+      bool prominent = false,
+    }) {
+      tiles.add(
+        ListTile(
+          enabled: !disabled && onTap != null,
+          leading: Icon(
+            icon,
+            color: color ?? (prominent ? PrivetTheme.signal : null),
+          ),
+          title: Text(
+            label,
+            style: prominent
+                ? GoogleFonts.syne(
+                    fontWeight: FontWeight.w700,
+                    color: PrivetTheme.signal,
+                  )
+                : null,
+          ),
+          onTap: (disabled || onTap == null)
+              ? null
+              : () {
+                  Navigator.pop(context);
+                  onTap!();
+                },
+        ),
+      );
+    }
+
+    if (onAttach != null) {
+      addTile(
+        icon: Icons.attach_file_rounded,
+        label: attachDisabled ? 'Max 10 files' : 'Attach files',
+        onTap: onAttach,
+        disabled: attachDisabled,
+      );
+    }
+    if (onPin != null) {
+      addTile(
+        icon: pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined,
+        label: pinned ? 'Unpin from header' : 'Pin to header',
+        onTap: onPin,
+      );
+    }
+    if (onEdit != null) {
+      addTile(icon: Icons.edit_outlined, label: 'Edit text', onTap: onEdit);
+    }
+    if (onConfirmDone != null) {
+      addTile(
+        icon: Icons.done_all_rounded,
+        label: 'Approve — move to history',
+        onTap: onConfirmDone,
+        prominent: true,
+      );
+    }
+    if (onDelete != null) {
+      addTile(
+        icon: Icons.close_rounded,
+        label: history ? 'Remove from history' : 'Remove',
+        onTap: onDelete,
+        color: PrivetTheme.danger,
+      );
+    }
+    if (tiles.isEmpty) return;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: PrivetTheme.panel,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: tiles),
+      ),
+    );
+  }
+}
+
 class _SubtaskRow extends StatefulWidget {
   const _SubtaskRow({
     required this.item,
@@ -2588,91 +2758,17 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                         ),
                       ),
               ),
-              if (widget.editable && widget.onAttach != null)
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: IconButton(
-                    tooltip: media.length >= 10 ? 'Max 10 files' : 'Attach file',
-                    onPressed: media.length >= 10 ? null : widget.onAttach,
-                    icon: const Icon(Icons.attach_file_rounded, size: 16),
-                    color: PrivetTheme.mist,
-                    visualDensity: VisualDensity.compact,
-                    constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                    padding: EdgeInsets.zero,
-                  ),
-                ),
-              if (widget.editable && widget.onSaveBody != null)
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: IconButton(
-                    tooltip: 'Edit text',
-                    onPressed: _openEditDialog,
-                    icon: const Icon(Icons.edit_outlined, size: 16),
-                    color: PrivetTheme.mist,
-                    visualDensity: VisualDensity.compact,
-                    constraints:
-                        const BoxConstraints(minWidth: 28, minHeight: 28),
-                    padding: EdgeInsets.zero,
-                  ),
-                ),
-              if (widget.onDelete != null)
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: IconButton(
-                    onPressed: widget.onDelete,
-                    icon: const Icon(Icons.close_rounded, size: 14),
-                    color: PrivetTheme.mist.withValues(alpha: 0.7),
-                    visualDensity: VisualDensity.compact,
-                    constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                    padding: EdgeInsets.zero,
-                  ),
-                ),
-              if (widget.editable && widget.onConfirm != null)
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: Tooltip(
-                    message: 'Approve subtask',
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(8),
-                      onTap: widget.onConfirm,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 7,
-                            vertical: 3,
-                          ),
-                          decoration: BoxDecoration(
-                            color: PrivetTheme.signal.withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                              color: PrivetTheme.signal.withValues(alpha: 0.5),
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.done_all_rounded,
-                                size: 12,
-                                color: PrivetTheme.signal,
-                              ),
-                              const SizedBox(width: 3),
-                              Text(
-                                'Approve',
-                                style: GoogleFonts.syne(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w700,
-                                  color: PrivetTheme.signal,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+              _SubtaskActions(
+                editable: widget.editable,
+                onAttach: widget.onAttach,
+                attachDisabled: media.length >= 10,
+                onEdit:
+                    widget.editable && widget.onSaveBody != null
+                        ? _openEditDialog
+                        : null,
+                onDelete: widget.onDelete,
+                onConfirm: widget.editable ? widget.onConfirm : null,
+              ),
             ],
           ),
           if (media.isNotEmpty)
@@ -2758,17 +2854,229 @@ class _SubtaskRowState extends State<_SubtaskRow> {
       );
 }
 
+/// Trailing actions for a subtask row. Desktop shows them inline; mobile
+/// (compact) collapses them behind one overflow menu so the subtask text keeps
+/// the full row width.
+class _SubtaskActions extends StatelessWidget {
+  const _SubtaskActions({
+    required this.editable,
+    required this.onAttach,
+    required this.attachDisabled,
+    required this.onEdit,
+    required this.onDelete,
+    required this.onConfirm,
+  });
+
+  final bool editable;
+  final VoidCallback? onAttach;
+  final bool attachDisabled;
+  final VoidCallback? onEdit;
+  final VoidCallback? onDelete;
+  final VoidCallback? onConfirm;
+
+  bool get _hasAny =>
+      (editable &&
+          (onAttach != null || onEdit != null || onConfirm != null)) ||
+      onDelete != null;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_hasAny) return const SizedBox.shrink();
+    if (PrivetTheme.isCompact(context)) {
+      return MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: IconButton(
+          tooltip: 'More',
+          onPressed: () => _showMenu(context),
+          icon: const Icon(Icons.more_horiz_rounded, size: 18),
+          color: PrivetTheme.mist,
+          visualDensity: VisualDensity.compact,
+          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+          padding: EdgeInsets.zero,
+        ),
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (editable && onAttach != null)
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: IconButton(
+              tooltip: attachDisabled ? 'Max 10 files' : 'Attach file',
+              onPressed: attachDisabled ? null : onAttach,
+              icon: const Icon(Icons.attach_file_rounded, size: 16),
+              color: PrivetTheme.mist,
+              visualDensity: VisualDensity.compact,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+              padding: EdgeInsets.zero,
+            ),
+          ),
+        if (editable && onEdit != null)
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: IconButton(
+              tooltip: 'Edit text',
+              onPressed: onEdit,
+              icon: const Icon(Icons.edit_outlined, size: 16),
+              color: PrivetTheme.mist,
+              visualDensity: VisualDensity.compact,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+              padding: EdgeInsets.zero,
+            ),
+          ),
+        if (onDelete != null)
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: IconButton(
+              onPressed: onDelete,
+              icon: const Icon(Icons.close_rounded, size: 14),
+              color: PrivetTheme.mist.withValues(alpha: 0.7),
+              visualDensity: VisualDensity.compact,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+              padding: EdgeInsets.zero,
+            ),
+          ),
+        if (editable && onConfirm != null)
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: Tooltip(
+              message: 'Approve subtask',
+              child: InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: onConfirm,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 7,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: PrivetTheme.signal.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: PrivetTheme.signal.withValues(alpha: 0.5),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.done_all_rounded,
+                          size: 12,
+                          color: PrivetTheme.signal,
+                        ),
+                        const SizedBox(width: 3),
+                        Text(
+                          'Approve',
+                          style: GoogleFonts.syne(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: PrivetTheme.signal,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  void _showMenu(BuildContext context) {
+    final tiles = <Widget>[];
+    void addTile({
+      required IconData icon,
+      required String label,
+      VoidCallback? onTap,
+      bool disabled = false,
+      Color? color,
+      bool prominent = false,
+    }) {
+      tiles.add(
+        ListTile(
+          enabled: !disabled && onTap != null,
+          leading: Icon(
+            icon,
+            color: color ?? (prominent ? PrivetTheme.signal : null),
+          ),
+          title: Text(
+            label,
+            style: prominent
+                ? GoogleFonts.syne(
+                    fontWeight: FontWeight.w700,
+                    color: PrivetTheme.signal,
+                  )
+                : null,
+          ),
+          onTap: (disabled || onTap == null)
+              ? null
+              : () {
+                  Navigator.pop(context);
+                  onTap!();
+                },
+        ),
+      );
+    }
+
+    if (editable && onAttach != null) {
+      addTile(
+        icon: Icons.attach_file_rounded,
+        label: attachDisabled ? 'Max 10 files' : 'Attach file',
+        onTap: onAttach,
+        disabled: attachDisabled,
+      );
+    }
+    if (editable && onEdit != null) {
+      addTile(icon: Icons.edit_outlined, label: 'Edit text', onTap: onEdit);
+    }
+    if (editable && onConfirm != null) {
+      addTile(
+        icon: Icons.done_all_rounded,
+        label: 'Approve subtask',
+        onTap: onConfirm,
+        prominent: true,
+      );
+    }
+    if (onDelete != null) {
+      addTile(
+        icon: Icons.close_rounded,
+        label: 'Remove',
+        onTap: onDelete,
+        color: PrivetTheme.danger,
+      );
+    }
+    if (tiles.isEmpty) return;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: PrivetTheme.panel,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: tiles),
+      ),
+    );
+  }
+}
+
 class _ReminderRow extends StatelessWidget {
   const _ReminderRow({
     required this.reminder,
     required this.onTap,
     required this.onMarkDone,
     required this.onPin,
+    this.onDelete,
   });
   final PaymentReminder reminder;
   final VoidCallback? onTap;
   final VoidCallback? onMarkDone;
   final VoidCallback? onPin;
+  final VoidCallback? onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -2867,6 +3175,26 @@ class _ReminderRow extends StatelessWidget {
                         border: Border.all(color: PrivetTheme.signal.withValues(alpha: 0.4)),
                       ),
                       child: Text(isPayment ? 'Paid' : 'Done', style: GoogleFonts.syne(fontSize: 12, fontWeight: FontWeight.w700, color: PrivetTheme.signal)),
+                    ),
+                  ),
+                ),
+              ],
+              if (onDelete != null) ...[
+                const SizedBox(width: 2),
+                MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: Tooltip(
+                    message: 'Delete',
+                    child: GestureDetector(
+                      onTap: onDelete,
+                      child: Padding(
+                        padding: const EdgeInsets.all(6),
+                        child: Icon(
+                          Icons.delete_outline_rounded,
+                          size: 17,
+                          color: PrivetTheme.danger.withValues(alpha: 0.75),
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -3062,6 +3390,61 @@ class ReminderHeaderChip extends StatelessWidget {
 }
 
 // ─── Add / Edit Reminder Dialog ──────────────────────────────────────────────
+
+/// Asks for confirmation and deletes a payment/reminder. Returns true if deleted.
+Future<bool> _confirmDeleteReminder(
+  BuildContext context, {
+  required PrivetState state,
+  required PaymentReminder reminder,
+}) async {
+  final label = reminder.isPayment ? 'payment' : 'reminder';
+  final message = reminder.paid && reminder.expenses.isNotEmpty
+      ? 'Delete this paid $label? Its ${reminder.expenses.length} logged expense(s) will also be removed.'
+      : 'Delete this $label? This cannot be undone.';
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: PrivetTheme.panelElevated,
+      title: Text(
+        'Delete $label?',
+        style: GoogleFonts.syne(color: PrivetTheme.mist, fontWeight: FontWeight.w700),
+      ),
+      content: Text(
+        message,
+        style: GoogleFonts.ibmPlexSans(color: PrivetTheme.paper, fontSize: 14),
+      ),
+      actions: [
+        MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('Cancel', style: TextStyle(color: PrivetTheme.mist)),
+          ),
+        ),
+        MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(
+              'Delete',
+              style: TextStyle(color: PrivetTheme.danger, fontWeight: FontWeight.w600),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+  if (ok != true) return false;
+  try {
+    await state.deleteReminder(reminder);
+    return true;
+  } catch (e) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+    return false;
+  }
+}
 
 Future<void> showReminderDialog(
   BuildContext context, {
@@ -3300,7 +3683,7 @@ class _ReminderDialogState extends State<_ReminderDialog> {
         ),
       ),
       actions: [
-        if (isEdit && !(widget.existing!.paid))
+        if (isEdit)
           MouseRegion(
             cursor: SystemMouseCursors.click,
             child: TextButton(

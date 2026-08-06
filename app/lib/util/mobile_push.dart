@@ -7,5 +7,9 @@ Future<String?> registerMobilePushToken() => impl.registerMobilePushToken();
 /// Wire FCM foreground/background/tap handlers (Android/iOS native).
 Future<void> attachMobilePushHandlers({
   required void Function(Map<String, String> data) onOpenPayload,
+  void Function(String actionId, Map<String, String> data)? onAction,
 }) =>
-    impl.attachMobilePushHandlers(onOpenPayload: onOpenPayload);
+    impl.attachMobilePushHandlers(
+      onOpenPayload: onOpenPayload,
+      onAction: onAction,
+    );

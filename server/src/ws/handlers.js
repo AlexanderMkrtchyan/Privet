@@ -263,6 +263,20 @@ export function registerWebsocket(app) {
             }),
           );
           broadcastPresence();
+          // Re-deliver any ringing call so a phone that just opened the app
+          // shows Accept/Decline even when it missed the original WS ring or
+          // the FCM push landed while the app was dead.
+          for (const call of calls.values()) {
+            if (call.toUserId !== userId || call.status !== 'ringing') continue;
+            const from = publicUser(getUserById(call.fromUserId));
+            socket.send(
+              JSON.stringify({
+                type: 'call.incoming',
+                call: publicCall(call),
+                from,
+              }),
+            );
+          }
           return;
         }
 
@@ -607,6 +621,11 @@ export function registerWebsocket(app) {
               type: 'call.incoming',
               callId,
               conversationId,
+              mode,
+              fromUserId: from.id,
+              callerDisplayName: from.displayName || '',
+              callerHandle: from.handle || '',
+              callerAvatarHue: String(from.avatarHue ?? ''),
             },
           });
           sendToSocket(socket, { type: 'call.ringing', call: payload });

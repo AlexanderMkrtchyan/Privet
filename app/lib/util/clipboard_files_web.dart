@@ -300,18 +300,30 @@ String _mimeFromName(String name) {
   return (handled: false, tryClipboardApi: false);
 }
 
+/// Read an image from the clipboard via the Async Clipboard API.
+/// Safe from a user gesture (context-menu Paste click): Chromium grants
+/// `clipboard-read` under transient activation without a prompt. Returns null
+/// when the clipboard has no image.
+Future<PickedBytes?> readClipboardImage() async {
+  final blobs = await readClipboardImageBlobs();
+  for (final entry in blobs) {
+    final picked = await _fromBlob(entry.blob, entry.mimeType);
+    if (picked != null) return picked;
+  }
+  return null;
+}
+
+/// Web reads images through DOM paste events / the Async Clipboard API during
+/// the paste gesture, never by polling. Returning null keeps native paste
+/// priority logic (OS image → OS text → in-app fallback) correct on web.
+Future<PickedBytes?> readOsClipboardImage() async => null;
+
 /// Async Clipboard API fallback for image pastes where [DataTransferItem.getAsFile]
 /// returns null. Only call from a user paste gesture — never from polls/clicks
 /// (those trigger Chromium's Paste permission bubble and steal left-clicks).
 Future<void> _readClipboardApi() async {
-  final blobs = await readClipboardImageBlobs();
-  for (final entry in blobs) {
-    final picked = await _fromBlob(entry.blob, entry.mimeType);
-    if (picked != null) {
-      _onImage?.call(picked);
-      return;
-    }
-  }
+  final picked = await readClipboardImage();
+  if (picked != null) _onImage?.call(picked);
 }
 
 int bindImagePaste(void Function(PickedBytes file) onImage) {

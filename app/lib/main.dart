@@ -123,7 +123,7 @@ class PrivetApp extends StatefulWidget {
 class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
   final PrivetState _state = PrivetState();
   /// Only session-level fields should rebuild MaterialApp.
-  (bool, String?, ThemeMode, int, bool)? _sessionKey;
+  (bool, String?, ThemeMode, int, bool, bool)? _sessionKey;
 
   @override
   void initState() {
@@ -149,6 +149,7 @@ class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
       _state.themeMode,
       _state.accent.toARGB32(),
       _state.lowResourceMode,
+      _state.smoothMotionMode,
     );
     if (next == _sessionKey) return;
     _sessionKey = next;
@@ -172,6 +173,10 @@ class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
     setMobileAppInForeground(state == AppLifecycleState.resumed);
     if (state == AppLifecycleState.resumed) {
       unawaited(_state.onAppResumed());
+      unawaited(_state.cancelAndroidRingOnForeground());
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      unawaited(_state.postAndroidRingWhenBackgrounded());
     }
   }
 

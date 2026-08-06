@@ -85,7 +85,9 @@ class RealtimeConnectionService : Service() {
         }
             .setContentTitle("Privet")
             .setContentText("Online — calls and messages will arrive")
-            .setSmallIcon(applicationInfo.icon)
+            // Small icon must be a monochrome silhouette. The full-color
+            // launcher icon renders as a white square (a "stop" button) here.
+            .setSmallIcon(R.drawable.ic_stat_privet)
             .setContentIntent(pending)
             .setOngoing(true)
             .build()

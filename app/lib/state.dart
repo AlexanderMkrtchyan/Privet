@@ -17,9 +17,12 @@ import 'remote_control/protocol.dart';
 import 'util/agent_debug_log.dart';
 import 'util/ai_turn.dart';
 import 'util/display_capture.dart';
+import 'util/display_rate.dart';
 import 'util/emoticon_expand.dart';
 import 'util/gpu_capability.dart';
 import 'util/mobile_push.dart';
+import 'util/mobile_push_io.dart' show decodeNotificationPayload;
+import 'util/mobile_push_notifications.dart';
 import 'util/page_title.dart';
 import 'util/page_uri.dart';
 import 'util/media_ui_wake.dart';
@@ -36,6 +39,7 @@ import 'util/desktop_call_window.dart';
 import 'util/desktop_launcher_badge.dart';
 import 'util/desktop_tray.dart';
 import 'util/android_realtime_service.dart';
+import 'util/incoming_call_android.dart';
 import 'util/mobile_app_lifecycle.dart';
 import 'util/web_notifications.dart';
 
@@ -2308,6 +2312,7 @@ class PrivetState extends ChangeNotifier {
   late final RealtimeClient _rt;
   String? _fcmToken;
   bool _mobilePushAttached = false;
+  bool _androidCallChannelAttached = false;
   final _uuid = const Uuid();
   void Function()? _disposeVisibility;
   Timer? _focusedReadTimer;
@@ -2416,10 +2421,28 @@ class PrivetState extends ChangeNotifier {
   /// Show OS/browser notification toasts on incoming messages (device-local).
   bool notificationsEnabled = true;
 
+  /// Suggest emoticon shortcodes and AI commands while typing (device-local).
+  bool autocompleteEnabled = true;
+
+  /// Auto-fix common typos, red-underline misspelled words, and use the native
+  /// keyboard autocorrect/suggestion strip on mobile (device-local).
+  bool autocorrectEnabled = true;
+
+  /// True when the OS-level notification permission is OFF for this app (the
+  /// user dismissed the one-time system dialog). Incoming calls cannot ring
+  /// through a full-screen notification in that state, so the shell surfaces
+  /// a "open settings to enable" prompt once.
+  bool notificationsDenied = false;
+
   /// Prefer lower RAM/CPU: static emoji, no UI motion, capped image decode.
   /// Manual Profile toggle, or one-shot GPU probe when preference is unset.
   /// Capable GPUs (e.g. RTX) stay animated; software GL gets cheap mode.
   bool lowResourceMode = false;
+
+  /// High-refresh smooth-motion tier. Auto-detected from GPU + display rate
+  /// (capable GPU on >= 70 Hz), overridable from the Profile toggle. Weak
+  /// GPUs / 60 Hz screens keep the standard paths.
+  bool smoothMotionMode = false;
 
   /// Legacy toast flag (auto-detect removed; kept so old builds don't break).
   bool lowResourceAutoHint = false;
@@ -2780,6 +2803,9 @@ class PrivetState extends ChangeNotifier {
     soundEnabled = prefs.getBool('privet_sound_enabled') ?? true;
     notificationsEnabled =
         prefs.getBool('privet_notifications_enabled') ?? true;
+    autocompleteEnabled =
+        prefs.getBool('privet_autocomplete_enabled') ?? true;
+    autocorrectEnabled = prefs.getBool('privet_autocorrect_enabled') ?? true;
     themeMode = _themeModeFromStorage(prefs.getString('privet_theme_mode'));
     final accentValue = prefs.getInt('privet_accent');
     if (accentValue != null) accent = Color(accentValue);
@@ -2800,17 +2826,30 @@ class PrivetState extends ChangeNotifier {
       lowResourceAutoHint = cheap;
     }
     setPrivetLowResource(lowResourceMode);
+    // Smooth-motion tier: capable GPU + display >= kSmoothMotionHz. A manual
+    // Profile toggle wins; otherwise auto-detect once.
+    final storedSmooth = prefs.getBool('privet_smooth_motion_user');
+    if (storedSmooth != null) {
+      smoothMotionMode = storedSmooth;
+    } else {
+      smoothMotionMode = await shouldEnableSmoothMotion();
+    }
+    setPrivetSmoothMotion(smoothMotionMode);
     // #region agent log
     final capable = await hasCapableGpu();
+    final displayHz = await privetDisplayRefreshRate();
     agentDebugLog(
       hypothesisId: 'H3',
       location: 'state.dart:bootstrap',
-      message: 'gpu/lowResource decision',
+      message: 'gpu/lowResource + smooth tier decision',
       data: {
         'storedLow': storedLow,
         'lowResourceMode': lowResourceMode,
         'lowResourceAutoHint': lowResourceAutoHint,
         'capableGpu': capable,
+        'displayHz': displayHz,
+        'storedSmooth': storedSmooth,
+        'smoothMotionMode': smoothMotionMode,
       },
     );
     // #endregion
@@ -2859,6 +2898,20 @@ class PrivetState extends ChangeNotifier {
     await prefs.setBool('privet_notifications_enabled', value);
   }
 
+  Future<void> setAutocompleteEnabled(bool value) async {
+    autocompleteEnabled = value;
+    notifySession();
+    final prefs = await _prefs();
+    await prefs.setBool('privet_autocomplete_enabled', value);
+  }
+
+  Future<void> setAutocorrectEnabled(bool value) async {
+    autocorrectEnabled = value;
+    notifySession();
+    final prefs = await _prefs();
+    await prefs.setBool('privet_autocorrect_enabled', value);
+  }
+
   Future<void> setLowResourceMode(bool value, {bool auto = false}) async {
     if (lowResourceMode == value) return;
     lowResourceMode = value;
@@ -2888,6 +2941,27 @@ class PrivetState extends ChangeNotifier {
     if (!lowResourceAutoHint) return;
     lowResourceAutoHint = false;
     notifySession();
+  }
+
+  Future<void> setSmoothMotionMode(bool value) async {
+    if (smoothMotionMode == value) return;
+    smoothMotionMode = value;
+    setPrivetSmoothMotion(value);
+    _bump(sessionTick);
+    super.notifyListeners();
+    final prefs = await _prefs();
+    await prefs.setBool('privet_smooth_motion_user', value);
+  }
+
+  /// Re-run auto-detection for the smooth-motion tier (GPU + display rate).
+  Future<void> refreshSmoothMotionMode() async {
+    final value = await shouldEnableSmoothMotion();
+    smoothMotionMode = value;
+    setPrivetSmoothMotion(value);
+    final prefs = await _prefs();
+    await prefs.remove('privet_smooth_motion_user');
+    _bump(sessionTick);
+    super.notifyListeners();
   }
 
   Future<void> setThemeMode(ThemeMode value) async {
@@ -3310,24 +3384,297 @@ class PrivetState extends ChangeNotifier {
     unawaited(refreshBlocked());
   }
 
+  bool get _isMobilePlatform =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
   Future<void> _onMobileSessionStarted() async {
     await ensureNotificationPermission();
+    // Android never re-shows the one-time notification dialog once dismissed —
+    // without the permission, calls cannot ring. Detect the denied state so
+    // the shell can point the user at Settings.
+    if (_isMobilePlatform &&
+        defaultTargetPlatform == TargetPlatform.android &&
+        !(await mobileNotificationsEnabled())) {
+      notificationsDenied = true;
+      notifySession();
+    }
+    // Ask once so Android 14+ incoming calls can launch the full-screen
+    // Accept/Decline screen (the native side no-ops when already granted).
+    final prefs = await _prefs();
+    if (!(prefs.getBool('privet_fsi_prompted') ?? false)) {
+      await prefs.setBool('privet_fsi_prompted', true);
+      unawaited(requestMobileFullScreenIntent());
+    }
+    // Foreground service keeps the process (and WebSocket) alive so the
+    // caller's `call.incoming` arrives instantly even when the app is
+    // backgrounded, and FCM data messages are not silently dropped.
     unawaited(AndroidRealtimeService.start());
-    unawaited(AndroidRealtimeService.requestBatteryExemption());
+    _attachAndroidCallChannel();
     await _attachMobilePushIfNeeded();
     await initMobilePush();
+    // If the native ring screen accepted or declined a call while the app was
+    // killed (Flutter engine not running), replay that action now.
+    unawaited(_replayPendingCallAction());
+    // The killed-app FCM handler may have stashed an incoming call (full-screen
+    // notification). Materialize it once the engine is up so the ring shows
+    // even if the notification launch itself was not replayed.
+    unawaited(_replayPendingIncomingCall());
+  }
+
+  /// Native Android ring screen pushes Accept/Decline over `privet/incoming_call`.
+  void _attachAndroidCallChannel() {
+    if (!_isMobilePlatform ||
+        defaultTargetPlatform != TargetPlatform.android ||
+        _androidCallChannelAttached) {
+      return;
+    }
+    _androidCallChannelAttached = true;
+    attachAndroidCallChannel(
+      onAccept: (data) => unawaited(_acceptIncomingFromPush(data)),
+      onDecline: (data) => unawaited(_declineIncomingFromPush(data)),
+    );
+  }
+
+  void clearNotificationsDenied() {
+    if (!notificationsDenied) return;
+    notificationsDenied = false;
+    notifySession();
   }
 
   Future<void> _attachMobilePushIfNeeded() async {
     if (_mobilePushAttached) return;
     _mobilePushAttached = true;
-    await attachMobilePushHandlers(onOpenPayload: _handleMobilePushPayload);
+    await attachMobilePushHandlers(
+      onOpenPayload: _handleMobilePushPayload,
+      onAction: _handleMobilePushAction,
+    );
+  }
+
+  void _handleMobilePushAction(String actionId, Map<String, String> data) {
+    if (actionId == 'answer') {
+      unawaited(_acceptIncomingFromPush(data));
+    } else if (actionId == 'decline') {
+      unawaited(_declineIncomingFromPush(data));
+    }
+  }
+
+  /// A call notification tap / full-screen launch / notification Answer button:
+  /// rebuild the incoming ring from the push payload so Accept/Decline work
+  /// even when the app was killed or the WS ring was missed.
+  Future<void> _acceptIncomingFromPush(Map<String, String> data) async {
+    await _materializeIncomingCallFromPush(data);
+    final incoming = ringing;
+    if (incoming == null) return;
+    await acceptIncoming(withVideo: incoming.call.mode != 'audio');
+  }
+
+  Future<void> _declineIncomingFromPush(Map<String, String> data) async {
+    await _materializeIncomingCallFromPush(data);
+    if (ringing == null) return;
+    rejectIncoming();
+  }
+
+  Future<void> _materializeIncomingCallFromPush(
+    Map<String, String> data,
+  ) async {
+    final callId = data['callId'];
+    final conversationId = data['conversationId'];
+    if (callId == null || callId.isEmpty || conversationId == null) {
+      return;
+    }
+    if (callSession != null || ringing != null) return;
+    final me = user;
+    if (me == null) return;
+    final fromId = data['fromUserId'] ?? '';
+    final mode = data['mode'] ?? 'video';
+
+    unawaited(refreshInbox().catchError((_) {}));
+    PrivetUser? peer;
+    for (final u in directory) {
+      if (u.id == fromId) {
+        peer = u;
+        break;
+      }
+    }
+    peer ??= PrivetUser(
+      id: fromId,
+      handle: data['callerHandle'] ?? '',
+      displayName: data['callerDisplayName'] ?? 'Peer',
+      avatarHue: int.tryParse(data['callerAvatarHue'] ?? '') ?? 160,
+    );
+
+    ringing = ActiveCall(
+      call: CallInfo(
+        id: callId,
+        conversationId: conversationId,
+        mode: mode,
+        fromUserId: fromId,
+        toUserId: me.id,
+      ),
+      phase: CallPhase.incoming,
+      peer: peer,
+      isCaller: false,
+      withVideo: mode != 'audio',
+    );
+    callMinimized = false;
+    startIncomingCallSound();
+    // CallOverlay renders off callTick — without this the full-screen
+    // Accept/Decline view never appears on incoming calls.
+    notifyCall();
+  }
+
+  /// On a cold start, check whether the native ring screen stored a pending
+  /// accept/decline while the Flutter engine was not yet running. If so,
+  /// materialize the call and replay the action.
+  Future<void> _replayPendingCallAction() async {
+    if (!_isMobilePlatform ||
+        defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    final pending = await readPendingCallAction();
+    if (pending == null) return;
+    await clearPendingCallAction();
+
+    final action = pending['action'] ?? '';
+    if (action != 'accept' && action != 'decline') return;
+
+    final callId = pending['callId'] ?? '';
+    if (callId.isEmpty) return;
+
+    // The call metadata is carried in the pending action payload, so we can
+    // reconstruct the incoming ring even if the original FCM push has already
+    // been consumed by getInitialMessage (which fires only once).
+    final fromId = pending['fromUserId'] ?? '';
+    final mode = pending['mode'] ?? 'audio';
+    final conversationId = pending['conversationId'] ?? '';
+    final me = user;
+    if (me == null) return;
+
+    // Already ringing or in a call — the pending action is stale.
+    if (callSession != null || ringing != null) return;
+
+    // Resolve the caller from the directory (may have populated during
+    // login/startup). Fall back to the push payload fields.
+    PrivetUser? peer;
+    for (final u in directory) {
+      if (u.id == fromId) {
+        peer = u;
+        break;
+      }
+    }
+    peer ??= PrivetUser(
+      id: fromId,
+      handle: pending['callerHandle'] ?? '',
+      displayName: pending['callerDisplayName'] ?? 'Peer',
+      avatarHue: int.tryParse(pending['callerAvatarHue'] ?? '') ?? 160,
+    );
+
+    ringing = ActiveCall(
+      call: CallInfo(
+        id: callId,
+        conversationId: conversationId,
+        mode: mode,
+        fromUserId: fromId,
+        toUserId: me.id,
+      ),
+      phase: CallPhase.incoming,
+      peer: peer,
+      isCaller: false,
+      withVideo: mode != 'audio',
+    );
+    callMinimized = false;
+    notifyCall();
+    startIncomingCallSound();
+
+    if (action == 'accept') {
+      await acceptIncoming(withVideo: mode != 'audio');
+    } else {
+      rejectIncoming();
+    }
+  }
+
+  /// Post the native Teams-style ring for a ringing [call] from [from].
+  /// Marks the call in SharedPreferences so the FCM background handler knows
+  /// not to stack a second (Flutter-built) full-screen notification.
+  Future<void> _showAndroidIncomingRing(CallInfo call, PrivetUser from) async {
+    await showAndroidIncomingCall({
+      'callId': call.id,
+      'conversationId': call.conversationId,
+      'mode': call.mode,
+      'fromUserId': from.id,
+      'callerDisplayName': from.displayName,
+      'callerHandle': from.handle,
+      'callerAvatarHue': '${from.avatarHue}',
+    });
+    try {
+      final prefs = await _prefs();
+      await prefs.setBool('native_call_handled_${call.id}', true);
+    } catch (_) {}
+  }
+
+  /// Cold start: the killed-app FCM background handler stashed an incoming
+  /// call under `pending_incoming_call` and posted a full-screen notification
+  /// that launches the app. Materialize the ring even if the
+  /// notification-response replay was missed.
+  Future<void> _replayPendingIncomingCall() async {
+    if (!_isMobilePlatform ||
+        defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    final prefs = await _prefs();
+    final raw = prefs.getString('pending_incoming_call');
+    if (raw == null || raw.isEmpty) return;
+    final stashedAt = prefs.getInt('pending_incoming_call_at') ?? 0;
+    await prefs.remove('pending_incoming_call');
+    await prefs.remove('pending_incoming_call_at');
+    // The server-side ring timeout is 60s — never ring for a stale call.
+    if (DateTime.now().millisecondsSinceEpoch - stashedAt > 90_000) return;
+    if (callSession != null || ringing != null) return;
+    await _materializeIncomingCallFromPush(decodeNotificationPayload(raw));
+  }
+
+  /// Dismiss the native ring for [callId] and forget its dedup marker.
+  Future<void> _cancelAndroidIncoming(String callId) async {
+    if (callId.isEmpty) return;
+    await cancelAndroidIncomingCall(callId);
+    try {
+      final prefs = await _prefs();
+      await prefs.remove('native_call_handled_$callId');
+    } catch (_) {}
+  }
+
+  /// The app left the foreground while an incoming call was ringing: hand the
+  /// ring over to the native full-screen screen (lock / switch apps still
+  /// shows the call, Teams-style).
+  Future<void> postAndroidRingWhenBackgrounded() async {
+    if (!_isMobilePlatform ||
+        defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    final ring = ringing;
+    if (ring == null || ring.isCaller) return;
+    stopIncomingCallSound();
+    await _showAndroidIncomingRing(ring.call, ring.peer);
+  }
+
+  /// Returning to the foreground hands the ring back to the in-app overlay.
+  Future<void> cancelAndroidRingOnForeground() async {
+    if (!_isMobilePlatform ||
+        defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    final ring = ringing;
+    if (ring == null) return;
+    await _cancelAndroidIncoming(ring.call.id);
+    startIncomingCallSound();
   }
 
   void _handleMobilePushPayload(Map<String, String> data) {
     final type = data['type'] ?? '';
     if (type == 'call.incoming') {
-      unawaited(refreshInbox());
+      unawaited(_materializeIncomingCallFromPush(data));
       return;
     }
     final chatId = data['conversationId'];
@@ -4225,6 +4572,7 @@ class PrivetState extends ChangeNotifier {
   Future<void> deleteReminder(PaymentReminder r) async {
     final items = await _api.deleteReminder(r.id);
     _setReminders(r.conversationId, items);
+    await refreshReminderHistory(r.conversationId);
   }
 
   Future<void> toggleTaskPin(TaskItem item) async {
@@ -4670,7 +5018,37 @@ Examples:
     stopOutgoingTyping();
     uploading = true;
     error = null;
+
+    // Teams-style optimistic bubble: drop the placeholder into the chat
+    // immediately (before bytes finish uploading) so the user sees a "ready
+    // box" with a loading animation instead of nothing for 1-2s. The bubble
+    // renders that box because its attachments have no mediaUrl yet.
+    final clientId = _uuid.v4();
+    final body = expandEmoticons((caption ?? '').trim());
+    final placeholder = ChatMessage(
+      id: clientId,
+      conversationId: chatId,
+      body: body,
+      kind: files.length > 1 ? 'album' : 'image',
+      attachments: [
+        for (final f in files)
+          MediaAttachment(
+            mediaUrl: '',
+            kind: 'image',
+            mimeType: f.mimeType,
+            fileName: f.filename,
+          ),
+      ],
+      createdAt: DateTime.now(),
+      sender: me,
+      replyToId: replyToId,
+      replyTo: replyTo,
+      pending: true,
+    );
+    messagesByChat.putIfAbsent(chatId, () => []);
+    messagesByChat[chatId] = [...messagesByChat[chatId]!, placeholder];
     notifyListeners();
+
     try {
       final uploaded = <MediaAttachment>[];
       for (final file in files) {
@@ -4691,28 +5069,28 @@ Examples:
         );
       }
 
-      final clientId = _uuid.v4();
-      final body = expandEmoticons((caption ?? '').trim());
       final kind = uploaded.length > 1 ? 'album' : uploaded.first.kind;
       final first = uploaded.first;
-      final optimistic = ChatMessage(
-        id: clientId,
-        conversationId: chatId,
-        body: body,
+      final sent = placeholder.copyWith(
         kind: kind,
         mediaUrl: first.mediaUrl,
         mimeType: first.mimeType,
         fileName: first.fileName,
         fileSize: first.fileSize,
         attachments: uploaded,
-        createdAt: DateTime.now(),
-        sender: me,
-        replyToId: replyToId,
-        replyTo: replyTo,
-        pending: true,
       );
-      messagesByChat.putIfAbsent(chatId, () => []);
-      messagesByChat[chatId] = [...messagesByChat[chatId]!, optimistic];
+
+      // Swap the placeholder for the uploaded version in place (same id, so
+      // the server ack later removes/replaces it cleanly).
+      final list = List<ChatMessage>.from(messagesByChat[chatId] ?? []);
+      final idx = list.indexWhere((m) => m.id == clientId);
+      if (idx >= 0) {
+        list[idx] = sent;
+      } else {
+        list.add(sent);
+        list.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      }
+      messagesByChat[chatId] = list;
       notifyListeners();
 
       _rt.sendMessage(
@@ -4729,6 +5107,10 @@ Examples:
         attachments: uploaded.map((e) => e.toJson()).toList(),
       );
     } catch (e) {
+      // Upload failed — drop the placeholder bubble again.
+      messagesByChat[chatId] = List<ChatMessage>.from(messagesByChat[chatId] ?? [])
+          .where((m) => m.id != clientId)
+          .toList();
       error = _friendlyError(e);
     } finally {
       uploading = false;
@@ -4855,7 +5237,7 @@ Examples:
     );
     callMinimized = false;
     playOutgoingCallSound();
-    notifyListeners();
+    notifyCall();
     wakeUiAfterMediaDialog();
 
     _rt.inviteCall(conversationId: chatId, toUserId: target.id, mode: mode);
@@ -4975,8 +5357,10 @@ Examples:
     }
 
     ringing = null;
-    notifyListeners();
+    notifyCall();
     wakeUiAfterMediaDialog();
+    unawaited(cancelMobileNotification('call:${incoming.call.id}'));
+    unawaited(_cancelAndroidIncoming(incoming.call.id));
     _rt.acceptCall(incoming.call.id);
     await _beginSession(
       call: incoming.call,
@@ -5008,8 +5392,9 @@ Examples:
     }
     suppressCallTones();
     ringing = null;
-    notifyListeners();
+    notifyCall();
     wakeUiAfterMediaDialog();
+    unawaited(_cancelAndroidIncoming(incoming.call.id));
     _rt.acceptCall(incoming.call.id);
     await _beginSession(
       call: incoming.call,
@@ -5025,6 +5410,8 @@ Examples:
     if (incoming == null) return;
     stopAllCallSounds();
     allowCallTones();
+    unawaited(cancelMobileNotification('call:${incoming.call.id}'));
+    unawaited(_cancelAndroidIncoming(incoming.call.id));
     _rt.rejectCall(incoming.call.id);
     ringing = null;
     callMinimized = false;
@@ -5059,7 +5446,7 @@ Examples:
       await session.disposeSession();
     }
     _clearPendingRemoteControl();
-    notifyListeners();
+    notifyCall();
   }
 
   /// Peer/server hangup: release media before the messenger rebuilds over
@@ -5077,6 +5464,10 @@ Examples:
     stopAllCallSounds();
     allowCallTones();
     if (callId == null || ringing?.call.id == callId) {
+      if (ringing != null) {
+        unawaited(cancelMobileNotification('call:${ringing!.call.id}'));
+        unawaited(_cancelAndroidIncoming(ringing!.call.id));
+      }
       ringing = null;
     }
     final ended = callSession;
@@ -5098,7 +5489,7 @@ Examples:
       data: {'elapsedMs': sw.elapsedMilliseconds},
     );
     // #endregion
-    notifyListeners();
+    notifyCall();
   }
 
   Future<void> _beginSession({
@@ -5187,7 +5578,7 @@ Examples:
         playCallConnectedSound();
       }
       _applyPendingRemoteControl(session);
-      notifyListeners();
+      notifyCall();
     } catch (e) {
       error = 'Could not start media: $e';
       _rt.hangupCall(call.id, toUserId: peer.id);
@@ -5450,7 +5841,14 @@ Examples:
           }
         }
         if (isMuted || !notificationsEnabled) return;
-        if (shouldSuppressMobileNotification('msg:$chatId')) return;
+        // On phones FCM owns the OS toast while the app is backgrounded —
+        // the WS toast is the foreground heads-up only (plus web/desktop).
+        if (_isMobilePlatform && !mobileAppInForeground) return;
+        if (shouldSuppressMobileNotification(
+          'msg:${event['messageId'] ?? chatId}',
+        )) {
+          return;
+        }
         // Sound plays on the `message` event (every incoming). Notify is
         // OS toast only — no focus/viewing gates.
         showWebNotification(
@@ -5482,7 +5880,7 @@ Examples:
           unawaited(_discardPendingLocal());
           unawaited(_discardPendingDisplay());
           ringing = null;
-          notifyListeners();
+          notifyCall();
           return;
         }
         PrivetUser? peer = ringing?.isCaller == true ? ringing!.peer : null;
@@ -5511,7 +5909,7 @@ Examples:
           playOutgoingCallSound();
           _flashDesktopWindowForCall();
         }
-        notifyListeners();
+        notifyCall();
       case 'call.incoming':
         final call = CallInfo.fromJson(event['call'] as Map<String, dynamic>);
         final from = PrivetUser.fromJson(event['from'] as Map<String, dynamic>);
@@ -5523,9 +5921,23 @@ Examples:
           withVideo: call.mode != 'audio', // video | screen show as media call
         );
         callMinimized = false;
-        startIncomingCallSound();
-        _flashDesktopWindowForCall();
-        if (notificationsEnabled && !mobileAppInForeground) {
+        if (_isMobilePlatform &&
+            defaultTargetPlatform == TargetPlatform.android &&
+            !mobileAppInForeground) {
+          // Native Teams-style ring: full-screen over the lock screen (or a
+          // call heads-up with Answer/Decline when unlocked). The in-app
+          // overlay covers the foreground case.
+          unawaited(_showAndroidIncomingRing(call, from));
+        } else {
+          startIncomingCallSound();
+          _flashDesktopWindowForCall();
+        }
+        // On phones the FCM push owns the incoming-call notification + full
+        // screen intent while backgrounded; the in-app overlay covers the
+        // foreground case. Web/desktop still use the OS notification here.
+        if (notificationsEnabled &&
+            !mobileAppInForeground &&
+            !_isMobilePlatform) {
           showWebNotification(
             title: '${from.displayName} is calling',
             body: call.mode == 'audio'
@@ -5535,7 +5947,7 @@ Examples:
             isCall: true,
           );
         }
-        notifyListeners();
+        notifyCall();
       case 'call.accepted':
         final callId = event['callId'] as String?;
         final ring = ringing;
@@ -5545,7 +5957,7 @@ Examples:
             ring.isCaller &&
             (callId == null || ring.call.id == callId)) {
           ringing = null;
-          notifyListeners();
+          notifyCall();
           // Reuse mic/camera opened on the call-icon click — no second prompt.
           final local = _takePendingLocal();
           unawaited(
@@ -5563,11 +5975,11 @@ Examples:
           // if the session is already up (accept raced with this event).
           if (callSession != null) {
             ringing = null;
-            notifyListeners();
+            notifyCall();
           }
         } else if (ring != null && ring.isCaller) {
           ringing = null;
-          notifyListeners();
+          notifyCall();
         }
       case 'call.share_stopped':
         final callId = event['callId'] as String?;

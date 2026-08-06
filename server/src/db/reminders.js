@@ -150,7 +150,6 @@ export function deleteReminder(id, userId) {
   const existing = db.prepare('SELECT * FROM payment_reminders WHERE id = ?').get(id);
   if (!existing) throw new Error('not found');
   if (!userInConversation(existing.conversation_id, userId)) throw new Error('forbidden');
-  if (existing.paid) throw new Error('cannot delete history');
   db.prepare('DELETE FROM payment_expenses WHERE payment_id = ?').run(id);
   db.prepare('DELETE FROM payment_reminders WHERE id = ?').run(id);
   return { conversationId: existing.conversation_id, deletedId: id };

@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:background="#0E1114"
+    android:padding="32dp">
+
+    <FrameLayout
+        android:id="@+id/avatar_container"
+        android:layout_width="132dp"
+        android:layout_height="132dp">
+
+        <TextView
+            android:id="@+id/avatar_initial"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:textColor="#0E1114"
+            android:textSize="52sp"
+            android:textStyle="bold"
+            android:fontFamily="sans-serif-medium" />
+    </FrameLayout>
+
+    <TextView
+        android:id="@+id/caller_name"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="30dp"
+        android:gravity="center"
+        android:textSize="30sp"
+        android:textStyle="bold"
+        android:textColor="#E8EEF2"
+        android:fontFamily="sans-serif"
+        android:maxLines="2"
+        android:ellipsize="end" />
+
+    <TextView
+        android:id="@+id/mode_label"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:gravity="center"
+        android:textSize="17sp"
+        android:textColor="#9AA7B2"
+        android:fontFamily="sans-serif" />
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="72dp"
+        android:orientation="horizontal"
+        android:gravity="center">
+
+        <ImageButton
+            android:id="@+id/btn_decline"
+            android:layout_width="78dp"
+            android:layout_height="78dp"
+            android:layout_marginEnd="44dp"
+            android:background="@drawable/ring_btn_decline"
+            android:src="@drawable/ic_call_decline"
+            android:scaleType="centerInside"
+            android:contentDescription="Decline" />
+
+        <ImageButton
+            android:id="@+id/btn_accept"
+            android:layout_width="78dp"
+            android:layout_height="78dp"
+            android:layout_marginStart="44dp"
+            android:background="@drawable/ring_btn_accept"
+            android:src="@drawable/ic_call_accept"
+            android:scaleType="centerInside"
+            android:contentDescription="Answer" />
+    </LinearLayout>
+</LinearLayout>

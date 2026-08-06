@@ -45,20 +45,39 @@ Future<String?> registerMobilePushToken() async {
 /// Wire foreground + tap handlers after [PrivetState] is ready.
 Future<void> attachMobilePushHandlers({
   required void Function(Map<String, String> data) onOpenPayload,
+  void Function(String actionId, Map<String, String> data)? onAction,
 }) async {
   if (kIsWeb || !MobilePushConfig.isConfigured) return;
   try {
     await _ensureFirebase();
-    await initMobileNotificationPlugin(onTap: (payload) {
-      onOpenPayload(_payloadToMap(payload));
-    });
+    await initMobileNotificationPlugin(
+      onTap: (payload) {
+        onOpenPayload(_payloadToMap(payload));
+      },
+      onAction: (actionId, payload) {
+        onAction?.call(actionId, _payloadToMap(payload));
+      },
+    );
+
+    // Cold start via a full-screen call notification (posted by the background
+    // handler while the app was killed): replay the launch so the
+    // Accept/Decline ring materializes over the lock screen.
+    final launchResponse = await takeLaunchNotificationResponse();
+    if (launchResponse != null &&
+        (launchResponse.payload?.isNotEmpty ?? false)) {
+      onOpenPayload(_payloadToMap(launchResponse.payload));
+    }
 
     FirebaseMessaging.onMessage.listen((message) async {
-      await showMobileNotificationFromRemoteMessage(
-        message,
-        force: message.data['type'] == 'call.incoming',
-      );
-      onOpenPayload(_stringifyData(message.data));
+      final isCall = message.data['type'] == 'call.incoming';
+      if (isCall) {
+        // Foreground calls are covered by the in-app Accept/Decline overlay
+        // (set up from the WS ring or this very payload). Never stack a
+        // full-screen intent over it.
+        onOpenPayload(_stringifyData(message.data));
+      } else {
+        await showMobileNotificationFromRemoteMessage(message);
+      }
     });
 
     FirebaseMessaging.onMessageOpenedApp.listen((message) {
@@ -79,9 +98,14 @@ Future<void> attachMobilePushHandlers({
   }
 }
 
-Map<String, String> _payloadToMap(String? payload) {
-  if (payload == null || payload.isEmpty) return const {};
+Map<String, String> _payloadToMap(String? payload) =>
+    decodeNotificationPayload(payload ?? '');
+
+/// Decode a `key=value|key=value` notification payload string (the reverse of
+/// [encodeNotificationPayload]).
+Map<String, String> decodeNotificationPayload(String payload) {
   final out = <String, String>{};
+  if (payload.isEmpty) return out;
   for (final part in payload.split('|')) {
     final idx = part.indexOf('=');
     if (idx <= 0) continue;

@@ -587,6 +587,42 @@ std::string ArgString(FlValue* args, const char* key) {
   return fl_value_get_string(v);
 }
 
+/// Writes [data] (any image format gdk-pixbuf decodes: PNG, JPEG, GIF, BMP,
+/// WebP) to the X11/Wayland clipboard as an image. Other apps receive it as
+/// image/png (GTK converts the pixbuf on request). Mirrors the read side
+/// (getClipboardImagePng) so "Copy image" works in the native app too.
+bool SetClipboardImage(const uint8_t* data, gsize length) {
+  if (data == nullptr || length == 0) return false;
+  GError* error = nullptr;
+  GdkPixbufLoader* loader = gdk_pixbuf_loader_new();
+  if (!gdk_pixbuf_loader_write(loader, data, length, &error)) {
+    if (error != nullptr) g_error_free(error);
+    g_object_unref(loader);
+    return false;
+  }
+  if (!gdk_pixbuf_loader_close(loader, &error)) {
+    if (error != nullptr) g_error_free(error);
+    g_object_unref(loader);
+    return false;
+  }
+  GdkPixbuf* pixbuf = gdk_pixbuf_loader_get_pixbuf(loader);
+  if (pixbuf == nullptr) {
+    g_object_unref(loader);
+    return false;
+  }
+  GtkClipboard* clip = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+  if (clip == nullptr) {
+    g_object_unref(loader);
+    return false;
+  }
+  g_object_ref(pixbuf);
+  g_object_unref(loader);
+  gtk_clipboard_set_image(clip, pixbuf);
+  gtk_clipboard_store(clip);
+  g_object_unref(pixbuf);
+  return true;
+}
+
 FlMethodResponse* OnMethod(FlMethodCall* method_call) {
   const gchar* name = fl_method_call_get_name(method_call);
   FlValue* args = fl_method_call_get_args(method_call);
@@ -788,6 +824,19 @@ FlMethodResponse* OnMethod(FlMethodCall* method_call) {
       gtk_clipboard_store(clip);
     }
     return FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+  }
+
+  if (strcmp(name, "setClipboardImage") == 0) {
+    bool ok = false;
+    if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+      FlValue* bytes = fl_value_lookup_string(args, "png");
+      if (bytes && fl_value_get_type(bytes) == FL_VALUE_TYPE_UINT8_LIST) {
+        const uint8_t* data = fl_value_get_uint8_list(bytes);
+        ok = SetClipboardImage(data, fl_value_get_length(bytes));
+      }
+    }
+    g_autoptr(FlValue) result = fl_value_new_bool(ok);
+    return FL_METHOD_RESPONSE(fl_method_success_response_new(result));
   }
 
   if (strcmp(name, "setInputLock") == 0) {

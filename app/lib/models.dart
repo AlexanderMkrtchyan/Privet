@@ -162,6 +162,10 @@ class ReplyPreview {
     required this.kind,
     required this.senderName,
     this.senderHandle = '',
+    this.mediaUrl,
+    this.fileName,
+    this.mimeType,
+    this.mediaThumbnails = const [],
   });
 
   final String id;
@@ -170,40 +174,103 @@ class ReplyPreview {
   final String senderName;
   final String senderHandle;
 
+  /// First image attachment of the replied-to message, when it has one —
+  /// used to render a small thumbnail inside the reply quote.
+  final String? mediaUrl;
+  final String? fileName;
+  final String? mimeType;
+
+  /// All image thumbnails from the replied-to message (server includes all,
+  /// not just the first). Falls back to [mediaUrl] when the server does not
+  /// supply this field (old messages or legacy clients).
+  final List<ReplyThumbnail> mediaThumbnails;
+
+  /// All image thumbnail URLs for use in reply rendering. Combines
+  /// [mediaThumbnails] (new server field) with a legacy fallback from
+  /// [mediaUrl].
+  List<ReplyThumbnail> get allThumbnails {
+    if (mediaThumbnails.isNotEmpty) return mediaThumbnails;
+    if (mediaUrl != null && mediaUrl!.isNotEmpty) {
+      return [ReplyThumbnail(mediaUrl: mediaUrl!, fileName: fileName, mimeType: mimeType)];
+    }
+    return const [];
+  }
+
   factory ReplyPreview.fromJson(Map<String, dynamic> json) => ReplyPreview(
         id: json['id'] as String,
         body: (json['body'] as String?) ?? '',
         kind: (json['kind'] as String?) ?? 'text',
         senderName: (json['senderName'] as String?) ?? '',
         senderHandle: (json['senderHandle'] as String?) ?? '',
+        mediaUrl: json['mediaUrl'] as String?,
+        fileName: json['fileName'] as String?,
+        mimeType: json['mimeType'] as String?,
+        mediaThumbnails: (json['mediaThumbnails'] as List<dynamic>?)
+                ?.map((e) =>
+                    ReplyThumbnail.fromJson(e as Map<String, dynamic>))
+                .toList() ??
+            const [],
       );
 
   factory ReplyPreview.fromMessage(
     ChatMessage m, {
     String? bodyOverride,
-  }) =>
-      ReplyPreview(
-        id: m.id,
-        body: (bodyOverride != null && bodyOverride.isNotEmpty)
-            ? bodyOverride
-            : m.kind == 'call'
-                ? CallHistoryPayload.preview(m.body)
-                : m.body.isNotEmpty
-                    ? m.body
-                    : switch (m.kind) {
-                        'image' => '📷 Photo',
-                        'video' => '🎬 Video',
-                        'audio' => '🎵 Audio',
-                        'voice' => '🎤 Voice message',
-                        'file' => m.fileName ?? '📎 File',
-                        'album' => m.body.isNotEmpty
-                            ? m.body
-                            : '📎 ${m.mediaItems.length} attachments',
-                        _ => m.body,
-                      },
-        kind: m.kind,
-        senderName: m.sender.displayName,
-        senderHandle: m.sender.handle,
+  }) {
+    final images = m.mediaItems.where((e) => e.kind == 'image').toList();
+    final firstImage = images.isNotEmpty ? images.first : null;
+    return ReplyPreview(
+      id: m.id,
+      body: (bodyOverride != null && bodyOverride.isNotEmpty)
+          ? bodyOverride
+          : m.kind == 'call'
+              ? CallHistoryPayload.preview(m.body)
+              : m.body.isNotEmpty
+                  ? m.body
+                  : switch (m.kind) {
+                      'image' => '📷 Photo',
+                      'video' => '🎬 Video',
+                      'audio' => '🎵 Audio',
+                      'voice' => '🎤 Voice message',
+                      'file' => m.fileName ?? '📎 File',
+                      'album' => m.body.isNotEmpty
+                          ? m.body
+                          : '📎 ${m.mediaItems.length} attachments',
+                      _ => m.body,
+                    },
+      kind: m.kind,
+      senderName: m.sender.displayName,
+      senderHandle: m.sender.handle,
+      mediaUrl: firstImage?.mediaUrl,
+      fileName: firstImage?.fileName,
+      mimeType: firstImage?.mimeType,
+      mediaThumbnails: images
+          .map((a) => ReplyThumbnail(
+                mediaUrl: a.mediaUrl,
+                fileName: a.fileName,
+                mimeType: a.mimeType,
+              ))
+          .toList(),
+    );
+  }
+}
+
+/// A single image thumbnail inside a reply preview.
+class ReplyThumbnail {
+  const ReplyThumbnail({
+    required this.mediaUrl,
+    this.fileName,
+    this.mimeType,
+  });
+
+  final String mediaUrl;
+  final String? fileName;
+  final String? mimeType;
+
+  factory ReplyThumbnail.fromJson(Map<String, dynamic> json) =>
+      ReplyThumbnail(
+        mediaUrl: (json['mediaUrl'] as String?) ?? '',
+        fileName: json['fileName'] as String?,
+        mimeType: json['mimeType'] as String?,
       );
 }
 
@@ -794,19 +861,25 @@ class ChatMessage {
     DateTime? editedAt,
     DateTime? deletedAt,
     bool? aiLocal,
+    String? kind,
+    List<MediaAttachment>? attachments,
+    String? mediaUrl,
+    String? mimeType,
+    String? fileName,
+    int? fileSize,
   }) =>
       ChatMessage(
         id: id,
         conversationId: conversationId,
         body: body ?? this.body,
-        kind: kind,
+        kind: kind ?? this.kind,
         createdAt: createdAt,
         sender: sender,
-        mediaUrl: mediaUrl,
-        mimeType: mimeType,
-        fileName: fileName,
-        fileSize: fileSize,
-        attachments: attachments,
+        mediaUrl: mediaUrl ?? this.mediaUrl,
+        mimeType: mimeType ?? this.mimeType,
+        fileName: fileName ?? this.fileName,
+        fileSize: fileSize ?? this.fileSize,
+        attachments: attachments ?? this.attachments,
         replyToId: replyToId,
         replyTo: replyTo ?? this.replyTo,
         forwardedFrom: forwardedFrom ?? this.forwardedFrom,

@@ -1,9 +1,9 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 
+import 'app_image_clipboard.dart';
 import 'clipboard_files.dart';
 import 'remote_input.dart';
 
@@ -73,16 +73,73 @@ void unbindImagePaste([int? id]) {
   _onImage = null;
 }
 
-Future<void> _tryPasteImage() async {
+Future<PickedBytes?> readOsClipboardImage() async {
   final bytes = await RemoteInput.getClipboardImagePng();
-  if (bytes == null || bytes.isEmpty) return;
-  _onImage?.call(
-    PickedBytes(
-      bytes: bytes,
-      filename: 'paste-png-${DateTime.now().millisecondsSinceEpoch}.png',
-      mimeType: 'image/png',
-    ),
+  if (bytes == null || bytes.isEmpty) return null;
+  return _pickedFromBytes(bytes);
+}
+
+Future<PickedBytes?> readClipboardImage() async {
+  final os = await readOsClipboardImage();
+  if (os != null) return os;
+  // Fallback: in-app image clipboard for platforms without native image
+  // clipboard support (e.g. iOS where the remote_input channel is absent).
+  final appBytes = peekCopiedImage();
+  if (appBytes != null) return _pickedFromBytes(appBytes);
+  return null;
+}
+
+/// Wraps raw image bytes with the correct MIME + filename from the magic
+/// bytes, so pasted images survive regardless of the source format.
+PickedBytes _pickedFromBytes(Uint8List bytes) {
+  final mime = _sniffImageMime(bytes);
+  final ext = switch (mime) {
+    'image/jpeg' => 'jpg',
+    'image/gif' => 'gif',
+    'image/webp' => 'webp',
+    _ => 'png',
+  };
+  return PickedBytes(
+    bytes: bytes,
+    filename: 'paste-$ext-${DateTime.now().millisecondsSinceEpoch}.$ext',
+    mimeType: mime,
   );
+}
+
+String _sniffImageMime(Uint8List bytes) {
+  if (bytes.length >= 8 &&
+      bytes[0] == 0x89 &&
+      bytes[1] == 0x50 &&
+      bytes[2] == 0x4E &&
+      bytes[3] == 0x47) {
+    return 'image/png';
+  }
+  if (bytes.length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8) {
+    return 'image/jpeg';
+  }
+  if (bytes.length >= 3 &&
+      bytes[0] == 0x47 &&
+      bytes[1] == 0x49 &&
+      bytes[2] == 0x46) {
+    return 'image/gif';
+  }
+  if (bytes.length >= 12 &&
+      bytes[0] == 0x52 &&
+      bytes[1] == 0x49 &&
+      bytes[2] == 0x46 &&
+      bytes[3] == 0x46 &&
+      bytes[8] == 0x57 &&
+      bytes[9] == 0x45 &&
+      bytes[10] == 0x42 &&
+      bytes[11] == 0x50) {
+    return 'image/webp';
+  }
+  return 'image/png';
+}
+
+Future<void> _tryPasteImage() async {
+  final picked = await readClipboardImage();
+  if (picked != null) _onImage?.call(picked);
 }
 
 Future<Uint8List?> readBlobAsBytes(dynamic blob) async => null;

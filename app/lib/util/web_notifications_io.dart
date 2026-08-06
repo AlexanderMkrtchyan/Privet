@@ -44,7 +44,7 @@ Future<bool> _initAndroidNotifications() async {
   if (!_androidNotifySupported) return false;
   if (_androidReady) return true;
   _androidNotifications ??= FlutterLocalNotificationsPlugin();
-  const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+  const android = AndroidInitializationSettings('ic_stat_privet');
   await _androidNotifications!.initialize(
     const InitializationSettings(android: android),
     onDidReceiveNotificationResponse: (response) {

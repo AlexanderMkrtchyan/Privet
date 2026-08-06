@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:audioplayers/audioplayers.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -16,6 +15,7 @@ import '../util/agent_debug.dart';
 import '../util/ai_turn.dart';
 import '../util/app_clipboard.dart';
 import '../util/call_history.dart';
+import '../util/copy_image.dart';
 import '../util/low_resource.dart';
 import '../util/media_download.dart';
 import '../util/perf.dart';
@@ -32,6 +32,12 @@ final _messageTimeFormat = DateFormat.Hm();
 
 /// Prevents double-open from Listener + GestureDetector both firing on web.
 bool _reactionMenuOpen = false;
+
+/// Media item the user right-clicked inside a chat image tile, set
+/// synchronously by the tile's pointer handler (which runs before the bubble's
+/// own handler on the same event) so the bubble menu can apply Copy image /
+/// Reply / Forward / Add to task to THAT image instead of the first one.
+MediaAttachment? _imageMenuTarget;
 
 /// Non-empty while the user has selected message body text — used so drag
 /// selection can show Copy / Reply / Forward without also opening the
@@ -99,6 +105,7 @@ class MessageBubble extends StatelessWidget {
     this.onEdit,
     this.onDelete,
     this.onSeenBy,
+    this.onReplyTap,
     this.fontScale = 1.0,
   });
 
@@ -131,6 +138,9 @@ class MessageBubble extends StatelessWidget {
   final ValueChanged<ChatMessage>? onEdit;
   final ValueChanged<ChatMessage>? onDelete;
   final ValueChanged<ChatMessage>? onSeenBy;
+
+  /// Tapping the reply quote jumps to and highlights the replied-to message.
+  final ValueChanged<ReplyPreview>? onReplyTap;
 
   @override
   Widget build(BuildContext context) {
@@ -280,8 +290,12 @@ class MessageBubble extends StatelessWidget {
               // Flutter web: secondary mouse button (right-click).
               if (event.buttons == kSecondaryMouseButton) {
                 // One menu only — never stack with SelectableText / browser menus.
+                // An image tile's handler already ran (leaf-first) and, when the
+                // click was on an image, recorded it as the menu target.
+                final target = _imageMenuTarget;
+                _imageMenuTarget = null;
                 _dismissMessageSelectionUi?.call();
-                _openMenu(context, event.position);
+                _openMenu(context, event.position, imageTarget: target);
               }
             },
       child: ExcludeSemantics(
@@ -294,6 +308,8 @@ class MessageBubble extends StatelessWidget {
               ? null
               : (details) {
                   _dismissMessageSelectionUi?.call();
+                  // Long-press never targets a specific image.
+                  _imageMenuTarget = null;
                   _openMenu(context, details.globalPosition);
                 },
           child: Container(
@@ -362,7 +378,14 @@ class MessageBubble extends StatelessWidget {
                   ),
                 ],
                 if (message.replyTo != null) ...[
-                  _ReplyQuote(reply: message.replyTo!, fontScale: fontScale),
+                  _ReplyQuote(
+                    reply: message.replyTo!,
+                    fontScale: fontScale,
+                    mediaBase: mediaBase,
+                    onTap: onReplyTap == null
+                        ? null
+                        : () => onReplyTap!(message.replyTo!),
+                  ),
                   const SizedBox(height: 6),
                 ],
                 Align(
@@ -538,13 +561,27 @@ class MessageBubble extends StatelessWidget {
     );
   }
 
-  Future<void> _openMenu(BuildContext context, Offset globalPosition) async {
+  Future<void> _openMenu(
+    BuildContext context,
+    Offset globalPosition, {
+    MediaAttachment? imageTarget,
+  }) async {
     if (_reactionMenuOpen) return;
     _reactionMenuOpen = true;
 
     final size = MediaQuery.sizeOf(context);
     final left = (globalPosition.dx - 8).clamp(8.0, size.width - 288.0);
-    final top = (globalPosition.dy - 8).clamp(8.0, size.height - 320.0);
+    final top =
+        (globalPosition.dy - 8).clamp(8.0, (size.height - 440.0).clamp(8.0, size.height));
+    final hasImage = message.mediaItems.any((e) => e.kind == 'image');
+    // Warm the copy cache while the menu is up so "Copy image" is instant —
+    // the tap then just writes already-local bytes to the clipboard. Prefer
+    // the right-clicked image over the message's first image.
+    if (hasImage) {
+      final copyUrl =
+          imageTarget != null ? _mediaUrl(imageTarget) : _firstImageCopyUrl();
+      if (copyUrl != null) unawaited(prefetchImageForCopy(copyUrl));
+    }
 
     String? result;
     try {
@@ -563,6 +600,8 @@ class MessageBubble extends StatelessWidget {
                 final nav = Navigator.of(dialogCtx);
                 if (nav.canPop()) nav.pop(value);
               }
+
+              final hasTextToCopy = message.body.trim().isNotEmpty;
 
               Widget menu = Material(
                           color: PrivetTheme.panelElevated,
@@ -623,36 +662,98 @@ class MessageBubble extends StatelessWidget {
                                 const SizedBox(height: 6),
                                 Divider(height: 1, color: PrivetTheme.line),
                                 const SizedBox(height: 2),
-                                InkWell(
-                                  borderRadius: BorderRadius.circular(10),
-                                  mouseCursor: SystemMouseCursors.click,
-                                  onTap: () => close('copy'),
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 8,
-                                    ),
-                                    child: Row(
-                                      children: [
-                                        Icon(
-                                          Icons.copy_rounded,
-                                          size: 18,
-                                          color: PrivetTheme.signal.withValues(
-                                            alpha: 0.95,
+                                if (hasImage) ...[
+                                  InkWell(
+                                    borderRadius: BorderRadius.circular(10),
+                                    mouseCursor: SystemMouseCursors.click,
+                                    onTap: () => close('copy_image'),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 8,
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Icon(
+                                            Icons.image_outlined,
+                                            size: 18,
+                                            color: PrivetTheme.signal.withValues(
+                                              alpha: 0.95,
+                                            ),
                                           ),
-                                        ),
-                                        const SizedBox(width: 10),
-                                        Text(
-                                          'Copy',
-                                          style: GoogleFonts.ibmPlexSans(
-                                            fontWeight: FontWeight.w600,
-                                            fontSize: 14,
+                                          const SizedBox(width: 10),
+                                          Text(
+                                            'Copy image',
+                                            style: GoogleFonts.ibmPlexSans(
+                                              fontWeight: FontWeight.w600,
+                                              fontSize: 14,
+                                            ),
                                           ),
-                                        ),
-                                      ],
+                                        ],
+                                      ),
                                     ),
                                   ),
-                                ),
+                                  if (hasTextToCopy)
+                                    InkWell(
+                                      borderRadius: BorderRadius.circular(10),
+                                      mouseCursor: SystemMouseCursors.click,
+                                      onTap: () => close('copy_text'),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 8,
+                                          vertical: 8,
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            Icon(
+                                              Icons.copy_rounded,
+                                              size: 18,
+                                              color: PrivetTheme.signal
+                                                  .withValues(alpha: 0.95),
+                                            ),
+                                            const SizedBox(width: 10),
+                                            Text(
+                                              'Copy text',
+                                              style: GoogleFonts.ibmPlexSans(
+                                                fontWeight: FontWeight.w600,
+                                                fontSize: 14,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                ] else if (hasTextToCopy)
+                                  InkWell(
+                                    borderRadius: BorderRadius.circular(10),
+                                    mouseCursor: SystemMouseCursors.click,
+                                    onTap: () => close('copy'),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 8,
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Icon(
+                                            Icons.copy_rounded,
+                                            size: 18,
+                                            color: PrivetTheme.signal.withValues(
+                                              alpha: 0.95,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 10),
+                                          Text(
+                                            'Copy',
+                                            style: GoogleFonts.ibmPlexSans(
+                                              fontWeight: FontWeight.w600,
+                                              fontSize: 14,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
                                 InkWell(
                                   borderRadius: BorderRadius.circular(10),
                                   mouseCursor: SystemMouseCursors.click,
@@ -899,6 +1000,31 @@ class MessageBubble extends StatelessWidget {
     }
 
     if (!context.mounted || result == null) return;
+    // When the menu was opened by right-clicking one image in a multi-image
+    // message, the actions that reference media apply to that image only.
+    final scoped = (imageTarget != null && imageTarget.kind == 'image')
+        ? message.copyWith(kind: 'image', attachments: [imageTarget])
+        : message;
+    if (result == 'copy_image') {
+      final image = imageTarget ?? _firstImage();
+      if (image != null) {
+        final ok = await copyImageToClipboard(
+          _mediaUrl(image),
+          filename: image.fileName ?? 'image',
+        );
+        if (!ok && context.mounted) {
+          _showImageCopyError(context);
+        }
+      }
+      return;
+    }
+    if (result == 'copy_text') {
+      final text = message.body.trim();
+      if (text.isNotEmpty) {
+        await AppClipboard.setText(text);
+      }
+      return;
+    }
     if (result == 'copy') {
       final text = message.body.trim();
       if (text.isNotEmpty) {
@@ -907,19 +1033,19 @@ class MessageBubble extends StatelessWidget {
       return;
     }
     if (result == 'reply') {
-      onReply?.call(message);
+      onReply?.call(scoped);
       return;
     }
     if (result == 'forward') {
-      onForward?.call(message);
+      onForward?.call(scoped);
       return;
     }
     if (result == 'task') {
-      onAddToTask?.call(message);
+      onAddToTask?.call(scoped);
       return;
     }
     if (result == 'ask_ai') {
-      onAskAi?.call(message);
+      onAskAi?.call(scoped);
       return;
     }
     if (result == 'edit') {
@@ -947,6 +1073,7 @@ class MessageBubble extends StatelessWidget {
         items: items,
         mediaBase: mediaBase,
         caption: message.body,
+        pending: message.pending,
         fontScale: fontScale,
         onReplySelection: onReply == null ? null : replyWithSelection,
         onForwardSelection: onForward == null ? null : forwardWithSelection,
@@ -957,6 +1084,7 @@ class MessageBubble extends StatelessWidget {
         item: items.first,
         mediaBase: mediaBase,
         caption: message.body,
+        pending: message.pending,
         voiceLabel: message.kind == 'voice',
         fontScale: fontScale,
         onReplySelection: onReply == null ? null : replyWithSelection,
@@ -973,6 +1101,40 @@ class MessageBubble extends StatelessWidget {
       onReply: onReply == null ? null : replyWithSelection,
       onForward: onForward == null ? null : forwardWithSelection,
     );
+  }
+
+  /// Full URL of the first image attachment, or null when the message has no
+  /// image. Shared by the Copy image menu action and copy-cache prefetch.
+  String? _firstImageCopyUrl() {
+    final image = _firstImage();
+    return image == null ? null : _mediaUrl(image);
+  }
+
+  /// First image attachment of this message, or null.
+  MediaAttachment? _firstImage() {
+    for (final e in message.mediaItems) {
+      if (e.kind == 'image') return e;
+    }
+    return null;
+  }
+
+  /// Absolute URL for a media item (server paths are relative to [mediaBase]).
+  String _mediaUrl(MediaAttachment e) {
+    final path = e.mediaUrl;
+    return path.startsWith('http') ? path : '$mediaBase$path';
+  }
+
+  void _showImageCopyError(BuildContext context) {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text('Could not copy image — use Download'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
   }
 }
 
@@ -1143,6 +1305,7 @@ class _AlbumBody extends StatelessWidget {
     required this.items,
     required this.mediaBase,
     required this.caption,
+    this.pending = false,
     this.fontScale = 1.0,
     this.onReplySelection,
     this.onForwardSelection,
@@ -1151,12 +1314,17 @@ class _AlbumBody extends StatelessWidget {
   final List<MediaAttachment> items;
   final String mediaBase;
   final String caption;
+
+  /// Message is still being sent — the bubble menu (and right-click image
+  /// targeting) is disabled while it is.
+  final bool pending;
   final double fontScale;
   final ValueChanged<String>? onReplySelection;
   final ValueChanged<String>? onForwardSelection;
 
   String _url(MediaAttachment item) {
     final path = item.mediaUrl;
+    if (path.isEmpty) return '';
     if (path.startsWith('http')) return path;
     return '$mediaBase$path';
   }
@@ -1214,6 +1382,7 @@ class _AlbumBody extends StatelessWidget {
                           ? 140
                           : tileH,
                       compact: items.length > 1 && item.kind != 'video',
+                      pending: pending,
                       galleryUrls: galleryUrls,
                       galleryFilenames: galleryFilenames,
                       galleryIndex: galleryIndex < 0 ? 0 : galleryIndex,
@@ -1243,6 +1412,7 @@ class _SingleMediaBody extends StatelessWidget {
     required this.mediaBase,
     required this.caption,
     required this.voiceLabel,
+    this.pending = false,
     this.fontScale = 1.0,
     this.onReplySelection,
     this.onForwardSelection,
@@ -1252,12 +1422,17 @@ class _SingleMediaBody extends StatelessWidget {
   final String mediaBase;
   final String caption;
   final bool voiceLabel;
+
+  /// Message is still being sent — the bubble menu (and right-click image
+  /// targeting) is disabled while it is.
+  final bool pending;
   final double fontScale;
   final ValueChanged<String>? onReplySelection;
   final ValueChanged<String>? onForwardSelection;
 
   String get _url {
     final path = item.mediaUrl;
+    if (path.isEmpty) return '';
     if (path.startsWith('http')) return path;
     return '$mediaBase$path';
   }
@@ -1311,33 +1486,60 @@ class _SingleMediaBody extends StatelessWidget {
                     );
                   },
                   // #endregion
-                  child: GestureDetector(
+                  child: Listener(
                     behavior: HitTestBehavior.opaque,
-                    onTap: () => showImageLightbox(
-                      context,
-                      urls: [_url],
-                      filenames: [_downloadName],
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(10),
-                      child: Image.network(
-                        _url,
-                        fit: BoxFit.cover,
-                        width: 260,
-                        cacheWidth: ImageDecodeCaps.cacheWidth(
-                          260,
-                          dpr: MediaQuery.devicePixelRatioOf(context),
+                    onPointerDown: (event) {
+                      // Right-click on a chat image: the bubble menu opens and
+                      // its actions (Copy image / Reply / Forward / Add to task)
+                      // target THIS image.
+                      if (event.buttons == kSecondaryMouseButton) {
+                        if (!pending && item.kind == 'image') {
+                          _imageMenuTarget = item;
+                        } else {
+                          _imageMenuTarget = null;
+                        }
+                      }
+                    },
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _url.isEmpty
+                          ? null
+                          : () => showImageLightbox(
+                                context,
+                                urls: [_url],
+                                filenames: [_downloadName],
+                              ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        // Morph the loading "ready box" (fixed height) into the
+                        // image's natural aspect instead of popping.
+                        child: AnimatedSize(
+                          duration: privetAnim(
+                            const Duration(milliseconds: 220),
+                          ),
+                          curve: Curves.easeOutCubic,
+                          alignment: Alignment.topCenter,
+                          child: _ChatImage(
+                            url: _url,
+                            fit: BoxFit.cover,
+                            width: 260,
+                            placeholderHeight: 180,
+                            cacheWidth: ImageDecodeCaps.cacheWidth(
+                              260,
+                              dpr: MediaQuery.devicePixelRatioOf(context),
+                            ),
+                          ),
                         ),
-                        errorBuilder: (_, error, stack) =>
-                            const Text('Image unavailable'),
                       ),
                     ),
                   ),
                 ),
               ),
             ),
-            const SizedBox(height: 4),
-            _DownloadChip(url: _url, filename: _downloadName),
+            if (_url.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              _DownloadChip(url: _url, filename: _downloadName),
+            ],
             if (caption.isNotEmpty) ...[
               const SizedBox(height: 6),
               _captionText(),
@@ -1447,6 +1649,7 @@ class _AttachmentTile extends StatelessWidget {
     required this.width,
     required this.height,
     required this.compact,
+    this.pending = false,
     this.galleryUrls = const [],
     this.galleryFilenames = const [],
     this.galleryIndex = 0,
@@ -1457,6 +1660,10 @@ class _AttachmentTile extends StatelessWidget {
   final double width;
   final double height;
   final bool compact;
+
+  /// Message is still being sent — the bubble menu (and right-click image
+  /// targeting) is disabled while it is.
+  final bool pending;
   final List<String> galleryUrls;
   final List<String?> galleryFilenames;
   final int galleryIndex;
@@ -1525,36 +1732,50 @@ class _AttachmentTile extends StatelessWidget {
         content = MouseRegion(
           cursor: SystemMouseCursors.click,
           hitTestBehavior: HitTestBehavior.opaque,
-          child: GestureDetector(
+          child: Listener(
             behavior: HitTestBehavior.opaque,
-            onTap: () {
-              final urls = galleryUrls.isNotEmpty ? galleryUrls : [url];
-              final names = galleryFilenames.isNotEmpty
-                  ? galleryFilenames
-                  : <String?>[_downloadName];
-              showImageLightbox(
-                context,
-                urls: urls,
-                initialIndex: galleryIndex.clamp(0, urls.length - 1),
-                filenames: names,
-              );
+            onPointerDown: (event) {
+              // Right-click a tile in a multi-image album: the bubble menu
+              // opens and its actions (Copy image / Reply / Forward / Add to
+              // task) target THIS image, not the message's first image.
+              if (event.buttons == kSecondaryMouseButton) {
+                if (!pending && item.kind == 'image') {
+                  _imageMenuTarget = item;
+                } else {
+                  _imageMenuTarget = null;
+                }
+              }
             },
-            child: Image.network(
-              url,
-              fit: BoxFit.cover,
-              width: width,
-              height: height,
-              cacheWidth: ImageDecodeCaps.cacheWidth(
-                width,
-                dpr: MediaQuery.devicePixelRatioOf(context),
-              ),
-              cacheHeight: ImageDecodeCaps.cacheHeight(
-                height,
-                dpr: MediaQuery.devicePixelRatioOf(context),
-              ),
-              errorBuilder: (_, error, stack) => ColoredBox(
-                color: PrivetTheme.ink,
-                child: Center(child: Icon(Icons.broken_image_outlined)),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: url.isEmpty
+                  ? null
+                  : () {
+                      final urls =
+                          galleryUrls.isNotEmpty ? galleryUrls : [url];
+                      final names = galleryFilenames.isNotEmpty
+                          ? galleryFilenames
+                          : <String?>[_downloadName];
+                      showImageLightbox(
+                        context,
+                        urls: urls,
+                        initialIndex: galleryIndex.clamp(0, urls.length - 1),
+                        filenames: names,
+                      );
+                    },
+              child: _ChatImage(
+                url: url,
+                fit: BoxFit.cover,
+                width: width,
+                height: height,
+                cacheWidth: ImageDecodeCaps.cacheWidth(
+                  width,
+                  dpr: MediaQuery.devicePixelRatioOf(context),
+                ),
+                cacheHeight: ImageDecodeCaps.cacheHeight(
+                  height,
+                  dpr: MediaQuery.devicePixelRatioOf(context),
+                ),
               ),
             ),
           ),
@@ -1588,9 +1809,236 @@ class _AttachmentTile extends StatelessWidget {
             ),
           ),
         ),
-        const SizedBox(height: 2),
-        _DownloadChip(url: url, filename: _downloadName),
+        if (url.isNotEmpty) ...[
+          const SizedBox(height: 2),
+          _DownloadChip(url: url, filename: _downloadName),
+        ],
       ],
+    );
+  }
+}
+
+/// A chat image with a Teams-style "ready box": while bytes are still being
+/// uploaded / fetched it reserves a fixed box with an animated shimmer sweep
+/// (and a muted image glyph), then fades the decoded frame in instead of
+/// popping it. An empty [url] (the optimistic pre-upload bubble) keeps the
+/// ready box animating until the real URL replaces it.
+class _ChatImage extends StatefulWidget {
+  const _ChatImage({
+    required this.url,
+    this.fit = BoxFit.cover,
+    this.width,
+    this.height,
+    this.cacheWidth,
+    this.cacheHeight,
+    this.placeholderHeight = 180,
+  });
+
+  final String url;
+  final BoxFit fit;
+  final double? width;
+  final double? height;
+  final int? cacheWidth;
+  final int? cacheHeight;
+
+  /// Height the ready box reserves while no image size is known yet (single
+  /// images size to their natural aspect once decoded).
+  final double placeholderHeight;
+
+  @override
+  State<_ChatImage> createState() => _ChatImageState();
+}
+
+class _ChatImageState extends State<_ChatImage>
+    with SingleTickerProviderStateMixin {
+  /// Fade-in after the first decoded frame.
+  late final AnimationController _fade = AnimationController(
+    vsync: this,
+    duration: privetAnim(const Duration(milliseconds: 260)),
+  );
+
+  /// Drives the placeholder shimmer sweep.
+  late final AnimationController _shimmer = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1500),
+  );
+
+  bool _frameReady = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!privetLowResource) _shimmer.repeat();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ChatImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.url != widget.url) {
+      _frameReady = false;
+      _fade.value = 0;
+      if (!privetLowResource && !_shimmer.isAnimating) _shimmer.repeat();
+    }
+  }
+
+  @override
+  void dispose() {
+    _fade.dispose();
+    _shimmer.dispose();
+    super.dispose();
+  }
+
+  void _markLoaded() {
+    if (_frameReady) return;
+    _frameReady = true;
+    _shimmer.stop();
+    _fade.forward(from: 0);
+    if (widget.url.isNotEmpty) unawaited(prefetchImageForCopy(widget.url));
+  }
+
+  Widget _readyBox() {
+    return SizedBox(
+      width: widget.width,
+      height: widget.height ?? widget.placeholderHeight,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: _ShimmerBox(
+          animation: _shimmer,
+          child: Center(
+            child: Icon(
+              Icons.image_outlined,
+              size: 30,
+              color: PrivetTheme.paper.withValues(alpha: 0.38),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _errorBox() {
+    return SizedBox(
+      width: widget.width,
+      height: widget.height ?? widget.placeholderHeight,
+      child: ColoredBox(
+        color: PrivetTheme.ink,
+        child: Center(
+          child: Icon(
+            Icons.broken_image_outlined,
+            color: PrivetTheme.mist.withValues(alpha: 0.8),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.url.isEmpty) {
+      // Optimistic pre-upload bubble — no URL yet, keep the ready box going.
+      return _readyBox();
+    }
+    return Image.network(
+      widget.url,
+      fit: widget.fit,
+      width: widget.width,
+      height: widget.height,
+      cacheWidth: widget.cacheWidth,
+      cacheHeight: widget.cacheHeight,
+      frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+        if (wasSynchronouslyLoaded) {
+          _frameReady = true;
+          _shimmer.stop();
+          return child;
+        }
+        if (frame != null) {
+          if (!_frameReady) _markLoaded();
+          return FadeTransition(opacity: _fade, child: child);
+        }
+        return _readyBox();
+      },
+      errorBuilder: (_, error, stack) => _errorBox(),
+    );
+  }
+}
+
+/// Animated "ready box" surface: a soft diagonal highlight sweeping across
+/// the fill, Teams-style. Static flat fill in low-resource mode.
+class _ShimmerBox extends StatelessWidget {
+  const _ShimmerBox({required this.animation, required this.child});
+
+  final Animation<double> animation;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (privetLowResource) {
+      return ColoredBox(color: _base(), child: child);
+    }
+    return AnimatedBuilder(
+      animation: animation,
+      builder: (context, _) => CustomPaint(
+        painter: _ShimmerPainter(
+          slide: animation.value,
+          base: _base(),
+          highlight: PrivetTheme.isLight
+              ? Colors.black.withValues(alpha: 0.05)
+              : Colors.white.withValues(alpha: 0.08),
+        ),
+        child: child,
+      ),
+    );
+  }
+
+  Color _base() => PrivetTheme.panelElevated.withValues(alpha: 0.65);
+}
+
+class _ShimmerPainter extends CustomPainter {
+  const _ShimmerPainter({
+    required this.slide,
+    required this.base,
+    required this.highlight,
+  });
+
+  final double slide;
+  final Color base;
+  final Color highlight;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    canvas.drawRect(rect, Paint()..color = base);
+    final paint = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.centerLeft,
+        end: Alignment.centerRight,
+        colors: [base, highlight, base],
+        stops: const [0.35, 0.5, 0.65],
+        transform: _SlidingGradientTransform(slidePercent: slide),
+      ).createShader(rect);
+    canvas.drawRect(rect, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _ShimmerPainter oldDelegate) =>
+      oldDelegate.slide != slide ||
+      oldDelegate.base != base ||
+      oldDelegate.highlight != highlight;
+}
+
+/// Slides a [LinearGradient] horizontally so the shimmer highlight sweeps
+/// across the ready box. Based on the standard Flutter docs shimmer recipe.
+class _SlidingGradientTransform extends GradientTransform {
+  const _SlidingGradientTransform({required this.slidePercent});
+
+  final double slidePercent;
+
+  @override
+  Matrix4? transform(Rect bounds, {ui.TextDirection? textDirection}) {
+    return Matrix4.translationValues(
+      bounds.width * (slidePercent * 2 - 1) * 1.5,
+      0,
+      0,
     );
   }
 }
@@ -1940,48 +2388,153 @@ class _MessageStatusNote extends StatelessWidget {
 }
 
 class _ReplyQuote extends StatelessWidget {
-  const _ReplyQuote({required this.reply, this.fontScale = 1.0});
+  const _ReplyQuote({
+    required this.reply,
+    this.fontScale = 1.0,
+    this.mediaBase = '',
+    this.onTap,
+  });
 
   final ReplyPreview reply;
   final double fontScale;
+
+  /// Base URL prefix for the reply thumbnail (image media is stored relative).
+  final String mediaBase;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final name = reply.senderHandle.isNotEmpty
         ? '@${reply.senderHandle}'
         : reply.senderName;
-    return Container(
+    final thumbs = reply.allThumbnails;
+    final hasThumbs = thumbs.isNotEmpty;
+
+    final box = Container(
       padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
       decoration: BoxDecoration(
         color: PrivetTheme.ink.withValues(alpha: 0.35),
         borderRadius: BorderRadius.circular(10),
         border: Border(left: BorderSide(color: PrivetTheme.signal, width: 3)),
       ),
-      child: Column(
+      child: Row(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            name,
-            style: GoogleFonts.syne(
-              fontSize: 11 * fontScale,
-              fontWeight: FontWeight.w700,
-              color: PrivetTheme.signal,
+          if (hasThumbs) ...[
+            _ReplyThumbnailRow(
+              thumbs: thumbs,
+              mediaBase: mediaBase,
+              context: context,
             ),
-          ),
-          const SizedBox(height: 2),
-          // Soft-wrap without forcing the bubble to maxWidth (ellipsis Text does).
-          Text(
-            reply.body,
-            maxLines: 2,
-            style: TextStyle(
-              fontSize: 12 * fontScale,
-              height: 1.25,
-              color: PrivetTheme.mist.withValues(alpha: 0.95),
+            const SizedBox(width: 8),
+          ],
+          Flexible(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  style: GoogleFonts.syne(
+                    fontSize: 11 * fontScale,
+                    fontWeight: FontWeight.w700,
+                    color: PrivetTheme.signal,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                // Soft-wrap without forcing the bubble to maxWidth (ellipsis
+                // Text does).
+                Text(
+                  reply.body,
+                  maxLines: 2,
+                  style: TextStyle(
+                    fontSize: 12 * fontScale,
+                    height: 1.25,
+                    color: PrivetTheme.mist.withValues(alpha: 0.95),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
       ),
+    );
+
+    if (onTap == null) return box;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (_) {
+          // Use onTapDown so it wins over the HorizontalDragGestureRecognizer
+          // of _SwipeReplyHandle on compact/mobile layouts (touch-slope drag).
+          onTap?.call();
+        },
+        child: box,
+      ),
+    );
+  }
+}
+
+/// Renders up to 3 image thumbnails in a reply quote, with a "+N" overflow
+/// badge when the replied-to message has more than 3 images.
+class _ReplyThumbnailRow extends StatelessWidget {
+  const _ReplyThumbnailRow({
+    required this.thumbs,
+    required this.mediaBase,
+    required this.context,
+  });
+
+  final List<ReplyThumbnail> thumbs;
+  final String mediaBase;
+  final BuildContext context;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (int i = 0; i < thumbs.length && i < 3; i++)
+          Padding(
+            padding: EdgeInsets.only(right: i < thumbs.length - 1 ? 4 : 0),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: Image.network(
+                thumbs[i].mediaUrl.startsWith('http')
+                    ? thumbs[i].mediaUrl
+                    : '$mediaBase${thumbs[i].mediaUrl}',
+                width: 36,
+                height: 36,
+                fit: BoxFit.cover,
+                cacheWidth: ImageDecodeCaps.cacheWidth(
+                  36,
+                  dpr: MediaQuery.devicePixelRatioOf(context),
+                ),
+                errorBuilder: (_, error, stack) => const SizedBox.shrink(),
+              ),
+            ),
+          ),
+        if (thumbs.length > 3)
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: PrivetTheme.ink,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            alignment: Alignment.center,
+            child: Text(
+              '+${thumbs.length - 3}',
+              style: TextStyle(
+                fontSize: 10,
+                color: PrivetTheme.mist,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -2045,19 +2598,13 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
   Offset? _webLastTapDownOffset;
   bool _webMultiTapSelect = false;
   ScrollHoldController? _webScrollHold;
-  bool _hovering = false;
   bool _hoveringLink = false;
   bool _webPainterHover = false;
-
-  /// Native accent I-beam in an overlay — never setState on pointer move.
-  OverlayEntry? _ibeamOverlay;
-  Offset? _ibeamGlobal;
 
   @override
   void dispose() {
     setPrivetMessageLinkHover(false);
     setPrivetMessageSelectHover(false);
-    _removeIBeamOverlay();
     _releaseWebScrollHold();
     _removeToolbar();
     if (_activeMessageSelection == _selected) {
@@ -2074,52 +2621,6 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     }
     _linkRecognizers.clear();
     super.dispose();
-  }
-
-  void _removeIBeamOverlay() {
-    _ibeamOverlay?.remove();
-    _ibeamOverlay = null;
-    _ibeamGlobal = null;
-  }
-
-  void _syncIBeamOverlay() {
-    if (kIsWeb ||
-        !_hovering ||
-        _hoveringLink ||
-        privetBubbleDragging ||
-        _webSelectMoved ||
-        _ibeamGlobal == null) {
-      if (_ibeamOverlay != null) {
-        _ibeamOverlay!.remove();
-        _ibeamOverlay = null;
-      }
-      return;
-    }
-    if (_ibeamOverlay == null) {
-      _ibeamOverlay = OverlayEntry(
-        builder: (ctx) {
-          final pos = _ibeamGlobal;
-          if (pos == null) return const SizedBox.shrink();
-          return Positioned(
-            left: pos.dx - 3.5,
-            top: pos.dy - 10,
-            child: const IgnorePointer(child: _AccentIBeam()),
-          );
-        },
-      );
-      final overlay = Overlay.maybeOf(context, rootOverlay: true);
-      if (overlay == null) return;
-      overlay.insert(_ibeamOverlay!);
-    } else {
-      _ibeamOverlay!.markNeedsBuild();
-    }
-  }
-
-  void _setIBeamGlobal(Offset global) {
-    final prev = _ibeamGlobal;
-    if (prev != null && (prev - global).distance < 0.5) return;
-    _ibeamGlobal = global;
-    _syncIBeamOverlay();
   }
 
   void _releaseWebScrollHold() {
@@ -2402,11 +2903,6 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     if (_hoveringLink == overLink) return;
     _hoveringLink = overLink;
     setPrivetMessageLinkHover(overLink);
-    if (!overLink && !kIsWeb && _hovering) {
-      _syncIBeamOverlay();
-    } else if (overLink) {
-      _removeIBeamOverlay();
-    }
     if (mounted) setState(() {});
   }
 
@@ -2418,7 +2914,8 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
       10000.0,
     );
     // Never rebuild glyphs for hover tint — that relayout felt like low CPU on
-    // Linux. Accent is on the I-beam / web CSS cursor only.
+    // Linux. The real system I-beam shows on hover; web paints its accent I-beam
+    // via CSS (web_select_cursor), so no glyph rebuild is needed anywhere.
     _ensureWebPainter(maxW, hovering: false);
     final painter = _webPainter!;
     final size = Size(painter.width, painter.height);
@@ -2430,33 +2927,21 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
           ? SystemMouseCursors.click
           : !selectable
           ? SystemMouseCursors.basic
-          : (kIsWeb ? SystemMouseCursors.text : SystemMouseCursors.none),
+          : SystemMouseCursors.text,
       onEnter: (event) {
         if (selectable) {
           setPrivetMessageSelectHover(true);
-          _hovering = true;
         }
         _setHoveringLink(_linkAt(event.localPosition) != null);
-        if (selectable && !kIsWeb && !_hoveringLink) {
-          _setIBeamGlobal(event.position);
-        }
       },
       onExit: (_) {
         _setHoveringLink(false);
         if (selectable) {
           setPrivetMessageSelectHover(false);
-          _hovering = false;
-          _removeIBeamOverlay();
         }
       },
       onHover: (event) {
         _setHoveringLink(_linkAt(event.localPosition) != null);
-        if (!selectable || kIsWeb) return;
-        if (_webSelectMoved || privetBubbleDragging || _hoveringLink) {
-          _syncIBeamOverlay();
-          return;
-        }
-        _setIBeamGlobal(event.position);
       },
       child: SizedBox(
         width: size.width,
@@ -2485,8 +2970,6 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
 
             // Mobile: tap only (links / long-press menu). No drag-select.
             if (!selectable) return;
-
-            _syncIBeamOverlay();
 
             _updateWebTapCount(event.localPosition);
             if (_webTapCount == 2) {
@@ -2518,7 +3001,6 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
               _webSelectMoved = true;
               _webMultiTapSelect = false;
               privetMessageSelectionDragging = true;
-              _syncIBeamOverlay();
             }
 
             final extent = _webOffsetAt(event.localPosition);
@@ -2629,48 +3111,6 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     // drag-select (matches typical mobile messengers).
     return _buildWebBody(selectable: !PrivetTheme.isCompact(context));
   }
-}
-
-/// Accent-colored I-beam drawn under the pointer on native desktop (system
-/// text cursors cannot be recolored to [PrivetTheme.signal]).
-class _AccentIBeam extends StatelessWidget {
-  const _AccentIBeam();
-
-  @override
-  Widget build(BuildContext context) {
-    return CustomPaint(
-      size: const Size(8, 20),
-      painter: _AccentIBeamPainter(PrivetTheme.signal),
-    );
-  }
-}
-
-class _AccentIBeamPainter extends CustomPainter {
-  _AccentIBeamPainter(this.color);
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = 2
-      ..strokeCap = StrokeCap.square
-      ..style = PaintingStyle.stroke;
-    final cx = size.width / 2;
-    // Caps
-    canvas.drawLine(Offset(1, 1), Offset(size.width - 1, 1), paint);
-    canvas.drawLine(
-      Offset(1, size.height - 1),
-      Offset(size.width - 1, size.height - 1),
-      paint,
-    );
-    // Stem
-    canvas.drawLine(Offset(cx, 1), Offset(cx, size.height - 1), paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant _AccentIBeamPainter oldDelegate) =>
-      oldDelegate.color != color;
 }
 
 class _WebSelRepaint extends ChangeNotifier {

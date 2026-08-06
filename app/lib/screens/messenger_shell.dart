@@ -3,7 +3,8 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart'
+    show kIsWeb, TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -22,6 +23,7 @@ import '../state.dart';
 import '../theme.dart';
 import '../util/agent_debug_log.dart';
 import '../util/app_clipboard.dart';
+import '../util/app_image_clipboard.dart';
 import '../util/app_update.dart';
 import '../util/clipboard_files.dart';
 import '../util/ai_turn.dart';
@@ -33,6 +35,7 @@ import '../util/composer_media_attach.dart';
 import '../util/desktop_tray.dart';
 import '../util/media_permissions.dart';
 import '../util/media_ui_wake.dart';
+import '../util/mobile_push_notifications.dart';
 import '../util/people_search.dart';
 import '../util/privet_sheet.dart';
 import '../util/low_resource.dart';
@@ -79,6 +82,7 @@ class _MessengerShellState extends State<MessengerShell> {
       setState(() => _shellReady = true);
       _maybeShowWelcome();
       _maybeShowLowResourceHint();
+      _maybeShowNotificationsPrompt();
     });
   }
 
@@ -91,6 +95,9 @@ class _MessengerShellState extends State<MessengerShell> {
   void _onSessionHints() {
     if (widget.state.lowResourceAutoHint) {
       _maybeShowLowResourceHint();
+    }
+    if (widget.state.notificationsDenied) {
+      _maybeShowNotificationsPrompt();
     }
   }
 
@@ -108,6 +115,47 @@ class _MessengerShellState extends State<MessengerShell> {
         duration: const Duration(seconds: 6),
       ),
     );
+  }
+
+  /// Android 13+ shows the notification-permission dialog exactly once; if it
+  /// was dismissed, calls can never ring until the user re-enables the switch
+  /// in Settings. Surface that once so incoming calls actually arrive.
+  Future<void> _maybeShowNotificationsPrompt() async {
+    if (!mounted) return;
+    final state = widget.state;
+    if (!state.notificationsDenied) return;
+    state.clearNotificationsDenied();
+    final openSettings = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: PrivetTheme.panel,
+          title: Text(
+            'Notifications are off',
+            style: GoogleFonts.syne(fontWeight: FontWeight.w700),
+          ),
+          content: Text(
+            'Privet can’t ring for incoming calls until notifications are '
+            'enabled. You dismissed the system prompt — open Settings to '
+            'turn them back on.',
+            style: TextStyle(color: PrivetTheme.mist),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Not now'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Open settings'),
+            ),
+          ],
+        );
+      },
+    );
+    if (openSettings == true) {
+      unawaited(openMobileNotificationSettings());
+    }
   }
 
   Future<void> _maybeShowWelcome() async {
@@ -210,9 +258,11 @@ class _MessengerShellState extends State<MessengerShell> {
         children: [
           // Structure (inbox vs chat) only when the open conversation changes.
           ListenableBuilder(
-            listenable: state.shellTick,
+            listenable: Listenable.merge([state.shellTick, state.callTick]),
             builder: (context, _) {
               final hasChat = state.activeConversationId != null;
+              final inCall =
+                  state.callSession != null || state.ringing != null;
               if (wide) {
                 return Scaffold(
                   body: Row(
@@ -246,26 +296,39 @@ class _MessengerShellState extends State<MessengerShell> {
                   ),
                 );
               }
-              return Scaffold(
-                body: hasChat
-                    ? ListenableBuilder(
-                        listenable: Listenable.merge([
-                          state.chatTick,
-                          state.typingTick,
-                        ]),
-                        builder: (context, _) => ConversationPane(
-                          key: ValueKey(state.activeConversationId),
-                          state: state,
-                          showBack: true,
+              // Mobile: intercept the system back gesture / edge-swipe so it
+              // closes the open chat (or does nothing mid-call) instead of
+              // killing the app from the root route.
+              return PopScope(
+                canPop: !hasChat && !inCall,
+                onPopInvokedWithResult: (didPop, result) {
+                  if (didPop) return;
+                  if (inCall) return; // never exit during a call
+                  if (hasChat) {
+                    state.clearActiveConversation();
+                  }
+                },
+                child: Scaffold(
+                  body: hasChat
+                      ? ListenableBuilder(
+                          listenable: Listenable.merge([
+                            state.chatTick,
+                            state.typingTick,
+                          ]),
+                          builder: (context, _) => ConversationPane(
+                            key: ValueKey(state.activeConversationId),
+                            state: state,
+                            showBack: true,
+                          ),
+                        )
+                      : ListenableBuilder(
+                          listenable: Listenable.merge([
+                            state.inboxTick,
+                            state.typingTick,
+                          ]),
+                          builder: (context, _) => InboxPane(state: state),
                         ),
-                      )
-                    : ListenableBuilder(
-                        listenable: Listenable.merge([
-                          state.inboxTick,
-                          state.typingTick,
-                        ]),
-                        builder: (context, _) => InboxPane(state: state),
-                      ),
+                ),
               );
             },
           ),
@@ -1894,6 +1957,73 @@ class InboxPane extends StatelessWidget {
                             setSheet(() {});
                           },
                         ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('Smooth motion'),
+                          subtitle: Text(
+                            'High-refresh animations (75 Hz screens with a '
+                            'GPU). Auto-detected at startup; weak GPUs and '
+                            '60 Hz displays keep the lighter paths.',
+                            style: TextStyle(
+                              color: PrivetTheme.mist,
+                              fontSize: 12,
+                            ),
+                          ),
+                          value: state.smoothMotionMode,
+                          activeThumbColor: PrivetTheme.onAccent,
+                          activeTrackColor: PrivetTheme.signal,
+                          onChanged: (v) {
+                            state.setSmoothMotionMode(v);
+                            setSheet(() {});
+                          },
+                        ),
+                        const SizedBox(height: 16),
+                        Divider(color: PrivetTheme.line, height: 1),
+                        const SizedBox(height: 12),
+                        Text(
+                          'Composing',
+                          style: GoogleFonts.syne(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('Autocomplete'),
+                          subtitle: Text(
+                            'Suggest emoticon shortcodes and AI commands '
+                            'while typing',
+                            style: TextStyle(
+                              color: PrivetTheme.mist,
+                              fontSize: 12,
+                            ),
+                          ),
+                          value: state.autocompleteEnabled,
+                          activeThumbColor: PrivetTheme.onAccent,
+                          activeTrackColor: PrivetTheme.signal,
+                          onChanged: (v) {
+                            state.setAutocompleteEnabled(v);
+                            setSheet(() {});
+                          },
+                        ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('Autocorrect'),
+                          subtitle: Text(
+                            'Fix common typos and underline misspelled words',
+                            style: TextStyle(
+                              color: PrivetTheme.mist,
+                              fontSize: 12,
+                            ),
+                          ),
+                          value: state.autocorrectEnabled,
+                          activeThumbColor: PrivetTheme.onAccent,
+                          activeTrackColor: PrivetTheme.signal,
+                          onChanged: (v) {
+                            state.setAutocorrectEnabled(v);
+                            setSheet(() {});
+                          },
+                        ),
                         const SizedBox(height: 16),
                         Divider(color: PrivetTheme.line, height: 1),
                         const SizedBox(height: 12),
@@ -2673,6 +2803,9 @@ class _ConversationPaneState extends State<ConversationPane>
   List<String> _searchMatchIds = [];
   int _searchMatchIndex = 0;
   Timer? _searchDebounce;
+  /// Message highlighted temporarily after tapping a reply quote.
+  String? _focusedReplyId;
+  Timer? _focusReplyTimer;
   final List<PickedBytes> _draftMedia = [];
   ChatMessage? _replyingTo;
   /// Own message currently being edited in the composer (no popup).
@@ -2714,6 +2847,8 @@ class _ConversationPaneState extends State<ConversationPane>
     _draftConversationId = widget.state.activeConversationId;
     _controller.attachTicker(this);
     _controller.addListener(_onComposerTextChanged);
+    _controller.spellCheckEnabled = widget.state.autocorrectEnabled;
+    widget.state.sessionTick.addListener(_onComposerSettingsChanged);
     _scroll.addListener(_onScrollForOlder);
     HardwareKeyboard.instance.addHandler(_onGlobalKey);
     widget.state.reopenChatTick.addListener(_onReopenChat);
@@ -2816,6 +2951,143 @@ class _ConversationPaneState extends State<ConversationPane>
     _composerCtxMenu = null;
   }
 
+  /// Try to read an image from the system clipboard and add it as a draft
+  /// attachment. Falls back to text paste when no image is available.
+  Future<void> _pasteImageFromSystemClipboard() async {
+    try {
+      final image = await readClipboardImage();
+      if (image == null) {
+        await _pasteFromSystemClipboard();
+        return;
+      }
+      if (!mounted) return;
+      setState(() {
+        _draftMedia.add(image);
+        _showEmoji = false;
+      });
+      _syncComposerHasContent();
+      _composerFocus.requestFocus();
+    } catch (_) {
+      await _pasteFromSystemClipboard();
+    }
+  }
+
+  Future<void> _pasteFromSystemClipboard() async {
+    final text = await AppClipboard.getText();
+    if (text == null || text.isEmpty) return;
+    insertTextIntoController(_controller, text);
+    _composerFocus.requestFocus();
+    widget.state.notifyTyping();
+  }
+
+  /// Paste into the composer. Web pastes from the in-app mirror only
+  /// (clipboard.readText would trigger Chromium's permission bubble); native
+  /// lets the OS clipboard decide — an image wins over text, then the in-app
+  /// fallbacks (last-copied image, then mirror text) are consulted.
+  Future<void> _composerPaste() async {
+    if (kIsWeb) {
+      var text = AppClipboard.peek();
+      if (text == null || text.isEmpty) {
+        final selected = privetActiveMessageSelection;
+        if (selected != null && selected.isNotEmpty) {
+          AppClipboard.remember(selected);
+          text = selected;
+        }
+      }
+      if (text != null && text.isNotEmpty) {
+        insertTextIntoController(_controller, text);
+        _composerFocus.requestFocus();
+        widget.state.notifyTyping();
+      } else {
+        await _pasteImageFromSystemClipboard();
+      }
+      _dismissComposerCtxMenu();
+      return;
+    }
+
+    final image = await readOsClipboardImage();
+    if (image != null) {
+      if (!mounted) return;
+      setState(() {
+        _draftMedia.add(image);
+        _showEmoji = false;
+      });
+      _syncComposerHasContent();
+      _composerFocus.requestFocus();
+      _dismissComposerCtxMenu();
+      return;
+    }
+    final text = await AppClipboard.getText();
+    if (text != null && text.isNotEmpty) {
+      insertTextIntoController(_controller, text);
+      _composerFocus.requestFocus();
+      widget.state.notifyTyping();
+      _dismissComposerCtxMenu();
+      return;
+    }
+    // In-app fallback: an image copied from a Privet message on a platform
+    // without native image clipboard support (e.g. iOS).
+    final appBytes = peekCopiedImage();
+    if (appBytes != null) {
+      if (!mounted) return;
+      setState(() {
+        _draftMedia.add(PickedBytes(
+          bytes: appBytes,
+          filename: 'paste-png-${DateTime.now().millisecondsSinceEpoch}.png',
+          mimeType: 'image/png',
+        ));
+        _showEmoji = false;
+      });
+      _syncComposerHasContent();
+      _composerFocus.requestFocus();
+    }
+    _dismissComposerCtxMenu();
+  }
+
+  /// Mobile (Android/iOS) composer toolbar. Replaces the default platform
+  /// toolbar's Paste with ours so an image on the system clipboard is attached
+  /// as a draft instead of being silently dropped (the platform paste only
+  /// inserts text). The SDK hides Paste when the clipboard has no *strings* —
+  /// which is exactly the case right after copying an image — so our Paste is
+  /// inserted unconditionally.
+  Widget _composerContextMenu(
+    BuildContext context,
+    EditableTextState editableTextState,
+  ) {
+    final pasteItem = ContextMenuButtonItem(
+      type: ContextMenuButtonType.paste,
+      onPressed: () {
+        editableTextState.hideToolbar();
+        unawaited(_composerPaste());
+      },
+    );
+    final items = <ContextMenuButtonItem>[];
+    var pasteAdded = false;
+    for (final item in editableTextState.contextMenuButtonItems) {
+      if (item.type == ContextMenuButtonType.paste) {
+        items.add(pasteItem);
+        pasteAdded = true;
+      } else if (!pasteAdded &&
+          (item.type == ContextMenuButtonType.selectAll ||
+              item.type == ContextMenuButtonType.lookUp ||
+              item.type == ContextMenuButtonType.searchWeb ||
+              item.type == ContextMenuButtonType.share)) {
+        items.add(pasteItem);
+        pasteAdded = true;
+        items.add(item);
+      } else {
+        items.add(item);
+      }
+    }
+    if (!pasteAdded) items.add(pasteItem);
+    return TextFieldTapRegion(
+      child: AdaptiveTextSelectionToolbar.buttonItems(
+        anchors: editableTextState.contextMenuAnchors,
+        buttonItems: items,
+      ),
+    );
+  }
+
   void _dismissSpellingMenu() {
     _spellingMenu?.remove();
     _spellingMenu = null;
@@ -2844,33 +3116,7 @@ class _ConversationPaneState extends State<ConversationPane>
     final left = globalPos.dx.clamp(8.0, media.width - menuW - 8);
     final top = globalPos.dy.clamp(8.0, media.height - menuH - 8);
 
-    Future<void> _pasteFromSystemClipboard() async {
-      final text = await AppClipboard.getText();
-      if (text == null || text.isEmpty) return;
-      insertTextIntoController(_controller, text);
-      _composerFocus.requestFocus();
-      widget.state.notifyTyping();
-    }
-
-    void paste() {
-      var text = AppClipboard.peek();
-      if (text == null || text.isEmpty) {
-        final selected = privetActiveMessageSelection;
-        if (selected != null && selected.isNotEmpty) {
-          AppClipboard.remember(selected);
-          text = selected;
-        }
-      }
-      if (text != null && text.isNotEmpty) {
-        insertTextIntoController(_controller, text);
-        _composerFocus.requestFocus();
-        widget.state.notifyTyping();
-        _dismissComposerCtxMenu();
-      } else {
-        _dismissComposerCtxMenu();
-        unawaited(_pasteFromSystemClipboard());
-      }
-    }
+    void paste() => unawaited(_composerPaste());
 
     void copy() {
       final sel = _controller.selection;
@@ -3657,6 +3903,17 @@ class _ConversationPaneState extends State<ConversationPane>
       _draftMedia.isNotEmpty ||
       _draftVoice != null;
 
+  /// Keep the in-app autocorrect/spelling layer and autocomplete popup in sync
+  /// when the user flips the Composing toggles in Settings.
+  void _onComposerSettingsChanged() {
+    final autocorrect = widget.state.autocorrectEnabled;
+    if (_controller.spellCheckEnabled != autocorrect) {
+      _controller.spellCheckEnabled = autocorrect;
+      _controller.refreshSpelling();
+    }
+    if (!widget.state.autocompleteEnabled) _clearComposerAutocomplete();
+  }
+
   void _onComposerTextChanged() {
     if (_controller.isApplying) return;
     _syncComposerHasContent();
@@ -3710,6 +3967,7 @@ class _ConversationPaneState extends State<ConversationPane>
   }
 
   void _maybeApplyAutocorrect() {
+    if (!widget.state.autocorrectEnabled) return;
     if (_controller.isApplying) return;
     // Curated typos work immediately; frequency list loads in background.
     if (!ComposerAutocorrectDictionary.instance.isReady) {
@@ -3765,6 +4023,10 @@ class _ConversationPaneState extends State<ConversationPane>
   }
 
   void _refreshComposerAutocomplete() {
+    if (!widget.state.autocompleteEnabled) {
+      _clearComposerAutocomplete();
+      return;
+    }
     final value = _controller.value;
     final sel = value.selection;
     if (!sel.isValid || !sel.isCollapsed) {
@@ -3974,6 +4236,8 @@ class _ConversationPaneState extends State<ConversationPane>
       _searchBusy = false;
       _searchMatchIds = [];
       _searchMatchIndex = 0;
+      _focusReplyTimer?.cancel();
+      _focusedReplyId = null;
       _searchController.clear();
       _messageKeys.clear();
     }
@@ -4017,8 +4281,10 @@ class _ConversationPaneState extends State<ConversationPane>
     _dismissComposerCtxMenu();
     _dismissSpellingMenu();
     _controller.removeListener(_onComposerTextChanged);
+    widget.state.sessionTick.removeListener(_onComposerSettingsChanged);
     _scroll.removeListener(_onScrollForOlder);
     _searchDebounce?.cancel();
+    _focusReplyTimer?.cancel();
     unbindImagePaste(_pasteBindId);
     unregisterComposerMediaAttach(_composerMediaAttachId);
     _controller.dispose();
@@ -4106,8 +4372,6 @@ class _ConversationPaneState extends State<ConversationPane>
 
   Future<void> _jumpToSearchMatch(int index) async {
     if (_searchMatchIds.isEmpty) return;
-    final chatId = widget.state.activeConversationId;
-    if (chatId == null) return;
     final safe =
         ((index % _searchMatchIds.length) + _searchMatchIds.length) %
         _searchMatchIds.length;
@@ -4117,12 +4381,20 @@ class _ConversationPaneState extends State<ConversationPane>
     } else {
       setState(() {}); // refresh highlight even when staying on same index
     }
+    await _scrollToMessageId(messageId);
+  }
+
+  /// Scrolls the reversed message list so [messageId] is visible and built.
+  /// Used by search jumps and by tapping a reply quote. Reverse ListView only
+  /// builds visible rows — GlobalKeys for off-screen matches have null
+  /// context, so it jumps near the index first, then ensures visibility.
+  Future<void> _scrollToMessageId(String messageId) async {
+    final chatId = widget.state.activeConversationId;
+    if (chatId == null) return;
 
     await widget.state.ensureMessageLoaded(chatId, messageId);
     if (!mounted || widget.state.activeConversationId != chatId) return;
 
-    // Reverse ListView only builds visible rows — GlobalKeys for off-screen
-    // matches have null context. Jump near the index first, then ensureVisible.
     for (var attempt = 0; attempt < 24; attempt++) {
       await WidgetsBinding.instance.endOfFrame;
       if (!mounted || !_scroll.hasClients) return;
@@ -4183,6 +4455,19 @@ class _ConversationPaneState extends State<ConversationPane>
         _scroll.jumpTo((current + step).clamp(0.0, max));
       }
     }
+  }
+
+  /// Tapping a reply quote: jump to the replied-to message and highlight it
+  /// briefly, same visual as a search jump.
+  void _focusReply(String messageId) {
+    if (messageId.isEmpty) return;
+    _focusReplyTimer?.cancel();
+    setState(() => _focusedReplyId = messageId);
+    unawaited(_scrollToMessageId(messageId));
+    _focusReplyTimer = Timer(const Duration(milliseconds: 2800), () {
+      if (!mounted) return;
+      setState(() => _focusedReplyId = null);
+    });
   }
 
   void _searchStep(int delta) {
@@ -4544,8 +4829,9 @@ class _ConversationPaneState extends State<ConversationPane>
                           GlobalKey.new,
                         );
                         final highlighted =
-                            _searchMatchIds.isNotEmpty &&
-                            _searchMatchIds[_searchMatchIndex] == m.id;
+                            (_searchMatchIds.isNotEmpty &&
+                                _searchMatchIds[_searchMatchIndex] == m.id) ||
+                            _focusedReplyId == m.id;
                         // Day separator sits above the first message of each day.
                         final showDaySeparator =
                             actualIndex == 0 ||
@@ -4627,6 +4913,7 @@ class _ConversationPaneState extends State<ConversationPane>
                               ? (msg) => _editMessage(msg)
                               : null,
                           onDelete: mine ? (msg) => _deleteMessage(msg) : null,
+                          onReplyTap: (reply) => _focusReply(reply.id),
                         );
                         return KeyedSubtree(
                           key: key,
@@ -4650,26 +4937,27 @@ class _ConversationPaneState extends State<ConversationPane>
                   Positioned(
                     right: 16,
                     bottom: 16,
-                    child: AnimatedSlide(
-                      duration: privetAnim(const Duration(milliseconds: 180)),
-                      offset: _showJumpToBottom
-                          ? Offset.zero
-                          : const Offset(0, 1.5),
-                      child: AnimatedOpacity(
+                    child: RepaintBoundary(
+                      child: AnimatedSlide(
                         duration: privetAnim(const Duration(milliseconds: 180)),
-                        opacity: _showJumpToBottom ? 1 : 0,
-                        child: IgnorePointer(
-                          ignoring: !_showJumpToBottom,
-                          child: Material(
-                            color: PrivetTheme.panelElevated,
-                            shape: CircleBorder(
-                              side: BorderSide(color: PrivetTheme.line),
-                            ),
-                            elevation: privetElevation(3),
-                            child: InkWell(
-                              customBorder: const CircleBorder(),
-                              onTap: _scrollToEnd,
-                              child: SizedBox(
+                        offset: _showJumpToBottom
+                            ? Offset.zero
+                            : const Offset(0, 1.5),
+                        child: AnimatedOpacity(
+                          duration: privetAnim(const Duration(milliseconds: 180)),
+                          opacity: _showJumpToBottom ? 1 : 0,
+                          child: IgnorePointer(
+                            ignoring: !_showJumpToBottom,
+                            child: Material(
+                              color: PrivetTheme.panelElevated,
+                              shape: CircleBorder(
+                                side: BorderSide(color: PrivetTheme.line),
+                              ),
+                              elevation: privetElevation(3),
+                              child: InkWell(
+                                customBorder: const CircleBorder(),
+                                onTap: _scrollToEnd,
+                                child: SizedBox(
                                 width: 44,
                                 height: 44,
                                 child: Icon(
@@ -4680,6 +4968,7 @@ class _ConversationPaneState extends State<ConversationPane>
                             ),
                           ),
                         ),
+                      ),
                       ),
                     ),
                   ),
@@ -5066,6 +5355,8 @@ class _ConversationPaneState extends State<ConversationPane>
             'album' => '📎 ${reply.mediaItems.length} attachments',
             _ => reply.body,
           };
+    final images = reply.mediaItems.where((e) => e.kind == 'image').toList();
+    final firstImage = images.isNotEmpty ? images.first : null;
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
@@ -5086,6 +5377,42 @@ class _ConversationPaneState extends State<ConversationPane>
             ),
           ),
           const SizedBox(width: 10),
+          if (firstImage != null) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: Image.network(
+                firstImage.mediaUrl.startsWith('http')
+                    ? firstImage.mediaUrl
+                    : '${widget.state.api.baseUrl}${firstImage.mediaUrl}',
+                width: 36,
+                height: 36,
+                fit: BoxFit.cover,
+                errorBuilder: (_, error, stack) => const SizedBox.shrink(),
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+          if (images.length > 1)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: PrivetTheme.ink,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  '+${images.length - 1}',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: PrivetTheme.mist,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -5121,6 +5448,13 @@ class _ConversationPaneState extends State<ConversationPane>
     );
   }
 
+  /// Native keyboard suggestion strip + autocorrect on mobile (Android/iOS),
+  /// like Teams. Desktop/web rely on the in-app autocorrect + spelling layer.
+  bool get _nativeComposerSuggestions =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
   Widget _buildComposerInput({
     required PrivetState state,
     required bool compact,
@@ -5149,10 +5483,16 @@ class _ConversationPaneState extends State<ConversationPane>
       maxLines: compact ? 5 : 6,
       keyboardType: TextInputType.multiline,
       textInputAction: TextInputAction.newline,
-      autocorrect: false,
-      enableSuggestions: false,
-      contextMenuBuilder: (context, editableTextState) =>
-          const SizedBox.shrink(),
+      // Mobile (Android/iOS) gets the native keyboard suggestion strip +
+      // autocorrect, like Teams. Desktop/web keep the in-app autocorrect and
+      // red-underline spelling overlay. Both honor the Settings toggles.
+      autocorrect: state.autocorrectEnabled && _nativeComposerSuggestions,
+      enableSuggestions:
+          state.autocompleteEnabled && _nativeComposerSuggestions,
+      contextMenuBuilder: kIsWeb
+          ? (context, editableTextState) =>
+              const SizedBox.shrink()
+          : _composerContextMenu,
       onTapOutside: _onComposerTapOutside,
       onChanged: (value) {
         if (_editingMessage != null) return;

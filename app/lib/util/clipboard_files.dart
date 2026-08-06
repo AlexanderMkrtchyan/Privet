@@ -21,6 +21,15 @@ Future<PickedBytes?> pickFileNative() => impl.pickFileNative();
 Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) =>
     impl.pickMultipleFilesNative(maxFiles: maxFiles);
 
+/// Read a single image from the system clipboard, or null when none.
+/// Call from a user gesture (context-menu Paste); never from polls.
+Future<PickedBytes?> readClipboardImage() => impl.readClipboardImage();
+
+/// OS system-clipboard image only — no in-app fallback. Returns null when the
+/// OS clipboard has no image. Lets paste decide priority: image from the OS
+/// clipboard wins over text, then the in-app fallbacks are consulted.
+Future<PickedBytes?> readOsClipboardImage() => impl.readOsClipboardImage();
+
 int bindImagePaste(void Function(PickedBytes file) onImage) =>
     impl.bindImagePaste(onImage);
 

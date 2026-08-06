@@ -82,46 +82,51 @@ class _TypingIndicatorBubbleState extends State<TypingIndicatorBubble>
   @override
   Widget build(BuildContext context) {
     final anim = _controller;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (widget.label != null && widget.label!.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(left: 4, bottom: 4),
-                child: Text(
-                  widget.label!,
-                  style: TextStyle(
-                    color: PrivetTheme.mist,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
+    // Repaint boundary keeps the bouncing dots' per-frame repaint inside this
+    // row instead of the whole message list layer.
+    return RepaintBoundary(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (widget.label != null && widget.label!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4, bottom: 4),
+                  child: Text(
+                    widget.label!,
+                    style: TextStyle(
+                      color: PrivetTheme.mist,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
                   ),
                 ),
-              ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: PrivetTheme.panelElevated,
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(16),
-                  topRight: Radius.circular(16),
-                  bottomRight: Radius.circular(16),
-                  bottomLeft: Radius.circular(4),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: PrivetTheme.panelElevated,
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(16),
+                    topRight: Radius.circular(16),
+                    bottomRight: Radius.circular(16),
+                    bottomLeft: Radius.circular(4),
+                  ),
+                  border: Border.all(color: PrivetTheme.line),
                 ),
-                border: Border.all(color: PrivetTheme.line),
+                child: anim == null
+                    ? const _TypingDots(t: 0.5)
+                    : AnimatedBuilder(
+                        animation: anim,
+                        builder: (context, _) => _TypingDots(t: anim.value),
+                      ),
               ),
-              child: anim == null
-                  ? const _TypingDots(t: 0.5)
-                  : AnimatedBuilder(
-                      animation: anim,
-                      builder: (context, _) => _TypingDots(t: anim.value),
-                    ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

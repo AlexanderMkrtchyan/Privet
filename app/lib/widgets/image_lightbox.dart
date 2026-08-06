@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ui' as ui;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -8,6 +9,8 @@ import 'package:flutter/services.dart';
 import '../theme.dart';
 import '../util/clipboard_files.dart';
 import '../util/composer_media_attach.dart';
+import '../util/copy_image.dart';
+import '../util/image_context_menu.dart';
 import '../util/low_resource.dart';
 import '../util/media_download.dart';
 import '../util/web_select_cursor.dart';
@@ -627,7 +630,20 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
         },
         onDoubleTapDown: _annotateMode ? null : _toggleZoom,
         onDoubleTap: _annotateMode ? null : () {},
-        child: InteractiveViewer(
+        child: Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (event) {
+            // Right-click on the enlarged image: Copy image / Download.
+            if (event.buttons == kSecondaryMouseButton) {
+              handleImageContextMenu(
+                context,
+                url: _url,
+                filename: _downloadName,
+                globalPosition: event.position,
+              );
+            }
+          },
+          child: InteractiveViewer(
           transformationController: _transforms[i],
           minScale: _minScale,
           maxScale: _maxScale,
@@ -648,6 +664,14 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                   widget.urls[i],
                   fit: BoxFit.contain,
                   gaplessPlayback: true,
+                  // Keep full-res bytes in the local copy cache while the
+                  // image is on screen — "Copy image" never re-downloads.
+                  frameBuilder: (context, child, frame, sync) {
+                    if (frame != null) {
+                      unawaited(prefetchImageForCopy(widget.urls[i]));
+                    }
+                    return child;
+                  },
                   errorBuilder: (_, error, stack) => Padding(
                     padding: const EdgeInsets.all(32),
                     child: Text(
@@ -724,6 +748,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
               ),
             ],
           ),
+        ),
         ),
       ),
     );

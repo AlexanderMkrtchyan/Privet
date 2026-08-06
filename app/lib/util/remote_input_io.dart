@@ -138,6 +138,17 @@ Future<void> setClipboardText(String text) async {
   } catch (_) {}
 }
 
+Future<bool> setClipboardImage(Uint8List bytes) async {
+  try {
+    final ok = await _channel.invokeMethod<bool>('setClipboardImage', {
+      'png': bytes,
+    });
+    return ok == true;
+  } catch (_) {
+    return false;
+  }
+}
+
 Future<bool> setInputLock(bool locked) async {
   try {
     final ok = await _channel.invokeMethod<bool>('setInputLock', {

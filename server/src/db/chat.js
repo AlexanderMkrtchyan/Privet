@@ -395,6 +395,14 @@ function replyPreview(replyToId, quoteOverride = null) {
     };
   }
   const count = parseAttachments(row.attachments).length;
+  const atts = parseAttachments(row.attachments, {
+    mediaUrl: row.media_url || null,
+    mimeType: row.mime_type || null,
+    fileName: row.file_name || null,
+    fileSize: row.file_size ?? null,
+    kind: row.kind,
+  });
+  const images = atts.filter((a) => a.kind === 'image');
   const quote =
     typeof quoteOverride === 'string' && quoteOverride.trim()
       ? quoteOverride.trim()
@@ -405,6 +413,16 @@ function replyPreview(replyToId, quoteOverride = null) {
     kind: row.kind,
     senderName: row.sender_name,
     senderHandle: row.sender_handle,
+    // Legacy single-image fields (first image)
+    mediaUrl: images.length > 0 ? images[0].mediaUrl : null,
+    fileName: images.length > 0 ? images[0].fileName : null,
+    mimeType: images.length > 0 ? images[0].mimeType : null,
+    // All image thumbnails for replies
+    mediaThumbnails: images.map((a) => ({
+      mediaUrl: a.mediaUrl,
+      fileName: a.fileName,
+      mimeType: a.mimeType,
+    })),
   };
 }
 

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'display_rate.dart';
 import 'gpu_capability.dart';
 
 /// Global cheap-mode switch. Set by [PrivetState.setLowResourceMode] (Profile)
@@ -31,6 +32,34 @@ void setPrivetLowResource(bool value) {
 /// Alias kept for older call sites / tests.
 bool get privetLowResourceEmoji => privetLowResource;
 set privetLowResourceEmoji(bool value) => setPrivetLowResource(value);
+
+/// High-refresh smooth-motion tier.
+///
+/// On by default only when the device has a capable GPU **and** a display that
+/// refreshes at [kSmoothMotionHz] or faster (75 Hz etc.). Weak GPUs and 60 Hz
+/// screens keep the standard/cheap paths — never ask a rasterizer to animate
+/// faster than it can present. A user can override via the Profile toggle.
+bool privetSmoothMotion = false;
+
+/// Fires whenever [privetSmoothMotion] flips so long-lived State objects can
+/// enable/disable their flourishes without waiting for a parent rebuild.
+final ValueNotifier<bool> privetSmoothMotionListenable =
+    ValueNotifier(false);
+
+void setPrivetSmoothMotion(bool value) {
+  if (privetSmoothMotion == value &&
+      privetSmoothMotionListenable.value == value) {
+    return;
+  }
+  privetSmoothMotion = value;
+  privetSmoothMotionListenable.value = value;
+}
+
+/// Duration to use for extra flourishes that only run in the smooth-motion
+/// tier. Outside the tier we return zero so those effects are skipped
+/// entirely (they are the most expensive to rasterize frame over frame).
+Duration privetSmooth(Duration normal) =>
+    privetSmoothMotion ? normal : Duration.zero;
 
 /// Collapse motion to instant when low-resource is on.
 Duration privetAnim(Duration normal) =>

@@ -389,29 +389,33 @@ class _LevelBars extends StatelessWidget {
       return levels[sourceIndex].clamp(0.08, 1.0);
     });
 
-    return SizedBox(
-      height: 28,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          for (final level in samples) ...[
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 1),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 80),
-                  height: 6 + (level * 18),
-                  decoration: BoxDecoration(
-                    color: active
-                        ? PrivetTheme.danger.withValues(alpha: 0.35 + level * 0.55)
-                        : PrivetTheme.signal.withValues(alpha: 0.25 + level * 0.55),
-                    borderRadius: BorderRadius.circular(99),
+    return RepaintBoundary(
+      child: SizedBox(
+        height: 28,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            for (final level in samples) ...[
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 1),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 80),
+                    height: 6 + (level * 18),
+                    decoration: BoxDecoration(
+                      color: active
+                          ? PrivetTheme.danger
+                              .withValues(alpha: 0.35 + level * 0.55)
+                          : PrivetTheme.signal
+                              .withValues(alpha: 0.25 + level * 0.55),
+                      borderRadius: BorderRadius.circular(99),
+                    ),
                   ),
                 ),
               ),
-            ),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }

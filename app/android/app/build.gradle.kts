@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.gms.google-services")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
@@ -48,4 +49,13 @@ flutter {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    // FileProvider (androidx.core.content.FileProvider) is used to expose
+    // clipboard image bytes as a content:// URI ("Copy image" in chat).
+    implementation("androidx.core:core:1.15.0")
+    // Firebase Messaging: the firebase_messaging Flutter plugin declares this
+    // with `implementation` scope, so its classes are NOT on the app's compile
+    // classpath — but PrivetFCMService extends FirebaseMessagingService and
+    // must reference them directly. BOM version matches firebase_core 3.15.2.
+    implementation(platform("com.google.firebase:firebase-bom:33.16.0"))
+    implementation("com.google.firebase:firebase-messaging")
 }

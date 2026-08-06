@@ -95,6 +95,11 @@ abstract final class RemoteInput {
   static Future<Uint8List?> getClipboardImagePng() =>
       impl.getClipboardImagePng();
 
+  /// Writes [bytes] (any decodable image format) to the OS clipboard as an
+  /// image. Returns true on success.
+  static Future<bool> setClipboardImage(Uint8List bytes) =>
+      impl.setClipboardImage(bytes);
+
   static Future<void> setClipboardText(String text) =>
       impl.setClipboardText(text);
 

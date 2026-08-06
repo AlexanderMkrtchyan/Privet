@@ -43,6 +43,10 @@ class ComposerAutocorrectController extends TextEditingController {
   bool _backspaceUndoArmed = false;
   int _undoCaret = -1;
 
+  /// In-app red-underline spelling + autocorrect flash, synced from settings.
+  /// When false, existing marks/underlines are dropped and new ones suppressed.
+  bool spellCheckEnabled = true;
+
   final Set<String> _suppressed = {};
 
   AutocorrectMark? get mark => _mark;
@@ -91,6 +95,14 @@ class ComposerAutocorrectController extends TextEditingController {
   /// Refresh red-underline misspellings for the current text.
   void refreshSpelling() {
     if (_applying) return;
+    if (!spellCheckEnabled) {
+      if (_issues.isNotEmpty || _hoveredIssue != null) {
+        _issues = const [];
+        _hoveredIssue = null;
+        notifyListeners();
+      }
+      return;
+    }
     if (!ComposerAutocorrectDictionary.instance.isReady) {
       if (_issues.isNotEmpty) {
         _issues = const [];

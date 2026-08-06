@@ -51,4 +51,6 @@ Future<Uint8List?> getClipboardImagePng() async => null;
 
 Future<void> setClipboardText(String text) async {}
 
+Future<bool> setClipboardImage(Uint8List bytes) async => false;
+
 Future<bool> setInputLock(bool locked) async => false;
