@@ -89,6 +89,29 @@ jobs:
           flutter config --enable-windows-desktop
           flutter pub get
 
+      - name: Prefetch fvp MDK SDK (Windows)
+        shell: pwsh
+        run: |
+          $pubCache = Join-Path $env:LOCALAPPDATA "Pub\Cache"
+          if (-not (Test-Path $pubCache)) { $pubCache = Join-Path $env:USERPROFILE "AppData\Local\Pub\Cache" }
+          $fvpDir = Get-ChildItem (Join-Path $pubCache "hosted\pub.dev") -Directory -Filter "fvp-*" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $fvpDir) { Write-Host "fvp not found in pub cache"; exit 0 }
+          $winDir = Join-Path $fvpDir.FullName "windows"
+          $sdkCheck = Join-Path $winDir "mdk-sdk\lib\cmake\FindMDK.cmake"
+          if (Test-Path $sdkCheck) { Write-Host "MDK SDK already present"; exit 0 }
+          $archive = Join-Path $winDir "mdk-sdk-windows-x64.7z"
+          Write-Host "Downloading MDK SDK from SourceForge..."
+          curl.exe -sSL --retry 4 --connect-timeout 30 -o $archive "https://sourceforge.net/projects/mdk-sdk/files/nightly/mdk-sdk-windows-x64.7z/download"
+          if (-not (Test-Path $archive)) { Write-Host "download failed (will retry via CMake)"; exit 0 }
+          $sevenZip = "C:\Program Files\7-Zip\7z.exe"
+          if (Test-Path $sevenZip) {
+            & $sevenZip x -y "-o$winDir" $archive | Out-Null
+          } else {
+            tar -xf $archive -C $winDir
+          }
+          Remove-Item $archive -Force -ErrorAction SilentlyContinue
+          Write-Host "MDK SDK ready: $(Test-Path $sdkCheck)"
+
       - name: Build Windows release
         working-directory: app
         shell: bash
@@ -100,13 +123,18 @@ jobs:
 
       # Diagnostics: on failure, mirror the build log tail as annotations so the
       # real error is visible in the public check-run annotations (log archives
-      # require repo-admin rights).
+      # require repo-admin rights). GitHub keeps only the first ~10 annotations,
+      # so emit the final lines (where the error summary lives) plus any lines
+      # that look like errors anywhere in the log.
       - name: Surface Windows build error
         if: failure()
         shell: bash
         run: |
           echo "::group::Windows build error tail"
-          tail -n 120 "$RUNNER_TEMP/wbuild.log" 2>/dev/null | while IFS= read -r line; do
+          {
+            tail -n 30 "$RUNNER_TEMP/wbuild.log" 2>/dev/null | grep -iE "error|fatal|exception|failed|cmake error|FAILED|Cannot|not found" | tail -n 8
+            tail -n 5 "$RUNNER_TEMP/wbuild.log" 2>/dev/null
+          } | while IFS= read -r line; do
             if [ -n "$line" ]; then echo "::error::$line"; fi
           done
           echo "::endgroup::"
