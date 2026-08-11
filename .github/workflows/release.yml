@@ -117,6 +117,11 @@ jobs:
         shell: bash
         env:
           PRIVET_BUILD: ${{ github.ref_name }}-${{ github.run_number }}
+          # windows-latest now ships CMake 4.x, which dropped support for
+          # cmake_minimum_required() versions older than 3.5. The Firebase C++
+          # SDK bundled by firebase_core still declares VERSION 3.5, so raise the
+          # policy floor to let it configure anyway.
+          CMAKE_POLICY_VERSION_MINIMUM: 3.5
         run: |
           set -o pipefail
           flutter build windows --release --dart-define=PRIVET_BUILD="$PRIVET_BUILD" 2>&1 | tee "$RUNNER_TEMP/wbuild.log"
