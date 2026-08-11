@@ -95,7 +95,21 @@ jobs:
         env:
           PRIVET_BUILD: ${{ github.ref_name }}-${{ github.run_number }}
         run: |
-          flutter build windows --release --dart-define=PRIVET_BUILD="$PRIVET_BUILD"
+          set -o pipefail
+          flutter build windows --release --dart-define=PRIVET_BUILD="$PRIVET_BUILD" 2>&1 | tee "$RUNNER_TEMP/wbuild.log"
+
+      # Diagnostics: on failure, mirror the build log tail as annotations so the
+      # real error is visible in the public check-run annotations (log archives
+      # require repo-admin rights).
+      - name: Surface Windows build error
+        if: failure()
+        shell: bash
+        run: |
+          echo "::group::Windows build error tail"
+          tail -n 120 "$RUNNER_TEMP/wbuild.log" 2>/dev/null | while IFS= read -r line; do
+            if [ -n "$line" ]; then echo "::error::$line"; fi
+          done
+          echo "::endgroup::"
 
       - name: Install Inno Setup
         shell: pwsh
