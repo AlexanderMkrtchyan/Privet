@@ -120,4 +120,71 @@ void main() {
 
     expect(find.text('Add to message'), findsOneWidget);
   });
+
+  testWidgets('lightbox: a single tap on the picture closes it',
+      (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => showImageLightbox(
+                  context,
+                  urls: const ['https://example.test/photo.png'],
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle(const Duration(milliseconds: 50));
+    expect(find.byTooltip('Close'), findsOneWidget);
+
+    // Tap the centered picture. The picture layer covers the whole viewport
+    // for large images, so this must dismiss even when the image tile itself
+    // failed to load (the errorBuilder placeholder).
+    await tester.tapAt(const Offset(400, 300));
+    // onTap fires only after the double-tap window elapses.
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle(const Duration(milliseconds: 50));
+
+    expect(find.byTooltip('Close'), findsNothing);
+  });
+
+  testWidgets('lightbox: a tap on the black backdrop closes it',
+      (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => showImageLightbox(
+                  context,
+                  urls: const ['https://example.test/photo.png'],
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle(const Duration(milliseconds: 50));
+    expect(find.byTooltip('Close'), findsOneWidget);
+
+    // Corner tap lands outside the small centered placeholder — the backdrop
+    // hit target must close too.
+    await tester.tapAt(const Offset(24, 540));
+    await tester.pumpAndSettle(const Duration(milliseconds: 50));
+
+    expect(find.byTooltip('Close'), findsNothing);
+  });
 }

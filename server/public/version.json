@@ -1,6 +1,6 @@
 {
   "app_name": "privet",
-  "version": "0.1.13",
+  "version": "0.1.15",
   "build_number": "1",
   "package_name": "privet",
   "windows_setup_url": "/downloads/Privet-Setup.exe",

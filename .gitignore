@@ -45,3 +45,7 @@ packaging/out/
 
 # Go local toolchain (if installed under repo)
 .local/
+
+# Local recovery work and debugging handoff (never commit)
+recovery/
+DEBUG_HANDOFF.md

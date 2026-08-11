@@ -67,6 +67,17 @@ flt-semantics[style*="cursor: text"] {
 flt-semantics[style*="cursor: pointer"] {
   cursor: pointer !important;
 }
+/* Zoomed lightbox image: open-hand / clenched-hand pan cursors must also win
+   over the body I-beam. The reply-swipe hand paints its own custom cursor,
+   so plain grab/grabbing only appears on image panning. */
+[style*="cursor: grab"],
+flt-semantics[style*="cursor: grab"] {
+  cursor: grab !important;
+}
+[style*="cursor: grabbing"],
+flt-semantics[style*="cursor: grabbing"] {
+  cursor: grabbing !important;
+}
 ''';
   if (existing is html.StyleElement) {
     existing.text = css;

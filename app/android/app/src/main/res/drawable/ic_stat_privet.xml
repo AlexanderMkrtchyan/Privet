@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
@@ -6,9 +7,9 @@
     <!-- Monochrome Privet "P" for the status bar / notification shade.
          Android renders small icons from the alpha channel only, so this
          must stay a single-color silhouette — never the full-color launcher
-         icon (that renders as a white square). -->
+         icon (that renders as a white square). Shape matches the app logo. -->
     <path
         android:fillColor="#FFFFFFFF"
         android:fillType="evenOdd"
-        android:pathData="M6,3 h14 a5,5 0 0 1 0,10 h-10 v8 h-4 z M8.5,5.5 h6 a2.5,2.5 0 0 1 0,5 h-6 z" />
+        android:pathData="M3,1 H13.6 A7.4,6 0 0 1 21,7 V9.5 A12.4,6 0 0 1 8.6,15.5 V23 H3 Z M8.6,5.1 H11.1 A2.5,2.5 0 0 1 15.2,7.6 V8.7 A2.5,2.5 0 0 1 12.7,11.2 H11.1 A2.5,2.5 0 0 1 8.6,8.7 V7.6 A2.5,2.5 0 0 1 11.1,5.1 Z" />
 </vector>

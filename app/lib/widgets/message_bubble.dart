@@ -19,10 +19,12 @@ import '../util/copy_image.dart';
 import '../util/low_resource.dart';
 import '../util/media_download.dart';
 import '../util/perf.dart';
+import '../util/rich_text_markup.dart';
 import '../util/web_select_cursor.dart';
 import 'compact_emoji_picker.dart';
 import 'image_lightbox.dart';
 import 'inline_video_player.dart';
+import 'message_font_picker.dart';
 import 'privet_emoji.dart';
 
 const kQuickReactions = ['❤️', '👍', '😂', '😮'];
@@ -106,7 +108,10 @@ class MessageBubble extends StatelessWidget {
     this.onDelete,
     this.onSeenBy,
     this.onReplyTap,
+    this.onFormatMessage,
     this.fontScale = 1.0,
+    this.defaultFontFamily = '',
+    this.onSetDefaultFont,
   });
 
   final ChatMessage message;
@@ -121,6 +126,15 @@ class MessageBubble extends StatelessWidget {
   /// Scales the message content text (body, captions, reply quote, big emoji)
   /// around the 15px default. Set from [PrivetState.chatFontSize].
   final double fontScale;
+
+  /// Default font family ('' = app default) for message text, from
+  /// [PrivetState.chatFontFamily]. Messages with an explicit `[font=…]` run
+  /// still use that run's font on top of this base.
+  final String defaultFontFamily;
+
+  /// Persists a font picked in the message text "Aa" menu as the app-wide
+  /// default message font (see [PrivetState.setChatFontFamily]).
+  final ValueChanged<String>? onSetDefaultFont;
 
   /// True when a shared task item was created from this message.
   final bool addedToTask;
@@ -141,6 +155,12 @@ class MessageBubble extends StatelessWidget {
 
   /// Tapping the reply quote jumps to and highlights the replied-to message.
   final ValueChanged<ReplyPreview>? onReplyTap;
+
+  /// Redacts a text selection in this message (bold / italic / highlight).
+  /// Receives the selection in plain-text coordinates plus the full format the
+  /// selection should have.
+  final void Function(TextSelection selection, TextFormat format)?
+      onFormatMessage;
 
   @override
   Widget build(BuildContext context) {
@@ -264,6 +284,8 @@ class MessageBubble extends StatelessWidget {
                   _LinkifiedText(
                     text: answer,
                     fontScale: fontScale,
+                    defaultFont: defaultFontFamily,
+                    onSetDefaultFont: onSetDefaultFont,
                     onReply: onReply == null
                         ? null
                         : (selected) =>
@@ -381,6 +403,7 @@ class MessageBubble extends StatelessWidget {
                   _ReplyQuote(
                     reply: message.replyTo!,
                     fontScale: fontScale,
+                    defaultFont: defaultFontFamily,
                     mediaBase: mediaBase,
                     onTap: onReplyTap == null
                         ? null
@@ -1067,6 +1090,8 @@ class MessageBubble extends StatelessWidget {
         onReply?.call(message, selectedText: selected);
     void forwardWithSelection(String selected) =>
         onForward?.call(message, selectedText: selected);
+    void formatSelection(TextSelection sel, TextFormat f) =>
+        onFormatMessage?.call(sel, f);
 
     if (items.length > 1 || message.kind == 'album') {
       return _AlbumBody(
@@ -1075,8 +1100,11 @@ class MessageBubble extends StatelessWidget {
         caption: message.body,
         pending: message.pending,
         fontScale: fontScale,
+        defaultFont: defaultFontFamily,
+        onSetDefaultFont: onSetDefaultFont,
         onReplySelection: onReply == null ? null : replyWithSelection,
         onForwardSelection: onForward == null ? null : forwardWithSelection,
+        onFormatSelection: onFormatMessage == null ? null : formatSelection,
       );
     }
     if (items.length == 1) {
@@ -1087,8 +1115,11 @@ class MessageBubble extends StatelessWidget {
         pending: message.pending,
         voiceLabel: message.kind == 'voice',
         fontScale: fontScale,
+        defaultFont: defaultFontFamily,
+        onSetDefaultFont: onSetDefaultFont,
         onReplySelection: onReply == null ? null : replyWithSelection,
         onForwardSelection: onForward == null ? null : forwardWithSelection,
+        onFormatSelection: onFormatMessage == null ? null : formatSelection,
       );
     }
     final onlyEmoji = _emojiOnlyPayload(message.body);
@@ -1098,8 +1129,11 @@ class MessageBubble extends StatelessWidget {
     return _LinkifiedText(
       text: message.body,
       fontScale: fontScale,
+      defaultFont: defaultFontFamily,
+      onSetDefaultFont: onSetDefaultFont,
       onReply: onReply == null ? null : replyWithSelection,
       onForward: onForward == null ? null : forwardWithSelection,
+      onFormat: onFormatMessage == null ? null : formatSelection,
     );
   }
 
@@ -1307,8 +1341,11 @@ class _AlbumBody extends StatelessWidget {
     required this.caption,
     this.pending = false,
     this.fontScale = 1.0,
+    this.defaultFont = '',
+    this.onSetDefaultFont,
     this.onReplySelection,
     this.onForwardSelection,
+    this.onFormatSelection,
   });
 
   final List<MediaAttachment> items;
@@ -1319,8 +1356,12 @@ class _AlbumBody extends StatelessWidget {
   /// targeting) is disabled while it is.
   final bool pending;
   final double fontScale;
+  final String defaultFont;
+  final ValueChanged<String>? onSetDefaultFont;
   final ValueChanged<String>? onReplySelection;
   final ValueChanged<String>? onForwardSelection;
+  final void Function(TextSelection selection, TextFormat format)?
+      onFormatSelection;
 
   String _url(MediaAttachment item) {
     final path = item.mediaUrl;
@@ -1397,8 +1438,11 @@ class _AlbumBody extends StatelessWidget {
           _LinkifiedText(
             text: caption,
             fontScale: fontScale,
+            defaultFont: defaultFont,
+            onSetDefaultFont: onSetDefaultFont,
             onReply: onReplySelection,
             onForward: onForwardSelection,
+            onFormat: onFormatSelection,
           ),
         ],
       ],
@@ -1414,8 +1458,11 @@ class _SingleMediaBody extends StatelessWidget {
     required this.voiceLabel,
     this.pending = false,
     this.fontScale = 1.0,
+    this.defaultFont = '',
+    this.onSetDefaultFont,
     this.onReplySelection,
     this.onForwardSelection,
+    this.onFormatSelection,
   });
 
   final MediaAttachment item;
@@ -1427,8 +1474,12 @@ class _SingleMediaBody extends StatelessWidget {
   /// targeting) is disabled while it is.
   final bool pending;
   final double fontScale;
+  final String defaultFont;
+  final ValueChanged<String>? onSetDefaultFont;
   final ValueChanged<String>? onReplySelection;
   final ValueChanged<String>? onForwardSelection;
+  final void Function(TextSelection selection, TextFormat format)?
+      onFormatSelection;
 
   String get _url {
     final path = item.mediaUrl;
@@ -1452,8 +1503,11 @@ class _SingleMediaBody extends StatelessWidget {
   Widget _captionText() => _LinkifiedText(
     text: caption,
     fontScale: fontScale,
+    defaultFont: defaultFont,
+    onSetDefaultFont: onSetDefaultFont,
     onReply: onReplySelection,
     onForward: onForwardSelection,
+    onFormat: onFormatSelection,
   );
 
   @override
@@ -2391,12 +2445,14 @@ class _ReplyQuote extends StatelessWidget {
   const _ReplyQuote({
     required this.reply,
     this.fontScale = 1.0,
+    this.defaultFont = '',
     this.mediaBase = '',
     this.onTap,
   });
 
   final ReplyPreview reply;
   final double fontScale;
+  final String defaultFont;
 
   /// Base URL prefix for the reply thumbnail (image media is stored relative).
   final String mediaBase;
@@ -2448,11 +2504,20 @@ class _ReplyQuote extends StatelessWidget {
                 Text(
                   reply.body,
                   maxLines: 2,
-                  style: TextStyle(
-                    fontSize: 12 * fontScale,
-                    height: 1.25,
-                    color: PrivetTheme.mist.withValues(alpha: 0.95),
-                  ),
+                  style: defaultFont.isEmpty
+                      ? TextStyle(
+                          fontSize: 12 * fontScale,
+                          height: 1.25,
+                          color: PrivetTheme.mist.withValues(alpha: 0.95),
+                        )
+                      : messageFontStyle(
+                          defaultFont,
+                          TextStyle(
+                            fontSize: 12 * fontScale,
+                            height: 1.25,
+                            color: PrivetTheme.mist.withValues(alpha: 0.95),
+                          ),
+                        ),
                 ),
               ],
             ),
@@ -2555,15 +2620,29 @@ class _LinkifiedText extends StatefulWidget {
     required this.text,
     this.onReply,
     this.onForward,
+    this.onFormat,
     this.fontScale = 1.0,
+    this.defaultFont = '',
+    this.onSetDefaultFont,
   });
 
   final String text;
   final ValueChanged<String>? onReply;
   final ValueChanged<String>? onForward;
 
+  /// Redacts a selection in this message. The selection is in plain-text
+  /// coordinates (markup already stripped).
+  final void Function(TextSelection selection, TextFormat format)? onFormat;
+
   /// Multiplier around the 15px default body size (see [PrivetState.chatFontSize]).
   final double fontScale;
+
+  /// App-wide default message font ('' = app default) — the base font every
+  /// segment inherits unless it carries an explicit `[font=…]` run.
+  final String defaultFont;
+
+  /// Persists a font picked in the "Aa" menu as the app-wide default font.
+  final ValueChanged<String>? onSetDefaultFont;
 
   @override
   State<_LinkifiedText> createState() => _LinkifiedTextState();
@@ -2579,12 +2658,17 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
   String? _cachedSpanText;
   bool _cachedWithRecognizers = false;
   double? _cachedSpanScale;
+  String _cachedSpanFont = '';
+
+  /// Visible text with markup stripped — selection offsets live in this space.
+  String _plainText = '';
 
   // Web: TextPainter-owned selection (never SelectableText).
   TextSelection _webSel = const TextSelection.collapsed(offset: -1);
   TextPainter? _webPainter;
   double _webMaxWidth = 0;
   double _webPainterScale = 1.0;
+  String _webPainterFont = '';
   final _WebSelRepaint _webSelRepaint = _WebSelRepaint();
 
   // Web pointer-driven select (Listener — does not fight ListView pan arena).
@@ -2668,8 +2752,8 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
 
   void _selectWebWordAt(int offset) {
     final painter = _webPainter;
-    if (painter == null || widget.text.isEmpty) return;
-    final clamped = offset.clamp(0, widget.text.length);
+    if (painter == null || _plainText.isEmpty) return;
+    final clamped = offset.clamp(0, _plainText.length);
     final range = painter.getWordBoundary(TextPosition(offset: clamped));
     if (range.start >= range.end) return;
     _setWebSelection(
@@ -2679,9 +2763,9 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
   }
 
   void _selectWebAll() {
-    if (widget.text.isEmpty) return;
+    if (_plainText.isEmpty) return;
     _setWebSelection(
-      TextSelection(baseOffset: 0, extentOffset: widget.text.length),
+      TextSelection(baseOffset: 0, extentOffset: _plainText.length),
     );
     _webMultiTapSelect = true;
   }
@@ -2703,7 +2787,7 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
 
     final origin = box.localToGlobal(Offset.zero);
     final size = MediaQuery.sizeOf(context);
-    const barWidth = 228.0;
+    const barWidth = 372.0;
     final left = (origin.dx + box.size.width / 2 - barWidth / 2).clamp(
       8.0,
       size.width - barWidth - 8,
@@ -2711,6 +2795,23 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     final top = (origin.dy - 44).clamp(8.0, size.height - 52.0);
 
     _claimSelectionDismiss();
+    final String? currentFont;
+    final sel = _webSel;
+    if (widget.onFormat != null && sel.isValid && !sel.isCollapsed) {
+      final parsed = parseMarkup(widget.text);
+      final start = sel.start.clamp(0, parsed.plainText.length);
+      final end = sel.end.clamp(0, parsed.plainText.length);
+      final selFont = end > start
+          ? selectionFormat(parsed.runs, start, end).fontFamily
+          : null;
+      // Prefer the selection's own font, else fall back to the app-wide
+      // default so the active row reflects what will be used/persisted.
+      currentFont = (selFont != null && selFont.isNotEmpty)
+          ? selFont
+          : widget.defaultFont;
+    } else {
+      currentFont = null;
+    }
     _toolbar = OverlayEntry(
       builder: (ctx) => Positioned(
         left: left,
@@ -2737,6 +2838,9 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
                   _clearSelectionTracking();
                   if (text.isNotEmpty) widget.onForward!(text);
                 },
+          onFormat: widget.onFormat == null ? null : _applyFormatToSelection,
+          onSetDefaultFont: widget.onSetDefaultFont,
+          currentFont: currentFont,
         ),
       ),
     );
@@ -2746,11 +2850,16 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
   static TextStyle _baseStyleFor({
     required bool hovering,
     required double scale,
-  }) => TextStyle(
-    height: 1.35,
-    fontSize: 15 * scale,
-    color: hovering ? PrivetTheme.signal : PrivetTheme.paper,
-  );
+    required String defaultFont,
+  }) {
+    final base = TextStyle(
+      height: 1.35,
+      fontSize: 15 * scale,
+      color: hovering ? PrivetTheme.signal : PrivetTheme.paper,
+    );
+    if (defaultFont.isEmpty) return base;
+    return messageFontStyle(defaultFont, base);
+  }
 
   TextSpan _spanFor(
     String text, {
@@ -2761,6 +2870,7 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     if (!hovering &&
         _cachedSpanText == text &&
         _cachedSpanScale == widget.fontScale &&
+        _cachedSpanFont == widget.defaultFont &&
         _cachedSpan != null &&
         _cachedWithRecognizers == withRecognizers) {
       return _cachedSpan!;
@@ -2773,63 +2883,99 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     final base = _baseStyleFor(
       hovering: hovering,
       scale: widget.fontScale,
+      defaultFont: widget.defaultFont,
     );
-    final matches = _urlPattern.allMatches(text).toList();
-    if (matches.isEmpty) {
-      final span = TextSpan(text: text, style: base);
-      if (!hovering) {
-        _cachedSpanText = text;
-        _cachedSpanScale = widget.fontScale;
-        _cachedWithRecognizers = withRecognizers;
-        _cachedSpan = span;
-      }
-      return span;
-    }
-
+    final parsed = parseMarkup(text);
+    _plainText = parsed.plainText;
     final spans = <InlineSpan>[];
-    var cursor = 0;
-    for (final m in matches) {
-      if (m.start > cursor) {
-        spans.add(TextSpan(text: text.substring(cursor, m.start)));
+
+    for (final seg in styledSegments(parsed)) {
+      final segBase = seg.format.toTextStyle(base);
+      final segText = seg.text;
+      final matches = _urlPattern.allMatches(segText).toList();
+      if (matches.isEmpty) {
+        spans.add(TextSpan(text: segText, style: segBase));
+        continue;
       }
-      var raw = m.group(0)!;
-      raw = raw.replaceFirst(RegExp(r'''[.,;:!?)\]>'"]+$'''), '');
-      TapGestureRecognizer? recognizer;
-      if (withRecognizers) {
-        recognizer = TapGestureRecognizer()..onTap = () => _openExternal(raw);
-        _linkRecognizers.add(recognizer);
-      }
-      spans.add(
-        TextSpan(
-          text: raw,
-          style: TextStyle(
-            color: PrivetTheme.signal,
-            decoration: TextDecoration.underline,
-            decorationColor: PrivetTheme.signal.withValues(alpha: 0.7),
-            height: 1.35,
-            fontSize: 15 * widget.fontScale,
+      var cursor = 0;
+      for (final m in matches) {
+        if (m.start > cursor) {
+          spans.add(
+            TextSpan(text: segText.substring(cursor, m.start), style: segBase),
+          );
+        }
+        var raw = m.group(0)!;
+        raw = raw.replaceFirst(RegExp(r'''[.,;:!?)\]>'"]+$'''), '');
+        TapGestureRecognizer? recognizer;
+        if (withRecognizers) {
+          recognizer = TapGestureRecognizer()..onTap = () => _openExternal(raw);
+          _linkRecognizers.add(recognizer);
+        }
+        spans.add(
+          TextSpan(
+            text: raw,
+            style: segBase.copyWith(
+              color: PrivetTheme.signal,
+              decoration: TextDecoration.underline,
+              decorationColor: PrivetTheme.signal.withValues(alpha: 0.7),
+            ),
+            recognizer: recognizer,
           ),
-          recognizer: recognizer,
-        ),
-      );
-      cursor = m.start + raw.length;
-      if (cursor < m.end) {
-        spans.add(TextSpan(text: text.substring(cursor, m.end)));
-        cursor = m.end;
+        );
+        cursor = m.start + raw.length;
+        if (cursor < m.end) {
+          spans.add(
+            TextSpan(text: segText.substring(cursor, m.end), style: segBase),
+          );
+          cursor = m.end;
+        }
       }
-    }
-    if (cursor < text.length) {
-      spans.add(TextSpan(text: text.substring(cursor)));
+      if (cursor < segText.length) {
+        spans.add(TextSpan(text: segText.substring(cursor), style: segBase));
+      }
     }
 
     final span = TextSpan(style: base, children: spans);
     if (!hovering) {
       _cachedSpanText = text;
       _cachedSpanScale = widget.fontScale;
+      _cachedSpanFont = widget.defaultFont;
       _cachedWithRecognizers = withRecognizers;
       _cachedSpan = span;
     }
     return span;
+  }
+
+  /// Applies [request] to the current web selection and hands the full desired
+  /// format + plain-text selection to the parent (which edits the message).
+  void _applyFormatToSelection({
+    bool? bold,
+    bool? italic,
+    Color? background,
+    String? fontFamily,
+  }) {
+    final sel = _webSel;
+    final cb = widget.onFormat;
+    if (cb == null || !sel.isValid || sel.isCollapsed) return;
+    final parsed = parseMarkup(widget.text);
+    final start = sel.start.clamp(0, parsed.plainText.length);
+    final end = sel.end.clamp(0, parsed.plainText.length);
+    if (end <= start) return;
+    final cur = selectionFormat(parsed.runs, start, end);
+    // Colors.transparent means "remove the highlight".
+    final bg = background == Colors.transparent
+        ? null
+        : (background ?? cur.background);
+    final desired = TextFormat(
+      bold: bold == null ? cur.bold : (bold ? true : cur.bold),
+      italic: italic == null ? cur.italic : (italic ? true : cur.italic),
+      background: bg,
+      fontFamily: fontFamily == null
+          ? cur.fontFamily
+          : (fontFamily.isEmpty ? null : fontFamily),
+    );
+    cb(TextSelection(baseOffset: start, extentOffset: end), desired);
+    _clearSelectionTracking();
   }
 
   void _ensureWebPainter(double maxWidth, {required bool hovering}) {
@@ -2837,7 +2983,9 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
         _webMaxWidth == maxWidth &&
         _cachedSpanText == widget.text &&
         _cachedSpanScale == widget.fontScale &&
+        _cachedSpanFont == widget.defaultFont &&
         _webPainterScale == widget.fontScale &&
+        _webPainterFont == widget.defaultFont &&
         !_cachedWithRecognizers &&
         _webPainterHover == hovering) {
       return;
@@ -2846,6 +2994,7 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     _webMaxWidth = maxWidth;
     _webPainterHover = hovering;
     _webPainterScale = widget.fontScale;
+    _webPainterFont = widget.defaultFont;
     _webPainter = TextPainter(
       text: _spanFor(widget.text, withRecognizers: false, hovering: hovering),
       textDirection: ui.TextDirection.ltr,
@@ -2863,12 +3012,12 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     return painter
         .getPositionForOffset(pos)
         .offset
-        .clamp(0, widget.text.length);
+        .clamp(0, _plainText.length);
   }
 
   void _setWebSelection(TextSelection next) {
     final selected = next.isValid && !next.isCollapsed
-        ? next.textInside(widget.text)
+        ? next.textInside(_plainText)
         : '';
     _webSel = next;
     _selected = selected;
@@ -2885,7 +3034,7 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
 
   String? _linkAt(Offset local) {
     final offset = _webOffsetAt(local);
-    for (final m in _urlPattern.allMatches(widget.text)) {
+    for (final m in _urlPattern.allMatches(_plainText)) {
       var raw = m.group(0)!;
       raw = raw.replaceFirst(RegExp(r'''[.,;:!?)\]>'"]+$'''), '');
       final end = m.start + raw.length;
@@ -3154,42 +3303,154 @@ class _MessageSelectionBar extends StatelessWidget {
     required this.onCopy,
     this.onReply,
     this.onForward,
+    this.onFormat,
+    this.onSetDefaultFont,
+    this.currentFont,
   });
 
   final VoidCallback onCopy;
   final VoidCallback? onReply;
   final VoidCallback? onForward;
 
+  /// Applies bold / italic / highlight / font to the current selection.
+  final void Function({
+    bool? bold,
+    bool? italic,
+    Color? background,
+    String? fontFamily,
+  })?
+      onFormat;
+
+  /// Persists a font picked in this menu as the app-wide default message font.
+  final ValueChanged<String>? onSetDefaultFont;
+
+  /// Font family of the current selection ('' or null = default), used to
+  /// highlight the active row in the font picker.
+  final String? currentFont;
+
   @override
   Widget build(BuildContext context) {
     Widget action({
-      required IconData icon,
-      required String label,
+      required Widget child,
       required VoidCallback onTap,
+      String? tooltip,
     }) {
-      return InkWell(
-        borderRadius: BorderRadius.circular(8),
-        mouseCursor: SystemMouseCursors.click,
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 16, color: PrivetTheme.signal),
-              const SizedBox(width: 6),
-              Text(
-                label,
-                style: GoogleFonts.ibmPlexSans(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
+      return Tooltip(
+        message: tooltip ?? '',
+        waitDuration: const Duration(milliseconds: 400),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          mouseCursor: SystemMouseCursors.click,
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            child: child,
           ),
         ),
       );
     }
+
+    Widget textAction({
+      required String label,
+      required VoidCallback onTap,
+      String? tooltip,
+    }) {
+      return action(
+        tooltip: tooltip ?? label,
+        onTap: onTap,
+        child: Text(
+          label,
+          style: GoogleFonts.ibmPlexSans(
+            fontSize: 14,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      );
+    }
+
+    void pickHighlight() {
+      final overlay = Overlay.maybeOf(context);
+      if (overlay == null || onFormat == null) return;
+      final box = context.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) return;
+      final anchor = box.localToGlobal(Offset.zero);
+      showMenu<_HighlightPick>(
+        context: context,
+        position: RelativeRect.fromLTRB(
+          anchor.dx,
+          anchor.dy + box.size.height + 4,
+          anchor.dx,
+          anchor.dy + box.size.height + 4,
+        ),
+        items: [
+          for (final c in kHighlightColors)
+            PopupMenuItem<_HighlightPick>(
+              value: _HighlightPick(color: c),
+              height: 40,
+              child: Row(
+                children: [
+                  Container(
+                    width: 22,
+                    height: 22,
+                    decoration: BoxDecoration(
+                      color: c,
+                      borderRadius: BorderRadius.circular(5),
+                      border: Border.all(
+                        color: PrivetTheme.line,
+                        width: 1,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    '#${(c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}',
+                    style: GoogleFonts.ibmPlexSans(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          const PopupMenuDivider(),
+          const PopupMenuItem<_HighlightPick>(
+            value: _HighlightPick(clear: true),
+            height: 40,
+            child: Text(
+              'Remove highlight',
+              style: TextStyle(fontSize: 13),
+            ),
+          ),
+        ],
+      ).then((pick) {
+        if (pick == null || onFormat == null) return;
+        if (pick.clear) {
+          onFormat!(background: Colors.transparent);
+        } else if (pick.color != null) {
+          onFormat!(background: pick.color);
+        }
+      });
+    }
+
+    void pickFont() {
+      final overlay = Overlay.maybeOf(context);
+      if (overlay == null || onFormat == null) return;
+      final box = context.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) return;
+      showMessageFontPicker(
+        context,
+        anchor: box.localToGlobal(Offset.zero) & box.size,
+        current: currentFont,
+      ).then((value) {
+        if (value == null) return;
+        // Redact the selection and keep the choice as the app-wide default
+        // message font for every chat.
+        onFormat!(fontFamily: value);
+        onSetDefaultFont?.call(value);
+      });
+    }
+
+    final hasFormat = onFormat != null;
 
     return Material(
       color: PrivetTheme.panelElevated,
@@ -3204,24 +3465,122 @@ class _MessageSelectionBar extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            action(icon: Icons.copy_rounded, label: 'Copy', onTap: onCopy),
+            action(
+              tooltip: 'Copy',
+              onTap: onCopy,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.copy_rounded, size: 16, color: PrivetTheme.signal),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Copy',
+                    style: GoogleFonts.ibmPlexSans(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
             if (onReply != null)
               action(
-                icon: Icons.reply_rounded,
-                label: 'Reply',
+                tooltip: 'Reply',
                 onTap: onReply!,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.reply_rounded,
+                        size: 16, color: PrivetTheme.signal),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Reply',
+                      style: GoogleFonts.ibmPlexSans(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             if (onForward != null)
               action(
-                icon: Icons.shortcut_rounded,
-                label: 'Forward',
+                tooltip: 'Forward',
                 onTap: onForward!,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.shortcut_rounded,
+                        size: 16, color: PrivetTheme.signal),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Forward',
+                      style: GoogleFonts.ibmPlexSans(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
               ),
+            if (hasFormat) ...[
+              Container(
+                width: 1,
+                height: 22,
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                color: PrivetTheme.line,
+              ),
+              textAction(
+                label: 'B',
+                tooltip: 'Bold',
+                onTap: () => onFormat!(bold: true),
+              ),
+              textAction(
+                label: 'I',
+                tooltip: 'Italic',
+                onTap: () => onFormat!(italic: true),
+              ),
+              action(
+                tooltip: 'Highlight',
+                onTap: pickHighlight,
+                child: Icon(
+                  Icons.border_color_rounded,
+                  size: 18,
+                  color: PrivetTheme.signal,
+                ),
+              ),
+              action(
+                tooltip: 'Font family',
+                onTap: pickFont,
+                child: Text(
+                  'Aa',
+                  style: currentFont == null || currentFont!.isEmpty
+                      ? GoogleFonts.ibmPlexSans(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        )
+                      : messageFontStyle(
+                          currentFont!,
+                          GoogleFonts.ibmPlexSans(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ).copyWith(color: PrivetTheme.signal),
+                ),
+              ),
+            ],
           ],
         ),
       ),
     );
   }
+}
+
+class _HighlightPick {
+  const _HighlightPick({this.color, this.clear = false});
+
+  final Color? color;
+  final bool clear;
 }
 
 class _LinkPreviewCard extends StatelessWidget {

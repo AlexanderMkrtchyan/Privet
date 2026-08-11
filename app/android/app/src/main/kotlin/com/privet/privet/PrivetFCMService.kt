@@ -113,6 +113,12 @@ class PrivetFCMService : FirebaseMessagingService() {
         nm.createNotificationChannel(ch)
         val notif = android.app.Notification.Builder(this, "privet_fcm_fg")
             .setSmallIcon(R.drawable.ic_stat_privet)
+            .setLargeIcon(
+                android.graphics.BitmapFactory.decodeResource(
+                    resources,
+                    R.drawable.ic_privet_logo,
+                ),
+            )
             .setContentTitle("Privet")
             .setContentText("Incoming call…")
             .setOngoing(true)

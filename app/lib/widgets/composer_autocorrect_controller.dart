@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../util/composer_autocorrect.dart';
 import '../util/low_resource.dart';
+import '../util/rich_text_markup.dart';
 
 /// Active Teams-style autocorrect highlight in the composer.
 class AutocorrectMark {
@@ -39,6 +40,127 @@ class ComposerAutocorrectController extends TextEditingController {
   Timer? _ttl;
   Timer? _undoArmTtl;
   bool _applying = false;
+
+  /// Rich-text format runs over the plain composer text (see
+  /// `rich_text_markup.dart`). Kept in sync as the text is edited.
+  List<FormatRun> _formatRuns = [];
+  bool _loadingMarkup = false;
+
+  List<FormatRun> get formatRuns => _formatRuns;
+
+  /// The message body to send: plain text with formatting tags embedded.
+  String get markupText => serializeMarkup(text, _formatRuns);
+
+  /// Replaces the runs (e.g. from a toolbar action). The selection is kept.
+  void setFormatRuns(List<FormatRun> runs) {
+    _formatRuns = runs;
+    notifyListeners();
+    refreshSpelling();
+  }
+
+  void clearFormatRuns() {
+    if (_formatRuns.isEmpty) return;
+    _formatRuns = [];
+    notifyListeners();
+  }
+
+  /// Loads a stored message body (may contain markup) into the composer as
+  /// plain text + format runs.
+  void loadMarkup(String markup) {
+    final parsed = parseMarkup(markup);
+    _loadingMarkup = true;
+    try {
+      _formatRuns = parsed.runs;
+      _mark = null;
+      _issues = const [];
+      _hoveredIssue = null;
+      value = TextEditingValue(
+        text: parsed.plainText,
+        selection: TextSelection.collapsed(offset: parsed.plainText.length),
+      );
+    } finally {
+      _loadingMarkup = false;
+    }
+    refreshSpelling();
+  }
+
+  @override
+  set value(TextEditingValue newValue) {
+    if (!_loadingMarkup) {
+      _shiftRunsForEdit(oldText: text, newText: newValue.text);
+    }
+    super.value = newValue;
+  }
+
+  /// Adjusts format runs when the text changes (insertions / deletions /
+  /// replacements). Deleted text loses its formatting; text inserted inside an
+  /// existing run inherits that run's format.
+  void _shiftRunsForEdit({required String oldText, required String newText}) {
+    if (_formatRuns.isEmpty || oldText == newText) return;
+
+    var prefix = 0;
+    final maxPrefix = oldText.length < newText.length
+        ? oldText.length
+        : newText.length;
+    while (prefix < maxPrefix && oldText[prefix] == newText[prefix]) {
+      prefix++;
+    }
+    var suffix = 0;
+    while (suffix < oldText.length - prefix &&
+        suffix < newText.length - prefix &&
+        oldText[oldText.length - 1 - suffix] ==
+            newText[newText.length - 1 - suffix]) {
+      suffix++;
+    }
+
+    final editStart = prefix;
+    final editOldEnd = oldText.length - suffix;
+    final editNewEnd = newText.length - suffix;
+    final delta = newText.length - oldText.length;
+    final pureInsert = editOldEnd == editStart && delta != 0;
+
+    final shifted = <FormatRun>[];
+    for (final r in _formatRuns) {
+      if (pureInsert && r.start < editStart && r.end >= editStart) {
+        shifted.add(
+          FormatRun(
+            r.start,
+            (r.end + delta).clamp(r.start, newText.length),
+            r.format,
+          ),
+        );
+        continue;
+      }
+      if (r.end <= editStart) {
+        shifted.add(r);
+      } else if (r.start >= editOldEnd) {
+        shifted.add(
+          FormatRun(r.start + delta, r.end + delta, r.format),
+        );
+      } else {
+        final keepBefore = r.start < editStart;
+        final keepAfter = r.end > editOldEnd;
+        if (keepBefore && keepAfter) {
+          shifted.add(FormatRun(r.start, editStart, r.format));
+          shifted.add(FormatRun(editNewEnd, r.end + delta, r.format));
+        } else if (keepBefore) {
+          shifted.add(FormatRun(r.start, editStart, r.format));
+        } else if (keepAfter) {
+          shifted.add(
+            FormatRun(editNewEnd.clamp(0, newText.length), r.end + delta, r.format),
+          );
+        }
+      }
+    }
+
+    final next = <FormatRun>[];
+    for (final r in shifted) {
+      final s = r.start.clamp(0, newText.length);
+      final e = r.end.clamp(0, newText.length);
+      if (e > s) next.add(FormatRun(s, e, r.format));
+    }
+    _formatRuns = next;
+  }
 
   bool _backspaceUndoArmed = false;
   int _undoCaret = -1;
@@ -89,6 +211,7 @@ class ComposerAutocorrectController extends TextEditingController {
     clearMarks();
     _issues = const [];
     _suppressed.clear();
+    _formatRuns = [];
     super.clear();
   }
 
@@ -408,8 +531,9 @@ class ComposerAutocorrectController extends TextEditingController {
     final m = _mark;
     final issues = _issues;
     final hovered = _hoveredIssue;
+    final runs = _formatRuns;
 
-    if (m == null && issues.isEmpty) {
+    if (m == null && issues.isEmpty && runs.isEmpty) {
       return super.buildTextSpan(
         context: context,
         style: style,
@@ -429,6 +553,11 @@ class ComposerAutocorrectController extends TextEditingController {
         cuts.add(issue.end);
       }
     }
+    for (final r in runs) {
+      if (r.start < 0 || r.end > t.length || r.start >= r.end) continue;
+      cuts.add(r.start);
+      cuts.add(r.end);
+    }
     final points = cuts.toList()..sort();
     final children = <InlineSpan>[];
     for (var i = 0; i < points.length - 1; i++) {
@@ -436,10 +565,17 @@ class ComposerAutocorrectController extends TextEditingController {
       final b = points[i + 1];
       if (a >= b) continue;
       final slice = t.substring(a, b);
-      TextStyle sliceStyle = base;
+      var sliceStyle = base;
+      // Rich-text format runs first (flash / spell below can override).
+      for (final r in runs) {
+        if (r.start <= a && r.end >= b) {
+          sliceStyle = r.format.toTextStyle(sliceStyle);
+          break;
+        }
+      }
       if (m != null && a >= m.start && b <= m.end) {
         final alpha = (0.14 + 0.36 * _fade).clamp(0.14, 0.5);
-        sliceStyle = base.copyWith(
+        sliceStyle = sliceStyle.copyWith(
           backgroundColor: PrivetTheme.signal.withValues(alpha: alpha),
           color: PrivetTheme.paper,
           fontWeight: FontWeight.w600,
@@ -457,7 +593,7 @@ class ComposerAutocorrectController extends TextEditingController {
               hovered != null &&
               issue.start == hovered.start &&
               issue.end == hovered.end;
-          sliceStyle = base.copyWith(
+          sliceStyle = sliceStyle.copyWith(
             decoration: TextDecoration.underline,
             decorationColor: const Color(0xFFE35D6A),
             decorationStyle: TextDecorationStyle.wavy,

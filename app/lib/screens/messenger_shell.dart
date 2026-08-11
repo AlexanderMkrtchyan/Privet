@@ -40,6 +40,7 @@ import '../util/people_search.dart';
 import '../util/privet_sheet.dart';
 import '../util/low_resource.dart';
 import '../util/recording_bytes.dart';
+import '../util/rich_text_markup.dart';
 import '../util/sounds.dart';
 import '../util/throttle.dart';
 import '../util/web_bootstrap.dart';
@@ -52,6 +53,7 @@ import '../widgets/composer_spell_layer.dart';
 import '../widgets/composer_autocorrect_controller.dart';
 import '../widgets/composer_voice_bar.dart';
 import '../widgets/message_bubble.dart';
+import '../widgets/message_font_picker.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/user_name.dart';
 import '../widgets/typing_indicator.dart';
@@ -661,6 +663,11 @@ class InboxPane extends StatelessWidget {
                                       style: TextStyle(
                                         color: PrivetTheme.signal,
                                         fontSize: 13,
+                                        // Every subtitle line is a fixed 15.6px
+                                        // box (13px×1.2 / 12px×1.3) so swapping
+                                        // the typing indicator for the handle +
+                                        // preview never changes the row height.
+                                        height: 1.2,
                                         fontWeight: FontWeight.w600,
                                         fontStyle: FontStyle.italic,
                                       ),
@@ -672,6 +679,7 @@ class InboxPane extends StatelessWidget {
                                       style: TextStyle(
                                         color: PrivetTheme.signal,
                                         fontSize: 12,
+                                        height: 1.3,
                                         fontWeight: FontWeight.w600,
                                       ),
                                     )
@@ -689,45 +697,48 @@ class InboxPane extends StatelessWidget {
                                       style: TextStyle(
                                         color: PrivetTheme.mist,
                                         fontSize: 13,
+                                        height: 1.2,
                                         fontWeight: c.unreadCount > 0
                                             ? FontWeight.w600
                                             : FontWeight.w400,
                                       ),
                                     ),
-                                  if (!state.isTypingIn(c.id) &&
-                                      c.peer != null &&
-                                      c.peer!.handle.isNotEmpty &&
-                                      c.lastMessage != null)
-                                    Text(
-                                      c.lastMessage!.kind == 'call'
-                                          ? CallHistoryPayload.preview(
-                                              c.lastMessage!.body,
-                                            )
-                                          : c.lastMessage!.body,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: PrivetTheme.mist,
-                                        fontSize: 12,
-                                        fontWeight: c.unreadCount > 0
-                                            ? FontWeight.w600
-                                            : FontWeight.w400,
-                                      ),
-                                    )
-                                  else if (!state.isTypingIn(c.id) &&
-                                      c.peer != null &&
-                                      c.peer!.handle.isNotEmpty &&
-                                      c.lastMessage == null)
-                                    Text(
-                                      'No messages yet — say hi',
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: PrivetTheme.mist.withValues(
-                                          alpha: 0.7,
-                                        ),
-                                        fontSize: 12,
-                                        fontStyle: FontStyle.italic,
+                                  // Second line stays in the layout (hidden
+                                  // while typing) so the item keeps two lines
+                                  // worth of height at all times.
+                                  if (c.peer != null &&
+                                      c.peer!.handle.isNotEmpty)
+                                    Visibility(
+                                      visible: !state.isTypingIn(c.id),
+                                      maintainSize: true,
+                                      maintainState: true,
+                                      maintainAnimation: true,
+                                      child: Text(
+                                        c.lastMessage == null
+                                            ? 'No messages yet — say hi'
+                                            : c.lastMessage!.kind == 'call'
+                                                ? CallHistoryPayload.preview(
+                                                    c.lastMessage!.body,
+                                                  )
+                                                : c.lastMessage!.body,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: c.lastMessage == null
+                                            ? TextStyle(
+                                                color: PrivetTheme.mist
+                                                    .withValues(alpha: 0.7),
+                                                fontSize: 12,
+                                                height: 1.3,
+                                                fontStyle: FontStyle.italic,
+                                              )
+                                            : TextStyle(
+                                                color: PrivetTheme.mist,
+                                                fontSize: 12,
+                                                height: 1.3,
+                                                fontWeight: c.unreadCount > 0
+                                                    ? FontWeight.w600
+                                                    : FontWeight.w400,
+                                              ),
                                       ),
                                     ),
                                 ],
@@ -2790,6 +2801,7 @@ class _ConversationPaneState extends State<ConversationPane>
   final _draftDebounce = Debouncer(const Duration(milliseconds: 400));
   OverlayEntry? _composerCtxMenu;
   OverlayEntry? _spellingMenu;
+  OverlayEntry? _composerFormatBar;
   bool _showEmoji = false;
   bool _recording = false;
   VoiceDraft? _draftVoice;
@@ -2874,6 +2886,13 @@ class _ConversationPaneState extends State<ConversationPane>
     _restoreDraft();
     final surfaceId = widget.state.activeConversationId;
     if (surfaceId != null) widget.state.attachChatSurface(surfaceId);
+    // Clicking a chat in the sidebar should drop you straight into the
+    // composer so you can type immediately. Desktop/web only — on mobile this
+    // would pop the keyboard for every chat you tap.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (PrivetTheme.isWide(context)) _composerFocus.requestFocus();
+    });
   }
 
   /// Ctrl/Cmd+C copies the message-body selection (web CustomPaint has no
@@ -2925,6 +2944,7 @@ class _ConversationPaneState extends State<ConversationPane>
   /// later click can re-attach the web TextInput connection.
   void _onComposerTapOutside(PointerDownEvent event) {
     _dismissSpellingMenu();
+    _dismissComposerFormatBar();
     final sel = _controller.selection;
     if (sel.isValid && !sel.isCollapsed) {
       _ensureComposerSelectionFocus();
@@ -2942,13 +2962,141 @@ class _ConversationPaneState extends State<ConversationPane>
     }
     // Caret may have moved without a text change.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _refreshComposerAutocomplete();
+      if (mounted) {
+        _syncComposerFormatBar();
+        _refreshComposerAutocomplete();
+      }
     });
   }
 
   void _dismissComposerCtxMenu() {
     _composerCtxMenu?.remove();
     _composerCtxMenu = null;
+  }
+
+  void _dismissComposerFormatBar() {
+    _composerFormatBar?.remove();
+    _composerFormatBar = null;
+  }
+
+  /// Shows the floating format bar whenever the composer has a range selection
+  /// (and focus), hides it otherwise. Called on every controller change.
+  void _syncComposerFormatBar() {
+    final sel = _controller.selection;
+    final hasSelection = sel.isValid && !sel.isCollapsed;
+    if (!hasSelection || !_composerFocus.hasFocus) {
+      _dismissComposerFormatBar();
+      return;
+    }
+    if (_composerFormatBar != null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _showComposerFormatBar();
+    });
+  }
+
+  void _showComposerFormatBar() {
+    _dismissComposerFormatBar();
+    final overlay = Overlay.maybeOf(context);
+    final fieldCtx = _composerFieldKey.currentContext;
+    if (overlay == null || fieldCtx == null) return;
+    final box = fieldCtx.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final origin = box.localToGlobal(Offset.zero);
+    final media = MediaQuery.sizeOf(context);
+    const barW = 236.0;
+    const barH = 44.0;
+    final left = (origin.dx + box.size.width / 2 - barW / 2).clamp(
+      8.0,
+      media.width - barW - 8,
+    );
+    final top = (origin.dy - barH - 8).clamp(8.0, media.height - barH - 8);
+
+    _composerFormatBar = OverlayEntry(
+      builder: (ctx) => Positioned(
+        left: left,
+        top: top,
+        child: TextFieldTapRegion(
+          child: _ComposerFormatBar(
+            state: widget.state,
+            controller: _controller,
+            onBold: () => _applyComposerFormat(bold: true),
+            onItalic: () => _applyComposerFormat(italic: true),
+            onHighlight: (color) => _applyComposerFormat(background: color),
+            onFont: (family) => _applyComposerFormat(fontFamily: family),
+            onClear: _clearComposerFormat,
+          ),
+        ),
+      ),
+    );
+    overlay.insert(_composerFormatBar!);
+  }
+
+  void _applyComposerFormat({
+    bool? bold,
+    bool? italic,
+    Color? background,
+    String? fontFamily,
+  }) {
+    final sel = _controller.selection;
+    if (!sel.isValid || sel.isCollapsed) return;
+    final text = _controller.text;
+    final start = sel.start.clamp(0, text.length);
+    final end = sel.end.clamp(0, text.length);
+    if (end <= start) return;
+    final desired = toggledFormatOverSelection(
+      _controller.formatRuns,
+      start,
+      end,
+      bold: bold,
+      italic: italic,
+      background: background,
+      fontFamily: fontFamily,
+    );
+    final runs = applyFormatToSelection(
+      _controller.formatRuns,
+      start,
+      end,
+      desired,
+    );
+    _controller.setFormatRuns(runs);
+    _lastAutocorrectText = _controller.text;
+    widget.state.notifyTyping();
+  }
+
+  void _clearComposerFormat() {
+    final sel = _controller.selection;
+    if (!sel.isValid || sel.isCollapsed) return;
+    final text = _controller.text;
+    final start = sel.start.clamp(0, text.length);
+    final end = sel.end.clamp(0, text.length);
+    if (end <= start) return;
+    final runs = applyFormatToSelection(
+      _controller.formatRuns,
+      start,
+      end,
+      TextFormat.empty,
+    );
+    _controller.setFormatRuns(runs);
+    _lastAutocorrectText = _controller.text;
+    widget.state.notifyTyping();
+  }
+
+  /// Redacts a selected range inside an already-sent message (bold / italic /
+  /// highlight). Re-serializes the body with the new format and edits it.
+  Future<void> _applyMessageFormat(
+    ChatMessage message,
+    TextSelection selection,
+    TextFormat desired,
+  ) async {
+    if (message.isDeleted || message.isCallHistory) return;
+    final parsed = parseMarkup(message.body);
+    final start = selection.start.clamp(0, parsed.plainText.length);
+    final end = selection.end.clamp(0, parsed.plainText.length);
+    if (end <= start) return;
+    final runs = applyFormatToSelection(parsed.runs, start, end, desired);
+    final next = serializeMarkup(parsed.plainText, runs);
+    if (next == message.body) return;
+    await widget.state.editMessage(message.id, next);
   }
 
   /// Try to read an image from the system clipboard and add it as a draft
@@ -3916,6 +4064,7 @@ class _ConversationPaneState extends State<ConversationPane>
 
   void _onComposerTextChanged() {
     if (_controller.isApplying) return;
+    _syncComposerFormatBar();
     _syncComposerHasContent();
     _draftDebounce(_persistDraft);
     _controller.syncAfterEdit();
@@ -4133,11 +4282,23 @@ class _ConversationPaneState extends State<ConversationPane>
       return KeyEventResult.ignored;
     }
 
+    final keys = HardwareKeyboard.instance;
+    // Ctrl/Cmd+B → bold, Ctrl/Cmd+I → italic on the composer selection.
+    if (keys.isControlPressed || keys.isMetaPressed) {
+      if (event.logicalKey == LogicalKeyboardKey.keyB) {
+        _applyComposerFormat(bold: true);
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.keyI) {
+        _applyComposerFormat(italic: true);
+        return KeyEventResult.handled;
+      }
+    }
+
     final isEnter =
         event.logicalKey == LogicalKeyboardKey.enter ||
         event.logicalKey == LogicalKeyboardKey.numpadEnter;
     if (!isEnter) return KeyEventResult.ignored;
-    final keys = HardwareKeyboard.instance;
     // Shift+Enter (macOS/Linux) and Alt+Enter (Windows) insert a newline.
     if (keys.isShiftPressed || keys.isAltPressed) {
       _insertComposerNewline();
@@ -4204,8 +4365,7 @@ class _ConversationPaneState extends State<ConversationPane>
     if (!mounted || widget.state.activeConversationId != id) return;
     if (draft.isEmpty) return;
     _controller.removeListener(_onComposerTextChanged);
-    _controller.text = draft;
-    _controller.selection = TextSelection.collapsed(offset: draft.length);
+    _controller.loadMarkup(draft);
     _controller.addListener(_onComposerTextChanged);
     _composerHasContent.value = _composerHasContentNow;
     setState(() {});
@@ -4216,7 +4376,7 @@ class _ConversationPaneState extends State<ConversationPane>
     if (id == null) return;
     // Don't overwrite the real draft with in-progress edit text.
     if (_editingMessage != null) return;
-    widget.state.saveDraft(id, _controller.text);
+    widget.state.saveDraft(id, _controller.markupText);
   }
 
   @override
@@ -4251,6 +4411,8 @@ class _ConversationPaneState extends State<ConversationPane>
       _mediaFolder = null;
       _showTasks = false;
     });
+    // Same-chat re-tap also drops you into the composer.
+    if (PrivetTheme.isWide(context)) _composerFocus.requestFocus();
   }
 
   Future<void> _refreshMediaPermissions() async {
@@ -4280,6 +4442,7 @@ class _ConversationPaneState extends State<ConversationPane>
     HardwareKeyboard.instance.removeHandler(_onGlobalKey);
     _dismissComposerCtxMenu();
     _dismissSpellingMenu();
+    _dismissComposerFormatBar();
     _controller.removeListener(_onComposerTextChanged);
     widget.state.sessionTick.removeListener(_onComposerSettingsChanged);
     _scroll.removeListener(_onScrollForOlder);
@@ -4847,6 +5010,8 @@ class _ConversationPaneState extends State<ConversationPane>
                           showSender: true,
                           highlighted: highlighted,
                           fontScale: state.chatFontSize / 15.0,
+                          defaultFontFamily: state.chatFontFamily,
+                          onSetDefaultFont: state.setChatFontFamily,
                           readByPeer:
                               mine &&
                               (chat?.isReadByPeer(m, selfId: state.user?.id) ??
@@ -4912,6 +5077,10 @@ class _ConversationPaneState extends State<ConversationPane>
                           onEdit: mine && !m.isCallHistory
                               ? (msg) => _editMessage(msg)
                               : null,
+                          onFormatMessage:
+                              mine && !m.isCallHistory
+                              ? (sel, fmt) => _applyMessageFormat(m, sel, fmt)
+                              : null,
                           onDelete: mine ? (msg) => _deleteMessage(msg) : null,
                           onReplyTap: (reply) => _focusReply(reply.id),
                         );
@@ -4934,6 +5103,23 @@ class _ConversationPaneState extends State<ConversationPane>
                       },
                     ),
                   ),
+                  // "is typing" bubble pinned to the bottom of the message
+                  // area. Overlaid (not in the Column flow) so its appearance
+                  // and disappearance never shift the visible messages up/down.
+                  // IgnorePointer lets taps/scroll still reach the message
+                  // behind it; the bubble's own padding keeps its margins.
+                  if (state.typingUserId != null)
+                    Positioned(
+                      left: 0,
+                      bottom: 0,
+                      child: IgnorePointer(
+                        child: TypingIndicatorBubble(
+                          label: chat?.isGroup == true
+                              ? state.typingLabel(conversationId: chat?.id)
+                              : null,
+                        ),
+                      ),
+                    ),
                   Positioned(
                     right: 16,
                     bottom: 16,
@@ -4957,6 +5143,10 @@ class _ConversationPaneState extends State<ConversationPane>
                               child: InkWell(
                                 customBorder: const CircleBorder(),
                                 onTap: _scrollToEnd,
+                                // InkWell's default (adaptiveClickable) resolves
+                                // to the arrow cursor on native desktop; match
+                                // the send button's explicit pointer.
+                                mouseCursor: SystemMouseCursors.click,
                                 child: SizedBox(
                                 width: 44,
                                 height: 44,
@@ -5014,12 +5204,6 @@ class _ConversationPaneState extends State<ConversationPane>
                 minHeight: 2,
                 color: PrivetTheme.signal,
                 backgroundColor: PrivetTheme.line,
-              ),
-            if (state.typingUserId != null)
-              TypingIndicatorBubble(
-                label: chat?.isGroup == true
-                    ? state.typingLabel(conversationId: chat?.id)
-                    : null,
               ),
             if (_draftMedia.isNotEmpty) _buildDraftPreview(),
             if (_editingMessage != null) _buildEditBar(),
@@ -5279,7 +5463,7 @@ class _ConversationPaneState extends State<ConversationPane>
   }
 
   Widget _buildEditBar() {
-    final preview = _editingMessage!.body;
+    final preview = markupToPlain(_editingMessage!.body);
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
@@ -5345,7 +5529,7 @@ class _ConversationPaneState extends State<ConversationPane>
         : reply.kind == 'call'
         ? CallHistoryPayload.preview(reply.body)
         : reply.body.isNotEmpty
-        ? reply.body
+        ? markupToPlain(reply.body)
         : switch (reply.kind) {
             'image' => '📷 Photo',
             'video' => '🎬 Video',
@@ -6695,7 +6879,7 @@ class _ConversationPaneState extends State<ConversationPane>
     }
     final drafts = List<PickedBytes>.from(_draftMedia);
     final voice = _draftVoice;
-    final text = _controller.text;
+    final text = _controller.markupText;
     final reply = _replyingTo;
     final replyToId = reply?.id;
     final snippet = _replySnippet?.trim();
@@ -6832,12 +7016,9 @@ class _ConversationPaneState extends State<ConversationPane>
     final stashed = _editingMessage == null ? _controller.text : _composerDraftBeforeEdit;
     final body = message.body;
     _controller.removeListener(_onComposerTextChanged);
-    _controller.value = TextEditingValue(
-      text: body,
-      selection: TextSelection.collapsed(offset: body.length),
-    );
+    _controller.loadMarkup(body);
     _controller.addListener(_onComposerTextChanged);
-    _lastAutocorrectText = body;
+    _lastAutocorrectText = _controller.text;
     setState(() {
       _editingMessage = message;
       _composerDraftBeforeEdit = stashed;
@@ -6856,6 +7037,7 @@ class _ConversationPaneState extends State<ConversationPane>
     _clearComposerAutocomplete();
     _controller.clearMarks();
     _controller.removeListener(_onComposerTextChanged);
+    _controller.clearFormatRuns();
     _controller.value = TextEditingValue(
       text: restore,
       selection: TextSelection.collapsed(offset: restore.length),
@@ -6873,7 +7055,7 @@ class _ConversationPaneState extends State<ConversationPane>
   Future<void> _commitEditMessage() async {
     final message = _editingMessage;
     if (message == null) return;
-    final next = _controller.text.trim();
+    final next = _controller.markupText.trim();
     if (next.isEmpty) return;
     // Unchanged — just leave edit mode without a round-trip.
     if (next == message.body.trim()) {
@@ -6885,6 +7067,7 @@ class _ConversationPaneState extends State<ConversationPane>
     _controller.clearMarks();
     final restore = _composerDraftBeforeEdit ?? '';
     _controller.removeListener(_onComposerTextChanged);
+    _controller.clearFormatRuns();
     _controller.value = TextEditingValue(
       text: restore,
       selection: TextSelection.collapsed(offset: restore.length),
@@ -7390,4 +7573,270 @@ class _AccentPicker extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Floating formatting bar shown above the composer when text is selected.
+/// Applies bold / italic / highlight / font-family to the composer selection.
+class _ComposerFormatBar extends StatefulWidget {
+  const _ComposerFormatBar({
+    required this.state,
+    required this.controller,
+    required this.onBold,
+    required this.onItalic,
+    required this.onHighlight,
+    required this.onFont,
+    required this.onClear,
+  });
+
+  final PrivetState state;
+  final ComposerAutocorrectController controller;
+  final VoidCallback onBold;
+  final VoidCallback onItalic;
+  final ValueChanged<Color> onHighlight;
+  final ValueChanged<String> onFont;
+  final VoidCallback onClear;
+
+  @override
+  State<_ComposerFormatBar> createState() => _ComposerFormatBarState();
+}
+
+class _ComposerFormatBarState extends State<_ComposerFormatBar> {
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onControllerChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onControllerChanged);
+    super.dispose();
+  }
+
+  void _onControllerChanged() {
+    if (mounted) setState(() {});
+  }
+
+  TextFormat _selectionFormat() {
+    final sel = widget.controller.selection;
+    if (!sel.isValid || sel.isCollapsed) return TextFormat.empty;
+    final text = widget.controller.text;
+    final start = sel.start.clamp(0, text.length);
+    final end = sel.end.clamp(0, text.length);
+    return selectionFormat(widget.controller.formatRuns, start, end);
+  }
+
+  Widget _barButton({
+    required Widget child,
+    required String tooltip,
+    required VoidCallback onTap,
+    bool active = false,
+  }) {
+    final bg = active
+        ? PrivetTheme.signal.withValues(alpha: 0.22)
+        : Colors.transparent;
+    return Tooltip(
+      message: tooltip,
+      waitDuration: const Duration(milliseconds: 400),
+      child: Material(
+        color: bg,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          mouseCursor: SystemMouseCursors.click,
+          onTap: onTap,
+          child: SizedBox(
+            width: 34,
+            height: 34,
+            child: Center(child: DefaultTextStyle.merge(child: child)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _pickHighlight() {
+    final overlay = Overlay.maybeOf(context);
+    if (overlay == null) return;
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final anchor = box.localToGlobal(Offset.zero);
+    showMenu<_HighlightPick>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        anchor.dx,
+        anchor.dy + box.size.height + 4,
+        anchor.dx,
+        anchor.dy + box.size.height + 4,
+      ),
+      items: [
+        for (final c in kHighlightColors)
+          PopupMenuItem<_HighlightPick>(
+            value: _HighlightPick(color: c),
+            height: 40,
+            child: Row(
+              children: [
+                Container(
+                  width: 22,
+                  height: 22,
+                  decoration: BoxDecoration(
+                    color: c,
+                    borderRadius: BorderRadius.circular(5),
+                    border: Border.all(color: PrivetTheme.line, width: 1),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  '#${(c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}',
+                  style: GoogleFonts.ibmPlexSans(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        const PopupMenuDivider(),
+        const PopupMenuItem<_HighlightPick>(
+          value: _HighlightPick(clear: true),
+          height: 40,
+          child: Text('Remove highlight', style: TextStyle(fontSize: 13)),
+        ),
+      ],
+    ).then((pick) {
+      if (pick == null) return;
+      if (pick.clear) {
+        widget.onHighlight(Colors.transparent);
+      } else if (pick.color != null) {
+        widget.onHighlight(pick.color!);
+      }
+    });
+  }
+
+  void _pickFont() {
+    final overlay = Overlay.maybeOf(context);
+    if (overlay == null) return;
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final cur = _selectionFormat();
+    final selFont = cur.fontFamily;
+    showMessageFontPicker(
+      context,
+      anchor: box.localToGlobal(Offset.zero) & box.size,
+      current: (selFont != null && selFont.isNotEmpty)
+          ? selFont
+          : widget.state.chatFontFamily,
+    ).then((value) {
+      if (value == null) return;
+      // Format the current selection and keep the choice as the app-wide
+      // default font for every chat (persists across restarts).
+      widget.onFont(value);
+      unawaited(widget.state.setChatFontFamily(value));
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cur = _selectionFormat();
+    return Material(
+      color: PrivetTheme.panelElevated,
+      elevation: 12,
+      shadowColor: Colors.black54,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: PrivetTheme.line),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _barButton(
+              tooltip: 'Bold (Ctrl+B)',
+              active: cur.bold,
+              onTap: widget.onBold,
+              child: Text(
+                'B',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w800,
+                  color: cur.bold ? PrivetTheme.signal : PrivetTheme.paper,
+                ),
+              ),
+            ),
+            _barButton(
+              tooltip: 'Italic (Ctrl+I)',
+              active: cur.italic,
+              onTap: widget.onItalic,
+              child: Text(
+                'I',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontStyle: FontStyle.italic,
+                  fontWeight: FontWeight.w600,
+                  color: cur.italic ? PrivetTheme.signal : PrivetTheme.paper,
+                ),
+              ),
+            ),
+            _barButton(
+              tooltip: 'Highlight',
+              active: cur.background != null,
+              onTap: _pickHighlight,
+              child: Icon(
+                Icons.border_color_rounded,
+                size: 18,
+                color: cur.background != null
+                    ? PrivetTheme.signal
+                    : PrivetTheme.paper,
+              ),
+            ),
+            _barButton(
+              tooltip: 'Font family',
+              active: cur.fontFamily != null,
+              onTap: _pickFont,
+              child: Text(
+                'Aa',
+                style: cur.fontFamily == null
+                    ? TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: PrivetTheme.paper,
+                      )
+                    : messageFontStyle(
+                        cur.fontFamily!,
+                        const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ).copyWith(color: PrivetTheme.signal),
+              ),
+            ),
+            Container(
+              width: 1,
+              height: 22,
+              margin: const EdgeInsets.symmetric(horizontal: 4),
+              color: PrivetTheme.line,
+            ),
+            _barButton(
+              tooltip: 'Clear formatting',
+              onTap: widget.onClear,
+              child: Icon(
+                Icons.format_clear_rounded,
+                size: 18,
+                color: PrivetTheme.mist,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HighlightPick {
+  const _HighlightPick({this.color, this.clear = false});
+
+  final Color? color;
+  final bool clear;
 }

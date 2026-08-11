@@ -4,6 +4,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import java.util.concurrent.ConcurrentHashMap
@@ -73,6 +74,9 @@ object IncomingCallNotifier {
 
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_privet)
+            .setLargeIcon(
+                BitmapFactory.decodeResource(context.resources, R.drawable.ic_privet_logo),
+            )
             .setContentTitle(callerName)
             .setContentText(payload.modeLabel)
             .setCategory(NotificationCompat.CATEGORY_CALL)

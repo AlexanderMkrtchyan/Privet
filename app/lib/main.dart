@@ -101,6 +101,20 @@ Future<void> _warmBundledFonts() async {
     GoogleFonts.dmSans(),
     GoogleFonts.dmSans(fontWeight: FontWeight.w600),
     GoogleFonts.dmSans(fontWeight: FontWeight.w700),
+    // Message font-picker faces (popular + exotic).
+    GoogleFonts.comicNeue(),
+    GoogleFonts.tinos(),
+    GoogleFonts.arimo(),
+    GoogleFonts.cousine(),
+    GoogleFonts.ubuntu(),
+    GoogleFonts.oldStandardTt(),
+    GoogleFonts.ebGaramond(),
+    GoogleFonts.cinzel(),
+    GoogleFonts.unifrakturMaguntia(),
+    GoogleFonts.uncialAntiqua(),
+    GoogleFonts.pirataOne(),
+    GoogleFonts.metalMania(),
+    GoogleFonts.medievalSharp(),
   ];
   try {
     await Future.wait(

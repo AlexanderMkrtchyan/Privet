@@ -80,6 +80,10 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   late int _index;
   bool _zoomed = false;
 
+  /// True while a pan (left button held) is in progress on a zoomed image —
+  /// switches the cursor from an open hand to a clenched grabbing hand.
+  bool _grabDragging = false;
+
   /// Recorded snapshot of committed marks per page — rebuilt on commit/undo/
   /// clear so draw ticks don't re-issue every stroke's path on web.
   late final List<ui.Picture?> _markPictures;
@@ -199,6 +203,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     setState(() {
       _index = page;
       _zoomed = false;
+      _grabDragging = false;
       _hasCommittedMarks = _marks[page].isNotEmpty;
     });
     _bumpDraft();
@@ -208,7 +213,12 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   void _syncZoomed() {
     final scale = _transforms[_index].value.getMaxScaleOnAxis();
     final next = scale > 1.05;
-    if (next != _zoomed) setState(() => _zoomed = next);
+    if (next != _zoomed) {
+      setState(() {
+        _zoomed = next;
+        if (!next) _grabDragging = false;
+      });
+    }
   }
 
   void _setScale(double scale, {Offset? focal}) {
@@ -267,6 +277,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
       if (on) {
         _transforms[_index].value = Matrix4.identity();
         _zoomed = false;
+        _grabDragging = false;
       }
     });
     _bumpDraft();
@@ -287,6 +298,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
       if (!alreadyOn) {
         _transforms[_index].value = Matrix4.identity();
         _zoomed = false;
+        _grabDragging = false;
       }
     });
     _bumpDraft();
@@ -623,27 +635,56 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
 
   Widget _buildImagePage(int i) {
     final marks = _marks[i];
-    return Center(
-      child: GestureDetector(
-        onTap: () {
-          if (!_zoomed && !_annotateMode) _close();
-        },
-        onDoubleTapDown: _annotateMode ? null : _toggleZoom,
-        onDoubleTap: _annotateMode ? null : () {},
-        child: Listener(
-          behavior: HitTestBehavior.translucent,
-          onPointerDown: (event) {
-            // Right-click on the enlarged image: Copy image / Download.
-            if (event.buttons == kSecondaryMouseButton) {
-              handleImageContextMenu(
-                context,
-                url: _url,
-                filename: _downloadName,
-                globalPosition: event.position,
-              );
-            }
-          },
-          child: InteractiveViewer(
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        // Full-page hit target. For small images the picture above does not
+        // cover the whole viewport, so a tap on the black backdrop closes.
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: (_zoomed || _annotateMode) ? null : _close,
+          child: const SizedBox.expand(),
+        ),
+        Center(
+          child: GestureDetector(
+            // A tap closes the viewer, a double tap zooms. For large images
+            // the picture layer covers the whole viewport, so this detector is
+            // the one that actually receives taps — without it nothing would
+            // dismiss the viewer except the corner buttons.
+            onTap: (_zoomed || _annotateMode) ? null : _close,
+            onDoubleTapDown: _annotateMode ? null : _toggleZoom,
+            onDoubleTap: _annotateMode ? null : () {},
+            // Zoomed-in images can be panned — show an open hand, and a
+            // clenched hand while the mouse button is held to drag.
+            child: MouseRegion(
+              cursor: _zoomed
+                  ? (_grabDragging
+                      ? SystemMouseCursors.grabbing
+                      : SystemMouseCursors.grab)
+                  : SystemMouseCursors.basic,
+              child: Listener(
+                behavior: HitTestBehavior.translucent,
+                onPointerDown: (event) {
+                  // Right-click on the enlarged image: Copy image / Download.
+                  if (event.buttons == kSecondaryMouseButton) {
+                    handleImageContextMenu(
+                      context,
+                      url: _url,
+                      filename: _downloadName,
+                      globalPosition: event.position,
+                    );
+                  }
+                  if (event.buttons & kPrimaryMouseButton != 0 && !_grabDragging) {
+                    setState(() => _grabDragging = true);
+                  }
+                },
+                onPointerUp: (event) {
+                  if (_grabDragging) setState(() => _grabDragging = false);
+                },
+                onPointerCancel: (event) {
+                  if (_grabDragging) setState(() => _grabDragging = false);
+                },
+                child: InteractiveViewer(
           transformationController: _transforms[i],
           minScale: _minScale,
           maxScale: _maxScale,
@@ -749,9 +790,12 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
             ],
           ),
         ),
-        ),
       ),
-    );
+    ),
+    ),
+  ),
+],
+);
   }
 
   Widget _addToMessageButton() {

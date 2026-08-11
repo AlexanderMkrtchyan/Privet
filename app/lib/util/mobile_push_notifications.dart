@@ -230,6 +230,8 @@ Future<void> showMobileNotification({
         visibility: NotificationVisibility.public,
         autoCancel: !isCall,
         tag: tag,
+        // Full-color logo shown in the shade / heads-up / lock screen.
+        largeIcon: const DrawableResourceAndroidBitmap('ic_privet_logo'),
         timeoutAfter: isCall ? 60000 : null,
         actions: isCall
             ? const [

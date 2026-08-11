@@ -1,5 +1,9 @@
+import 'dart:async';
+import 'dart:math' as math;
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -15,6 +19,13 @@ import 'web_attach_button.dart';
 
 /// Shared outer height for chat header chips (tasks, reminders, media, calls).
 const double kChatHeaderChipHeight = 43;
+
+/// Compact creation-date label for a task row, e.g. "Aug 5, 2026".
+String _fmtTaskDate(DateTime dt) {
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  final local = dt.toLocal();
+  return '${months[local.month - 1]} ${local.day}, ${local.year}';
+}
 
 /// Wraps a pinned header chip and reveals a close (unpin) button at its top
 /// right corner while hovered.
@@ -293,6 +304,31 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     }
   }
 
+  /// Ctrl+scroll over the task pane zooms task text (independent of the chat
+  /// font size). Registers with the pointer-signal resolver before the pane's
+  /// Scrollables so a Ctrl+wheel zooms instead of scrolling the list.
+  void _onPointerSignal(PointerSignalEvent e) {
+    if (!HardwareKeyboard.instance.isControlPressed) return;
+    final double dy;
+    if (e is PointerScrollEvent) {
+      dy = e.scrollDelta.dy;
+    } else if (e is PointerScaleEvent) {
+      // Web: scale = exp(-deltaY / 200) → undo that map so both platforms
+      // share the same step logic as the chat zoom.
+      dy = -200 * math.log(e.scale);
+    } else {
+      return;
+    }
+    if (dy == 0) return;
+    final step = dy < 0 ? 0.5 : -0.5;
+    GestureBinding.instance.pointerSignalResolver.register(
+      e,
+      (_) => unawaited(
+        widget.state.setTaskFontSize(widget.state.taskFontSize + step),
+      ),
+    );
+  }
+
   /// Only the task creator can approve a done task (server enforces it too).
   bool _canApprove(TaskItem item) {
     final uid = widget.state.user?.id;
@@ -507,9 +543,11 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     final paymentHistory = historyAll.where((r) => r.isPayment).toList();
     final reminderHistory = historyAll.where((r) => !r.isPayment).toList();
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return Stack(
       children: [
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
         // ── Header ──────────────────────────────────────────────────────────
         Container(
           decoration: BoxDecoration(
@@ -638,6 +676,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                                 child: _TaskRow(
                                   number: e.key + 1,
                                   item: e.value,
+                                  taskFontSize: widget.state.taskFontSize,
                                   mediaBase: widget.mediaBase,
                                   myUserId: widget.state.user?.id,
                                   subtasks: subtasks,
@@ -686,6 +725,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                               child: _TaskRow(
                                 number: e.key + 1,
                                 item: e.value,
+                                taskFontSize: widget.state.taskFontSize,
                                 mediaBase: widget.mediaBase,
                                 myUserId: widget.state.user?.id,
                                 subtasks: historyBoard.subtasksOf(e.value.id),
@@ -930,6 +970,14 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
             ],
           ),
         ),
+      ],
+      ),
+      Positioned.fill(
+        child: Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerSignal: _onPointerSignal,
+        ),
+      ),
       ],
     );
   }
@@ -1826,6 +1874,7 @@ class _TaskRow extends StatefulWidget {
   const _TaskRow({
     required this.number,
     required this.item,
+    required this.taskFontSize,
     required this.mediaBase,
     required this.myUserId,
     required this.subtasks,
@@ -1848,6 +1897,10 @@ class _TaskRow extends StatefulWidget {
 
   final int number;
   final TaskItem item;
+
+  /// Task text size (logical px), from [PrivetState.taskFontSize]. Independent
+  /// of the chat font size so task text can be zoomed on its own.
+  final double taskFontSize;
   final String mediaBase;
   final String? myUserId;
   final List<TaskItem> subtasks;
@@ -1984,15 +2037,18 @@ class _TaskRowState extends State<_TaskRow> {
   Widget build(BuildContext context) {
     final item = widget.item;
     final isHistory = widget.onToggle == null;
+    final awaitingApproval = item.done && !item.doneConfirmed;
     final media = item.mediaItems;
 
     return AnimatedOpacity(
       opacity: isHistory ? 0.65 : 1.0,
       duration: const Duration(milliseconds: 200),
       child: Material(
-        color: isHistory
-            ? PrivetTheme.panelElevated.withValues(alpha: 0.6)
-            : PrivetTheme.panelElevated,
+        color: awaitingApproval
+            ? const Color(0xFFF0A83D).withValues(alpha: 0.09)
+            : isHistory
+                ? PrivetTheme.panelElevated.withValues(alpha: 0.6)
+                : PrivetTheme.panelElevated,
         borderRadius: BorderRadius.circular(14),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(10, 10, 6, 10),
@@ -2055,13 +2111,8 @@ class _TaskRowState extends State<_TaskRow> {
                                       focusNode: _focus,
                                       maxLines: null,
                                       style: GoogleFonts.ibmPlexSans(
-                                        fontSize: 14,
-                                        decoration: item.doneConfirmed
-                                            ? TextDecoration.lineThrough
-                                            : null,
-                                        color: item.doneConfirmed
-                                            ? PrivetTheme.mist
-                                            : PrivetTheme.paper,
+                                        fontSize: widget.taskFontSize,
+                                        color: PrivetTheme.paper,
                                       ),
                                       decoration: const InputDecoration(
                                         isDense: true,
@@ -2076,9 +2127,8 @@ class _TaskRowState extends State<_TaskRow> {
                                   : Text(
                                       item.body,
                                       style: GoogleFonts.ibmPlexSans(
-                                        fontSize: 14,
-                                        decoration: TextDecoration.lineThrough,
-                                        color: PrivetTheme.mist,
+                                        fontSize: widget.taskFontSize,
+                                        color: PrivetTheme.paper,
                                       ),
                                     ),
                             ),
@@ -2096,43 +2146,50 @@ class _TaskRowState extends State<_TaskRow> {
                               ),
                           ],
                         ),
-                        if (item.createdBy != null ||
-                            item.assignedTo != null ||
-                            (item.done && !item.doneConfirmed))
-                          Padding(
-                            padding: const EdgeInsets.only(top: 3),
-                            child: Text.rich(
-                              TextSpan(
-                                children: [
-                                  if (item.createdBy != null)
-                                    TextSpan(
-                                      text: 'by ${item.createdBy!.displayName}',
-                                    ),
-                                  if (item.createdBy != null &&
-                                      item.assignedTo != null)
-                                    const TextSpan(text: ' '),
-                                  if (item.assignedTo != null)
-                                    TextSpan(
-                                      text:
-                                          '→ ${item.assignedTo!.displayName}',
-                                    ),
-                                  if (item.done && !item.doneConfirmed)
-                                    TextSpan(
-                                      text: ' · awaiting approval',
-                                      style: GoogleFonts.ibmPlexSans(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w600,
-                                        color: const Color(0xFFF0A83D),
-                                      ),
-                                    ),
+                        Padding(
+                          padding: const EdgeInsets.only(top: 3),
+                          child: Text.rich(
+                            TextSpan(
+                              children: [
+                                TextSpan(text: 'Created ${_fmtTaskDate(item.createdAt)}'),
+                                if (item.createdBy != null) ...[
+                                  const TextSpan(text: ' · '),
+                                  TextSpan(
+                                    text: 'by ${item.createdBy!.displayName}',
+                                  ),
                                 ],
-                              ),
-                              style: GoogleFonts.ibmPlexSans(
-                                fontSize: 11,
-                                color: PrivetTheme.mist.withValues(alpha: 0.55),
-                              ),
+                                if (item.assignedTo != null) ...[
+                                  const TextSpan(text: ' → '),
+                                  TextSpan(
+                                    text: item.assignedTo!.displayName,
+                                  ),
+                                ],
+                                if (item.done && !item.doneConfirmed)
+                                  TextSpan(
+                                    text: ' · awaiting approval',
+                                    style: GoogleFonts.ibmPlexSans(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700,
+                                      color: const Color(0xFFF0A83D),
+                                    ),
+                                  ),
+                                if (item.doneConfirmed)
+                                  TextSpan(
+                                    text: ' · Done',
+                                    style: GoogleFonts.ibmPlexSans(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700,
+                                      color: PrivetTheme.signal,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            style: GoogleFonts.ibmPlexSans(
+                              fontSize: 11,
+                              color: PrivetTheme.mist.withValues(alpha: 0.55),
                             ),
                           ),
+                        ),
                       ],
                     ),
                   ),
@@ -2233,6 +2290,7 @@ class _TaskRowState extends State<_TaskRow> {
                       for (final sub in widget.subtasks)
                         _SubtaskRow(
                           item: sub,
+                          taskFontSize: widget.taskFontSize,
                           mediaBase: widget.mediaBase,
                           editable: !isHistory,
                           onPreview: _openPreview,
@@ -2456,10 +2514,11 @@ class _TaskRowActions extends StatelessWidget {
           MouseRegion(
             cursor: SystemMouseCursors.click,
             child: Tooltip(
-              message: 'Approve — cross out and move to history',
+              message: 'Approve — mark done and move to history',
               child: InkWell(
                 borderRadius: BorderRadius.circular(10),
                 onTap: onConfirmDone,
+                mouseCursor: SystemMouseCursors.click,
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 10,
@@ -2592,6 +2651,7 @@ class _TaskRowActions extends StatelessWidget {
 class _SubtaskRow extends StatefulWidget {
   const _SubtaskRow({
     required this.item,
+    required this.taskFontSize,
     required this.mediaBase,
     required this.editable,
     required this.onToggle,
@@ -2604,6 +2664,7 @@ class _SubtaskRow extends StatefulWidget {
   });
 
   final TaskItem item;
+  final double taskFontSize;
   final String mediaBase;
   final bool editable;
   final VoidCallback? onToggle;
@@ -2688,6 +2749,8 @@ class _SubtaskRowState extends State<_SubtaskRow> {
   Widget build(BuildContext context) {
     final item = widget.item;
     final media = item.mediaItems;
+    // Subtasks stay one step smaller than the parent task but zoom together.
+    final double subFontSize = math.max(11.0, widget.taskFontSize - 1.0);
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: Column(
@@ -2731,14 +2794,10 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                     ? TextField(
                         controller: _ctrl,
                         focusNode: _focus,
+                        maxLines: null,
                         style: GoogleFonts.ibmPlexSans(
-                          fontSize: 13,
-                          decoration: item.doneConfirmed
-                              ? TextDecoration.lineThrough
-                              : null,
-                          color: item.doneConfirmed
-                              ? PrivetTheme.mist
-                              : PrivetTheme.paper,
+                          fontSize: subFontSize,
+                          color: PrivetTheme.paper,
                         ),
                         decoration: const InputDecoration(
                           isDense: true,
@@ -2752,9 +2811,8 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                     : Text(
                         item.body,
                         style: GoogleFonts.ibmPlexSans(
-                          fontSize: 13,
-                          decoration: TextDecoration.lineThrough,
-                          color: PrivetTheme.mist,
+                          fontSize: subFontSize,
+                          color: PrivetTheme.paper,
                         ),
                       ),
               ),
@@ -2945,6 +3003,7 @@ class _SubtaskActions extends StatelessWidget {
               child: InkWell(
                 borderRadius: BorderRadius.circular(8),
                 onTap: onConfirm,
+                mouseCursor: SystemMouseCursors.click,
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 4),
                   child: Container(

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Android 13+ themed-icon silhouette: the Privet "P", matching the
+         launcher foreground and the status-bar notification glyph. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M13.5,4.5 H61.2 A33.3,27 0 0 1 94.5,31.5 V42.75 A55.8,27 0 0 1 38.7,69.75 V103.5 H13.5 Z M49.95,22.95 H57.15 A11.25,11.25 0 0 1 68.4,34.2 V39.15 A11.25,11.25 0 0 1 57.15,50.4 H49.95 A11.25,11.25 0 0 1 38.7,39.15 V34.2 A11.25,11.25 0 0 1 49.95,22.95 Z" />
+</vector>

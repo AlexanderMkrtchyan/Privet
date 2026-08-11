@@ -2458,6 +2458,15 @@ class PrivetState extends ChangeNotifier {
   /// zooms it in/out and the Profile sheet has a manual slider.
   double chatFontSize = 15.0;
 
+  /// Task text size in logical px (device-local, default 14), independent of
+  /// [chatFontSize]. Ctrl+scroll over the Tasks pane adjusts it; prefs persist it.
+  double taskFontSize = 14.0;
+
+  /// Default font family for message body text (device-local, '' = Default).
+  /// A [kMessageFonts] key picked in the "Aa" picker; every chat renders
+  /// message text in it unless the message carries an explicit `[font=…]` run.
+  String chatFontFamily = '';
+
   /// Where # AI commands are allowed once enabled (legacy prefs; sharing is # vs #me).
   AiUsageScope aiScope = AiUsageScope.onlyMe;
 
@@ -2813,6 +2822,11 @@ class PrivetState extends ChangeNotifier {
     if (storedFontSize != null) {
       chatFontSize = storedFontSize.clamp(11.0, 24.0).toDouble();
     }
+    final storedTaskFontSize = prefs.getDouble('privet_task_font_size');
+    if (storedTaskFontSize != null) {
+      taskFontSize = storedTaskFontSize.clamp(11.0, 24.0).toDouble();
+    }
+    chatFontFamily = prefs.getString('privet_chat_font_family') ?? '';
     // Manual Profile preference wins. Otherwise one GPU check: capable (RTX)
     // keeps full animated Privet; software GL / weak boxes get cheap mode.
     await prefs.remove('privet_low_resource');
@@ -2988,6 +3002,35 @@ class PrivetState extends ChangeNotifier {
     super.notifyListeners();
     final prefs = await _prefs();
     await prefs.setDouble('privet_chat_font_size', next);
+  }
+
+  /// Clamps [value] to the 11–24 px range and rebuilds the open task pane.
+  /// Ctrl+scroll over the Tasks pane calls this; stored independently of the
+  /// chat font size so task text never follows chat zoom.
+  Future<void> setTaskFontSize(double value) async {
+    final next = value.clamp(11.0, 24.0).toDouble();
+    if (taskFontSize == next) return;
+    taskFontSize = next;
+    _bump(chatTick);
+    super.notifyListeners();
+    final prefs = await _prefs();
+    await prefs.setDouble('privet_task_font_size', next);
+  }
+
+  /// Persists the default message font family ('' = Default) and rebuilds the
+  /// open chat so bubbles pick it up immediately.
+  Future<void> setChatFontFamily(String value) async {
+    final next = value.trim();
+    if (chatFontFamily == next) return;
+    chatFontFamily = next;
+    _bump(chatTick);
+    super.notifyListeners();
+    final prefs = await _prefs();
+    if (next.isEmpty) {
+      await prefs.remove('privet_chat_font_family');
+    } else {
+      await prefs.setString('privet_chat_font_family', next);
+    }
   }
 
   static ThemeMode _themeModeFromStorage(String? raw) {
@@ -4294,8 +4337,17 @@ class PrivetState extends ChangeNotifier {
     return tasksByChat[conversationId] ?? const [];
   }
 
-  ConversationTasks taskBoardFor(String? conversationId) =>
-      ConversationTasks(items: List<TaskItem>.from(tasksFor(conversationId)));
+  ConversationTasks taskBoardFor(String? conversationId) {
+    final items = List<TaskItem>.from(tasksFor(conversationId));
+    // Oldest first (creation date); a pinned task stays on top so the header
+    // chip's pinned task leads the board. Subtasks keep their parent grouping
+    // via rootItems / subtasksOf, so a flat date sort is safe here.
+    items.sort((a, b) {
+      if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
+      return a.createdAt.compareTo(b.createdAt);
+    });
+    return ConversationTasks(items: items);
+  }
 
   List<TaskItem> taskHistoryFor(String? conversationId) {
     if (conversationId == null) return const [];

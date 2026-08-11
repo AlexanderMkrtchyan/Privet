@@ -50,7 +50,15 @@ class ScreenCaptureService : Service() {
         }
             .setContentTitle("Privet is sharing your screen")
             .setContentText("Return to Privet to stop sharing")
-            .setSmallIcon(applicationInfo.icon)
+            // Monochrome silhouette — the full-color launcher icon would
+            // render as a plain white square in the status bar.
+            .setSmallIcon(R.drawable.ic_stat_privet)
+            .setLargeIcon(
+                android.graphics.BitmapFactory.decodeResource(
+                    resources,
+                    R.drawable.ic_privet_logo,
+                ),
+            )
             .setOngoing(true)
             .build()
 

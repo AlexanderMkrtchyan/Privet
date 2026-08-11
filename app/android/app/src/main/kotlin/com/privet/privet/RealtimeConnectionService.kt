@@ -88,6 +88,12 @@ class RealtimeConnectionService : Service() {
             // Small icon must be a monochrome silhouette. The full-color
             // launcher icon renders as a white square (a "stop" button) here.
             .setSmallIcon(R.drawable.ic_stat_privet)
+            .setLargeIcon(
+                android.graphics.BitmapFactory.decodeResource(
+                    resources,
+                    R.drawable.ic_privet_logo,
+                ),
+            )
             .setContentIntent(pending)
             .setOngoing(true)
             .build()
