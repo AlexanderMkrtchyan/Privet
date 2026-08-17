@@ -13,6 +13,8 @@ import '../state.dart';
 import '../theme.dart';
 import '../util/clipboard_files.dart';
 import '../util/perf.dart';
+import '../util/privet_sheet.dart';
+import 'avatar.dart';
 import 'payment_spending_insights.dart';
 import 'privet_date_picker.dart';
 import 'web_attach_button.dart';
@@ -25,6 +27,355 @@ String _fmtTaskDate(DateTime dt) {
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   final local = dt.toLocal();
   return '${months[local.month - 1]} ${local.day}, ${local.year}';
+}
+
+// ── Jira-style task metadata (status workflow + priority) ───────────────────
+
+const List<(String, String)> kTaskStatusOptions = [
+  ('todo', 'To do'),
+  ('in_progress', 'In progress'),
+  ('review', 'Review'),
+  ('done', 'Done'),
+];
+
+const List<(String, String)> kTaskPriorityOptions = [
+  ('lowest', 'Lowest'),
+  ('low', 'Low'),
+  ('medium', 'Medium'),
+  ('high', 'High'),
+  ('highest', 'Highest'),
+];
+
+Color _taskStatusColor(String status) => switch (status) {
+      'in_progress' => const Color(0xFF4A9EFF),
+      'review' => const Color(0xFFF0A83D),
+      'done' => PrivetTheme.signal,
+      _ => PrivetTheme.mist,
+    };
+
+String _taskStatusLabel(String status) {
+  for (final (v, l) in kTaskStatusOptions) {
+    if (v == status) return l;
+  }
+  return 'To do';
+}
+
+Color _taskPriorityColor(String priority) => switch (priority) {
+      'highest' => const Color(0xFFE5484D),
+      'high' => const Color(0xFFFF8C42),
+      'low' => const Color(0xFF7BA6D4),
+      'lowest' => PrivetTheme.mist,
+      _ => const Color(0xFFF0A83D),
+    };
+
+IconData _taskPriorityIcon(String priority) => switch (priority) {
+      'highest' || 'high' => Icons.arrow_upward_rounded,
+      'lowest' || 'low' => Icons.arrow_downward_rounded,
+      _ => Icons.remove_rounded,
+    };
+
+String _taskPriorityLabel(String priority) {
+  for (final (v, l) in kTaskPriorityOptions) {
+    if (v == priority) return l;
+  }
+  return 'Medium';
+}
+
+/// Small colored metadata chip (status / priority) shown on task rows.
+class _TaskMetaChip extends StatelessWidget {
+  const _TaskMetaChip({
+    required this.label,
+    required this.color,
+    this.icon,
+    this.onTap,
+    this.small = false,
+  });
+
+  final String label;
+  final Color color;
+  final IconData? icon;
+  final VoidCallback? onTap;
+  final bool small;
+
+  @override
+  Widget build(BuildContext context) {
+    final chip = Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: small ? 5 : 7,
+        vertical: small ? 1 : 2,
+      ),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: small ? 10 : 12, color: color),
+            const SizedBox(width: 3),
+          ],
+          Text(
+            label,
+            style: GoogleFonts.syne(
+              fontSize: small ? 9 : 10.5,
+              fontWeight: FontWeight.w700,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+    if (onTap == null) return chip;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(onTap: onTap, child: chip),
+    );
+  }
+}
+
+/// Sentinel returned by the assignee sheet when the user chooses "Unassign".
+class _UnassignSentinel {
+  const _UnassignSentinel();
+}
+
+/// One row of a task's change log.
+class _TaskActivityRow extends StatelessWidget {
+  const _TaskActivityRow({required this.activity});
+
+  final TaskActivity activity;
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, color, text) = _describe();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text.rich(
+              TextSpan(
+                style: GoogleFonts.ibmPlexSans(
+                  fontSize: 12,
+                  color: PrivetTheme.paper,
+                ),
+                children: [
+                  TextSpan(
+                    text: activity.user?.displayName ?? 'Someone',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  TextSpan(text: ' $text'),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            _fmtTaskDate(activity.createdAt),
+            style: GoogleFonts.ibmPlexSans(
+              fontSize: 10,
+              color: PrivetTheme.mist.withValues(alpha: 0.5),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  (IconData, Color, String) _describe() {
+    switch (activity.action) {
+      case 'created':
+        return (
+          Icons.add_circle_outline_rounded,
+          PrivetTheme.signal,
+          'created the task',
+        );
+      case 'status':
+        final to = activity.toValue;
+        return (
+          Icons.swap_horiz_rounded,
+          to == null ? PrivetTheme.mist : _taskStatusColor(to),
+          to == null
+              ? 'updated status'
+              : 'moved to ${_taskStatusLabel(to)}',
+        );
+      case 'priority':
+        final to = activity.toValue;
+        return (
+          _taskPriorityIcon(to ?? 'medium'),
+          to == null ? PrivetTheme.mist : _taskPriorityColor(to),
+          to == null
+              ? 'updated priority'
+              : 'set priority to ${_taskPriorityLabel(to)}',
+        );
+      case 'assigned':
+        return (
+          Icons.person_add_alt_1_rounded,
+          PrivetTheme.mist,
+          'changed the assignee',
+        );
+      case 'body':
+        return (
+          Icons.edit_outlined,
+          PrivetTheme.mist,
+          'edited the description',
+        );
+      default:
+        return (
+          Icons.history_rounded,
+          PrivetTheme.mist,
+          'updated the task',
+        );
+    }
+  }
+}
+
+/// Shared "More" menu for a task: status, priority, assign, activity, and
+/// edit/attach/delete. Used by task rows, subtask rows, and board cards.
+Future<void> _openTaskMenu({
+  required BuildContext context,
+  required TaskItem item,
+  required bool editable,
+  ValueChanged<String>? onSetStatus,
+  ValueChanged<String>? onSetPriority,
+  VoidCallback? onAssign,
+  VoidCallback? onShowDetails,
+  VoidCallback? onAttach,
+  bool attachDisabled = false,
+  VoidCallback? onEdit,
+  VoidCallback? onDelete,
+}) async {
+  final tiles = <Widget>[];
+  void addSection(String title) {
+    tiles.add(Padding(
+      padding: const EdgeInsets.fromLTRB(20, 10, 20, 2),
+      child: Text(
+        title,
+        style: GoogleFonts.syne(
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.6,
+          color: PrivetTheme.mist.withValues(alpha: 0.8),
+        ),
+      ),
+    ));
+  }
+
+  void add({
+    required IconData icon,
+    required String label,
+    VoidCallback? onTap,
+    Color? color,
+    bool check = false,
+  }) {
+    tiles.add(ListTile(
+      enabled: onTap != null,
+      dense: true,
+      leading: Icon(
+        icon,
+        size: 18,
+        color: check
+            ? PrivetTheme.signal
+            : (color ?? (onTap == null ? PrivetTheme.mist.withValues(alpha: 0.35) : PrivetTheme.mist)),
+      ),
+      trailing: check
+          ? Icon(Icons.check_rounded, size: 18, color: PrivetTheme.signal)
+          : null,
+      title: Text(label, style: GoogleFonts.ibmPlexSans(fontSize: 13.5)),
+      onTap: onTap == null
+          ? null
+          : () {
+              Navigator.pop(context);
+              onTap();
+            },
+    ));
+  }
+
+  addSection('Status');
+  for (final (v, l) in kTaskStatusOptions) {
+    add(
+      icon: Icons.circle_rounded,
+      label: l,
+      color: _taskStatusColor(v),
+      check: item.status == v,
+      onTap: (editable && onSetStatus != null && v != item.status)
+          ? () => onSetStatus(v)
+          : null,
+    );
+  }
+  addSection('Priority');
+  for (final (v, l) in kTaskPriorityOptions) {
+    add(
+      icon: _taskPriorityIcon(v),
+      label: l,
+      color: _taskPriorityColor(v),
+      check: item.priority == v,
+      onTap: (onSetPriority != null && v != item.priority)
+          ? () => onSetPriority(v)
+          : null,
+    );
+  }
+  tiles.add(Divider(height: 12, color: PrivetTheme.line));
+  if (editable && onAssign != null) {
+    add(
+      icon: Icons.person_add_alt_1_rounded,
+      label: item.assignedTo == null ? 'Assign to…' : 'Change assignee…',
+      onTap: onAssign,
+    );
+  }
+  if (onShowDetails != null) {
+    add(
+      icon: Icons.history_rounded,
+      label: 'Activity',
+      onTap: onShowDetails,
+    );
+  }
+  if (editable && onAttach != null) {
+    add(
+      icon: Icons.attach_file_rounded,
+      label: attachDisabled ? 'Max 10 files' : 'Attach file',
+      onTap: attachDisabled ? null : onAttach,
+    );
+  }
+  if (editable && onEdit != null) {
+    add(
+      icon: Icons.edit_outlined,
+      label: 'Edit text',
+      onTap: onEdit,
+    );
+  }
+  if (onDelete != null) {
+    add(
+      icon: Icons.delete_outline_rounded,
+      label: 'Remove',
+      color: PrivetTheme.danger,
+      onTap: onDelete,
+    );
+  }
+  tiles.add(const SizedBox(height: 8));
+
+  await showModalBottomSheet<void>(
+    context: context,
+    backgroundColor: PrivetTheme.panel,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+    ),
+    builder: (sheetContext) => SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.75,
+        ),
+        child: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: tiles),
+        ),
+      ),
+    ),
+  );
 }
 
 /// Wraps a pinned header chip and reveals a close (unpin) button at its top
@@ -281,6 +632,14 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
   bool _loadingTaskHistory = false;
   static const _maxFiles = 10;
 
+  // Search / filter / board-view state for the Tasks tab.
+  final _taskSearchCtrl = TextEditingController();
+  String _taskSearch = '';
+  String? _filterStatus; // null = all
+  String? _filterPriority; // null = all
+  String? _filterAssignee; // null = all, '' = unassigned, else user id
+  bool _boardView = false;
+
   @override
   void initState() {
     super.initState();
@@ -294,6 +653,20 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
       widget.state.refreshReminderHistory(widget.conversationId);
       widget.state.refreshTaskHistory(widget.conversationId);
     });
+  }
+
+  @override
+  void dispose() {
+    _tab.dispose();
+    _taskScrollCtrl.removeListener(_onTaskScroll);
+    _taskScrollCtrl.dispose();
+    _addCtrl.dispose();
+    _addFocus.dispose();
+    _taskSearchCtrl.dispose();
+    for (final c in _draftSubtasks) {
+      c.dispose();
+    }
+    super.dispose();
   }
 
   void _onTaskScroll() {
@@ -329,13 +702,25 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     );
   }
 
-  /// Only the task creator can approve a done task (server enforces it too).
-  bool _canApprove(TaskItem item) {
-    final uid = widget.state.user?.id;
-    return uid != null &&
-        item.createdBy?.id == uid &&
-        item.done &&
-        !item.doneConfirmed;
+  /// Applies the current search + status/priority/assignee filters.
+  List<TaskItem> _applyTaskFilters(List<TaskItem> items) {
+    final q = _taskSearch.trim().toLowerCase();
+    final status = _filterStatus;
+    final priority = _filterPriority;
+    final assignee = _filterAssignee;
+    return items.where((t) {
+      if (q.isNotEmpty && !t.body.toLowerCase().contains(q)) return false;
+      if (status != null && t.status != status) return false;
+      if (priority != null && t.priority != priority) return false;
+      if (assignee != null) {
+        if (assignee.isEmpty) {
+          if (t.assignedTo != null) return false;
+        } else {
+          if (t.assignedTo?.id != assignee) return false;
+        }
+      }
+      return true;
+    }).toList();
   }
 
   Future<void> _loadMoreTaskHistory() async {
@@ -347,19 +732,6 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     } finally {
       if (mounted) setState(() => _loadingTaskHistory = false);
     }
-  }
-
-  @override
-  void dispose() {
-    _tab.dispose();
-    _taskScrollCtrl.removeListener(_onTaskScroll);
-    _taskScrollCtrl.dispose();
-    _addCtrl.dispose();
-    _addFocus.dispose();
-    for (final c in _draftSubtasks) {
-      c.dispose();
-    }
-    super.dispose();
   }
 
   void _addDraftSubtask() {
@@ -518,6 +890,195 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     }
   }
 
+  /// Assignee picker sheet for a task.
+  Future<void> _assignTo(TaskItem item) async {
+    try {
+      final members = await widget.state.api.members(widget.conversationId);
+      if (!mounted) return;
+      final me = widget.state.user?.id;
+      final ordered = [...members]..sort((a, b) {
+          if (a.id == me) return -1;
+          if (b.id == me) return 1;
+          return a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase());
+        });
+      final result = await showPrivetSheet<Object?>(
+        context: context,
+        backgroundColor: PrivetTheme.panel,
+        showDragHandle: true,
+        builder: (sheetContext) {
+          return ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 380),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+                  child: Text(
+                    'Assign task',
+                    style: GoogleFonts.syne(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                if (item.assignedTo != null)
+                  ListTile(
+                    leading: const Icon(Icons.person_off_outlined),
+                    title: Text(
+                      'Unassign (${item.assignedTo!.displayName})',
+                      style: GoogleFonts.ibmPlexSans(fontSize: 14),
+                    ),
+                    onTap: () => Navigator.pop(sheetContext, const _UnassignSentinel()),
+                  ),
+                Flexible(
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      for (final u in ordered)
+                        ListTile(
+                          leading: PrivetAvatar(
+                            name: u.displayName,
+                            hue: u.avatarHue,
+                            online: widget.state.online.contains(u.id),
+                          ),
+                          title: Text(
+                            u.id == me ? '${u.displayName} (you)' : u.displayName,
+                            style: GoogleFonts.ibmPlexSans(fontSize: 14),
+                          ),
+                          trailing: item.assignedTo?.id == u.id
+                              ? Icon(Icons.check_rounded, color: PrivetTheme.signal, size: 18)
+                              : null,
+                          onTap: () => Navigator.pop(sheetContext, u),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      );
+      if (result is _UnassignSentinel) {
+        await widget.state.assignTask(item, null);
+      } else if (result is PrivetUser) {
+        await widget.state.assignTask(item, result.id);
+      }
+    } catch (e) {
+      widget.state.setError('Could not load members: $e');
+    }
+  }
+
+  /// Details popover for a task: metadata + change log (activity feed).
+  Future<void> _showTaskDetails(TaskItem item) async {
+    List<TaskActivity> activity = const [];
+    try {
+      activity = await widget.state.api.taskActivity(item.id);
+    } catch (_) {
+      // Change log is best-effort; the dialog still shows metadata.
+    }
+    if (!mounted) return;
+    await showPrivetSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: PrivetTheme.panel,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        return SizedBox(
+          height: MediaQuery.sizeOf(context).height * 0.62,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Task details',
+                        style: GoogleFonts.syne(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Close',
+                      onPressed: () => Navigator.pop(sheetContext),
+                      icon: const Icon(Icons.close_rounded),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+                  children: [
+                    Text(
+                      item.body,
+                      style: GoogleFonts.ibmPlexSans(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: PrivetTheme.paper,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        _TaskMetaChip(
+                          label: _taskStatusLabel(item.status),
+                          color: _taskStatusColor(item.status),
+                          onTap: () {},
+                        ),
+                        _TaskMetaChip(
+                          label: _taskPriorityLabel(item.priority),
+                          color: _taskPriorityColor(item.priority),
+                          icon: _taskPriorityIcon(item.priority),
+                          onTap: () {},
+                        ),
+                        if (item.assignedTo != null)
+                          _TaskMetaChip(
+                            label: item.assignedTo!.displayName,
+                            color: PrivetTheme.mist,
+                            icon: Icons.person_outline_rounded,
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Created ${_fmtTaskDate(item.createdAt)}'
+                      '${item.createdBy != null ? ' by ${item.createdBy!.displayName}' : ''}',
+                      style: GoogleFonts.ibmPlexSans(
+                        fontSize: 11,
+                        color: PrivetTheme.mist.withValues(alpha: 0.55),
+                      ),
+                    ),
+                    if (activity.isNotEmpty) ...[
+                      const SizedBox(height: 16),
+                      Text(
+                        'Activity',
+                        style: GoogleFonts.syne(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: PrivetTheme.paper,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      for (final a in activity) _TaskActivityRow(activity: a),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   String _mimeFor(String name) {
     final lower = name.toLowerCase();
     if (lower.endsWith('.png')) return 'image/png';
@@ -525,6 +1086,496 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     if (lower.endsWith('.webp')) return 'image/webp';
     if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
     return 'application/octet-stream';
+  }
+
+  /// Filter/search toolbar for the Tasks tab (list | board toggle).
+  Widget _buildTaskToolbar() {
+    final hasFilters = _taskSearch.trim().isNotEmpty ||
+        _filterStatus != null ||
+        _filterPriority != null ||
+        _filterAssignee != null;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+      decoration: BoxDecoration(
+        color: PrivetTheme.panelElevated,
+        border: Border(bottom: BorderSide(color: PrivetTheme.line)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: SizedBox(
+                  height: 30,
+                  child: TextField(
+                    controller: _taskSearchCtrl,
+                    onChanged: (v) => setState(() => _taskSearch = v),
+                    style: GoogleFonts.ibmPlexSans(fontSize: 12.5),
+                    decoration: InputDecoration(
+                      hintText: 'Search tasks…',
+                      hintStyle: GoogleFonts.ibmPlexSans(
+                        fontSize: 12.5,
+                        color: PrivetTheme.mist.withValues(alpha: 0.6),
+                      ),
+                      prefixIcon: Icon(
+                        Icons.search_rounded,
+                        size: 17,
+                        color: PrivetTheme.mist,
+                      ),
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 7),
+                      filled: true,
+                      fillColor: PrivetTheme.panel,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: BorderSide.none,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: Tooltip(
+                  message: 'Board / list view',
+                  child: IconButton(
+                    onPressed: () => setState(() => _boardView = !_boardView),
+                    icon: Icon(
+                      _boardView
+                          ? Icons.view_list_rounded
+                          : Icons.view_kanban_outlined,
+                      size: 20,
+                      color: PrivetTheme.signal,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          SizedBox(
+            height: 26,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              children: [
+                _filterChip(
+                  label: _filterStatus == null
+                      ? 'Status'
+                      : _taskStatusLabel(_filterStatus!),
+                  active: _filterStatus != null,
+                  color: _filterStatus == null
+                      ? null
+                      : _taskStatusColor(_filterStatus!),
+                  onTap: () => _cycleFilter('status'),
+                ),
+                const SizedBox(width: 6),
+                _filterChip(
+                  label: _filterPriority == null
+                      ? 'Priority'
+                      : _taskPriorityLabel(_filterPriority!),
+                  active: _filterPriority != null,
+                  color: _filterPriority == null
+                      ? null
+                      : _taskPriorityColor(_filterPriority!),
+                  onTap: () => _cycleFilter('priority'),
+                ),
+                const SizedBox(width: 6),
+                _filterChip(
+                  label: _filterAssignee == null
+                      ? 'Assignee'
+                      : (_filterAssignee!.isEmpty
+                          ? 'Unassigned'
+                          : _assigneeLabel(_filterAssignee!)),
+                  active: _filterAssignee != null,
+                  onTap: () => _cycleFilter('assignee'),
+                ),
+                if (hasFilters) ...[
+                  const SizedBox(width: 6),
+                  _filterChip(
+                    label: 'Clear',
+                    active: false,
+                    color: PrivetTheme.danger,
+                    onTap: () => setState(() {
+                      _filterStatus = null;
+                      _filterPriority = null;
+                      _filterAssignee = null;
+                      _taskSearchCtrl.clear();
+                      _taskSearch = '';
+                    }),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _assigneeLabel(String userId) {
+    for (final u in widget.state.directory) {
+      if (u.id == userId) return u.displayName;
+    }
+    return 'Assignee';
+  }
+
+  /// Cycles a filter through its options (null → values → null).
+  void _cycleFilter(String kind) {
+    setState(() {
+      if (kind == 'status') {
+        final next = _filterStatus == null
+            ? 'todo'
+            : _filterStatus == 'todo'
+                ? 'in_progress'
+                : _filterStatus == 'in_progress'
+                    ? 'review'
+                    : null;
+        _filterStatus = next;
+      } else if (kind == 'priority') {
+        final order = ['highest', 'high', 'medium', 'low', 'lowest'];
+        final i = order.indexOf(_filterPriority ?? '');
+        _filterPriority = i == -1 ? 'highest' : (i + 1 < order.length ? order[i + 1] : null);
+      } else {
+        final me = widget.state.user?.id;
+        _filterAssignee = _filterAssignee == null
+            ? ''
+            : _filterAssignee!.isEmpty
+                ? me
+                : null;
+      }
+    });
+  }
+
+  Widget _filterChip({
+    required String label,
+    required bool active,
+    required VoidCallback onTap,
+    Color? color,
+  }) {
+    final c = color ?? (active ? PrivetTheme.signal : PrivetTheme.mist);
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: active
+                ? c.withValues(alpha: 0.12)
+                : PrivetTheme.panel,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: active ? c.withValues(alpha: 0.55) : PrivetTheme.line,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (active)
+                Icon(Icons.check_rounded, size: 13, color: c),
+              if (active) const SizedBox(width: 3),
+              Text(
+                label,
+                style: GoogleFonts.ibmPlexSans(
+                  fontSize: 11,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                  color: active ? c : PrivetTheme.paper,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Wires a task into a [_TaskRow] with all edit handlers (shared by the
+  /// list view, history section, and kanban cards).
+  Widget _buildTaskRow({
+    required TaskItem item,
+    required int number,
+    required ConversationTasks board,
+    bool history = false,
+    String? progressLabel,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: _TaskRow(
+        number: number,
+        item: item,
+        taskFontSize: widget.state.taskFontSize,
+        mediaBase: widget.mediaBase,
+        myUserId: widget.state.user?.id,
+        subtasks: board.subtasksOf(item.id),
+        progressLabel: progressLabel,
+        onToggle: history ? null : () => widget.state.toggleTaskDone(item),
+        onSetStatus:
+            history ? null : (s) => widget.state.setTaskStatus(item, s),
+        onSetPriority: (p) => widget.state.setTaskPriority(item, p),
+        onAssign: history ? null : () => _assignTo(item),
+        onShowDetails: () => _showTaskDetails(item),
+        onSaveBody: history
+            ? null
+            : (body) => widget.state.updateTaskBody(item, body),
+        onDelete: history ? null : () => widget.state.deleteTask(item),
+        onRemoveAttachment: history
+            ? null
+            : (url) => widget.state.removeTaskAttachment(item, url),
+        onAttach: history ? null : () => _attachToItem(item),
+        onPin: history ? null : () => widget.state.toggleTaskPin(item),
+        onAddSubtask: history
+            ? null
+            : (body) => widget.state.addTask(
+                  conversationId: widget.conversationId,
+                  body: body,
+                  parentId: item.id,
+                ),
+        onToggleSubtask:
+            history ? null : (sub) => widget.state.toggleTaskDone(sub),
+        onSetSubtaskStatus:
+            (sub, s) => widget.state.setTaskStatus(sub, s),
+        onSetSubtaskPriority:
+            (sub, p) => widget.state.setTaskPriority(sub, p),
+        onAssignSubtask: history ? null : (sub) => _assignTo(sub),
+        onShowDetailsSubtask: (sub) => _showTaskDetails(sub),
+        onSaveSubtaskBody: history
+            ? null
+            : (sub, body) => widget.state.updateTaskBody(sub, body),
+        onDeleteSubtask:
+            history ? null : (sub) => widget.state.deleteTask(sub),
+        onAttachSubtask:
+            history ? null : (sub) => _attachToItem(sub),
+        onRemoveSubtaskAttachment: history
+            ? null
+            : (sub, url) => widget.state.removeTaskAttachment(sub, url),
+      ),
+    );
+  }
+
+  /// Classic vertical list: active board + history section.
+  Widget _buildTaskList({
+    required List<TaskItem> historyRoots,
+    required ConversationTasks historyBoard,
+    required bool historyLoading,
+    required bool historyHasMore,
+  }) {
+    final board = widget.state.taskBoardFor(widget.conversationId);
+    final filtered = _applyTaskFilters(board.activeItems);
+    final emptyAll = board.activeItems.isEmpty && historyRoots.isEmpty;
+    return ListView(
+      controller: _taskScrollCtrl,
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
+      children: [
+        if (emptyAll)
+          _EmptyState(
+            icon: Icons.task_alt_rounded,
+            color: PrivetTheme.signal,
+            title: 'No open tasks',
+            subtitle:
+                'Add a task with subtasks below, or right-click any message → Add to task',
+          )
+        else ...[
+          if (filtered.isNotEmpty) ...[
+            _SectionLabel('To do — ${filtered.length}'),
+            const SizedBox(height: 6),
+            ...filtered.asMap().entries.map((e) {
+              final prog = board.progressFor(e.value);
+              return _buildTaskRow(
+                item: e.value,
+                number: e.key + 1,
+                board: board,
+                progressLabel: (e.value.subtaskTotal ?? 0) > 0
+                    ? '${prog.done}/${prog.total}'
+                    : null,
+              );
+            }),
+          ] else if (board.activeItems.isNotEmpty) ...[
+            _EmptyState(
+              icon: Icons.filter_alt_off_outlined,
+              color: PrivetTheme.mist,
+              title: 'No tasks match',
+              subtitle: 'Clear the search or filters above',
+            ),
+          ],
+          if (historyRoots.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            _SectionLabel(
+              historyHasMore
+                  ? 'History — ${historyRoots.length}+'
+                  : 'History — ${historyRoots.length}',
+            ),
+            const SizedBox(height: 6),
+            ...historyRoots.asMap().entries.map((e) => _buildTaskRow(
+                  item: e.value,
+                  number: e.key + 1,
+                  board: historyBoard,
+                  history: true,
+                )),
+            if (historyLoading || _loadingTaskHistory)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Center(
+                  child: SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              )
+            else if (historyHasMore)
+              Padding(
+                padding: const EdgeInsets.only(top: 4, bottom: 8),
+                child: Center(
+                  child: Text(
+                    'Scroll for more…',
+                    style: GoogleFonts.ibmPlexSans(
+                      fontSize: 11,
+                      color: PrivetTheme.mist.withValues(alpha: 0.55),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ],
+      ],
+    );
+  }
+
+  /// Kanban board: one column per status, horizontal scroll.
+  Widget _buildTaskBoard({required List<TaskItem> historyRoots}) {
+    final board = widget.state.taskBoardFor(widget.conversationId);
+    final filtered = _applyTaskFilters(board.activeItems);
+    final doneFiltered = _applyTaskFilters(historyRoots);
+    final byStatus = <String, List<TaskItem>>{
+      'todo': [],
+      'in_progress': [],
+      'review': [],
+      'done': [],
+    };
+    for (final t in filtered) {
+      (byStatus[t.status] ??= []).add(t);
+    }
+    byStatus['done'] = doneFiltered;
+
+    return ListView(
+      controller: _taskScrollCtrl,
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 16),
+      children: [
+        for (final (status, label) in kTaskStatusOptions) ...[
+          _buildBoardColumn(
+            status: status,
+            label: label,
+            items: byStatus[status] ?? const [],
+          ),
+          const SizedBox(width: 10),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildBoardColumn({
+    required String status,
+    required String label,
+    required List<TaskItem> items,
+  }) {
+    final board = widget.state.taskBoardFor(widget.conversationId);
+    final editable = status != 'done';
+    return SizedBox(
+      width: 250,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Row(
+              children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: _taskStatusColor(status),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  label,
+                  style: GoogleFonts.syne(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: PrivetTheme.paper,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: PrivetTheme.panel,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '${items.length}',
+                    style: GoogleFonts.syne(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: PrivetTheme.mist,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView(
+              children: [
+                for (final item in items)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: _TaskBoardCard(
+                      item: item,
+                      board: board,
+                      editable: editable,
+                      onToggle: editable
+                          ? () => widget.state.toggleTaskDone(item)
+                          : null,
+                      onSetStatus: editable
+                          ? (s) => widget.state.setTaskStatus(item, s)
+                          : null,
+                      onSetPriority: (p) => widget.state.setTaskPriority(item, p),
+                      onAssign: editable ? () => _assignTo(item) : null,
+                      onShowDetails: () => _showTaskDetails(item),
+                    ),
+                  ),
+                if (items.isEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 10),
+                    decoration: BoxDecoration(
+                      color: PrivetTheme.panelElevated.withValues(alpha: 0.4),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: PrivetTheme.line),
+                    ),
+                    child: Center(
+                      child: Text(
+                        'Nothing here',
+                        style: GoogleFonts.ibmPlexSans(
+                          fontSize: 11,
+                          color: PrivetTheme.mist.withValues(alpha: 0.5),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -652,128 +1703,16 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                       padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
                       child: _TaskProgressBar(board: board),
                     ),
+                  _buildTaskToolbar(),
                   Expanded(
-                    child: ListView(
-                      controller: _taskScrollCtrl,
-                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-                      children: [
-                        if (activeItems.isEmpty && historyRoots.isEmpty)
-                          _EmptyState(
-                            icon: Icons.task_alt_rounded,
-                            color: PrivetTheme.signal,
-                            title: 'No open tasks',
-                            subtitle: 'Add a task with subtasks below, or right-click any message → Add to task',
-                          )
-                        else ...[
-                          if (activeItems.isNotEmpty) ...[
-                            _SectionLabel('To do — ${activeItems.length}'),
-                            const SizedBox(height: 6),
-                            ...activeItems.asMap().entries.map((e) {
-                              final subtasks = board.subtasksOf(e.value.id);
-                              final prog = board.progressFor(e.value);
-                              return Padding(
-                                padding: const EdgeInsets.only(bottom: 8),
-                                child: _TaskRow(
-                                  number: e.key + 1,
-                                  item: e.value,
-                                  taskFontSize: widget.state.taskFontSize,
-                                  mediaBase: widget.mediaBase,
-                                  myUserId: widget.state.user?.id,
-                                  subtasks: subtasks,
-                                  progressLabel: (e.value.subtaskTotal ?? 0) > 0
-                                      ? '${prog.done}/${prog.total}'
-                                      : null,
-                                  onToggle: () => widget.state.toggleTaskDone(e.value),
-                                  onConfirmDone: _canApprove(e.value)
-                                      ? () => widget.state.confirmTaskDone(e.value)
-                                      : null,
-                                  onSaveBody: (body) => widget.state.updateTaskBody(e.value, body),
-                                  onDelete: () => widget.state.deleteTask(e.value),
-                                  onRemoveAttachment: (url) =>
-                                      widget.state.removeTaskAttachment(e.value, url),
-                                  onAttach: () => _attachToItem(e.value),
-                                  onPin: () => widget.state.toggleTaskPin(e.value),
-                                  onAddSubtask: (body) => widget.state.addTask(
-                                    conversationId: widget.conversationId,
-                                    body: body,
-                                    parentId: e.value.id,
-                                  ),
-                                  onToggleSubtask: (sub) => widget.state.toggleTaskDone(sub),
-                                  onConfirmSubtask: (sub) => _canApprove(sub)
-                                      ? () => widget.state.confirmTaskDone(sub)
-                                      : null,
-                                  onSaveSubtaskBody: (sub, body) =>
-                                      widget.state.updateTaskBody(sub, body),
-                                  onDeleteSubtask: (sub) => widget.state.deleteTask(sub),
-                                  onAttachSubtask: (sub) => _attachToItem(sub),
-                                  onRemoveSubtaskAttachment: (sub, url) =>
-                                      widget.state.removeTaskAttachment(sub, url),
-                                ),
-                              );
-                            }),
-                          ],
-                          if (historyRoots.isNotEmpty) ...[
-                            const SizedBox(height: 12),
-                            _SectionLabel(
-                              historyHasMore
-                                  ? 'History — ${historyRoots.length}+'
-                                  : 'History — ${historyRoots.length}',
-                            ),
-                            const SizedBox(height: 6),
-                            ...historyRoots.asMap().entries.map((e) => Padding(
-                              padding: const EdgeInsets.only(bottom: 8),
-                              child: _TaskRow(
-                                number: e.key + 1,
-                                item: e.value,
-                                taskFontSize: widget.state.taskFontSize,
-                                mediaBase: widget.mediaBase,
-                                myUserId: widget.state.user?.id,
-                                subtasks: historyBoard.subtasksOf(e.value.id),
-                                progressLabel: null,
-                                onToggle: null,
-                                onConfirmDone: null,
-                                onSaveBody: null,
-                                onDelete: null,
-                                onRemoveAttachment: null,
-                                onAttach: null,
-                                onPin: null,
-                                onAddSubtask: null,
-                                onToggleSubtask: null,
-                                onConfirmSubtask: null,
-                                onSaveSubtaskBody: null,
-                                onDeleteSubtask: null,
-                                onAttachSubtask: null,
-                                onRemoveSubtaskAttachment: null,
-                              ),
-                            )),
-                            if (historyLoading || _loadingTaskHistory)
-                              const Padding(
-                                padding: EdgeInsets.symmetric(vertical: 12),
-                                child: Center(
-                                  child: SizedBox(
-                                    width: 22,
-                                    height: 22,
-                                    child: CircularProgressIndicator(strokeWidth: 2),
-                                  ),
-                                ),
-                              )
-                            else if (historyHasMore)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 4, bottom: 8),
-                                child: Center(
-                                  child: Text(
-                                    'Scroll for more…',
-                                    style: GoogleFonts.ibmPlexSans(
-                                      fontSize: 11,
-                                      color: PrivetTheme.mist.withValues(alpha: 0.55),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ],
-                      ],
-                    ),
+                    child: _boardView
+                        ? _buildTaskBoard(historyRoots: historyRoots)
+                        : _buildTaskList(
+                            historyRoots: historyRoots,
+                            historyBoard: historyBoard,
+                            historyLoading: historyLoading,
+                            historyHasMore: historyHasMore,
+                          ),
                   ),
                   // Add-task bar
                   Container(
@@ -1880,7 +2819,10 @@ class _TaskRow extends StatefulWidget {
     required this.subtasks,
     required this.progressLabel,
     required this.onToggle,
-    required this.onConfirmDone,
+    required this.onSetStatus,
+    required this.onSetPriority,
+    required this.onAssign,
+    required this.onShowDetails,
     required this.onSaveBody,
     required this.onDelete,
     required this.onRemoveAttachment,
@@ -1888,7 +2830,10 @@ class _TaskRow extends StatefulWidget {
     required this.onPin,
     required this.onAddSubtask,
     required this.onToggleSubtask,
-    required this.onConfirmSubtask,
+    required this.onSetSubtaskStatus,
+    required this.onSetSubtaskPriority,
+    required this.onAssignSubtask,
+    required this.onShowDetailsSubtask,
     required this.onSaveSubtaskBody,
     required this.onDeleteSubtask,
     required this.onAttachSubtask,
@@ -1906,7 +2851,10 @@ class _TaskRow extends StatefulWidget {
   final List<TaskItem> subtasks;
   final String? progressLabel;
   final VoidCallback? onToggle;
-  final VoidCallback? onConfirmDone;
+  final ValueChanged<String>? onSetStatus;
+  final ValueChanged<String>? onSetPriority;
+  final VoidCallback? onAssign;
+  final VoidCallback? onShowDetails;
   final ValueChanged<String>? onSaveBody;
   final VoidCallback? onDelete;
   final ValueChanged<String>? onRemoveAttachment;
@@ -1914,8 +2862,10 @@ class _TaskRow extends StatefulWidget {
   final VoidCallback? onPin;
   final Future<void> Function(String body)? onAddSubtask;
   final ValueChanged<TaskItem>? onToggleSubtask;
-  /// Returns the confirm handler for a subtask, or null when it can't be approved.
-  final VoidCallback? Function(TaskItem item)? onConfirmSubtask;
+  final void Function(TaskItem item, String status)? onSetSubtaskStatus;
+  final void Function(TaskItem item, String priority)? onSetSubtaskPriority;
+  final ValueChanged<TaskItem>? onAssignSubtask;
+  final ValueChanged<TaskItem>? onShowDetailsSubtask;
   final void Function(TaskItem item, String body)? onSaveSubtaskBody;
   final ValueChanged<TaskItem>? onDeleteSubtask;
   final ValueChanged<TaskItem>? onAttachSubtask;
@@ -2037,15 +2987,19 @@ class _TaskRowState extends State<_TaskRow> {
   Widget build(BuildContext context) {
     final item = widget.item;
     final isHistory = widget.onToggle == null;
-    final awaitingApproval = item.done && !item.doneConfirmed;
+    final statusColor = _taskStatusColor(item.status);
+    final checked = item.status == 'review' || item.status == 'done';
+    final checkColor = item.status == 'done'
+        ? PrivetTheme.signal
+        : (item.status == 'review' ? const Color(0xFFF0A83D) : PrivetTheme.mist);
     final media = item.mediaItems;
 
     return AnimatedOpacity(
       opacity: isHistory ? 0.65 : 1.0,
       duration: const Duration(milliseconds: 200),
       child: Material(
-        color: awaitingApproval
-            ? const Color(0xFFF0A83D).withValues(alpha: 0.09)
+        color: !isHistory && (item.status == 'in_progress' || item.status == 'review')
+            ? statusColor.withValues(alpha: 0.09)
             : isHistory
                 ? PrivetTheme.panelElevated.withValues(alpha: 0.6)
                 : PrivetTheme.panelElevated,
@@ -2064,24 +3018,18 @@ class _TaskRowState extends State<_TaskRow> {
                     MouseRegion(
                       cursor: SystemMouseCursors.click,
                       child: Tooltip(
-                        message: item.doneConfirmed
-                            ? 'Done'
-                            : (item.done
-                                ? 'Done — awaiting approval · tap to reopen'
-                                : 'Mark done'),
+                        message: item.status == 'review'
+                            ? 'In review · tap to reopen'
+                            : 'Mark as done',
                         child: GestureDetector(
                           onTap: widget.onToggle,
                           child: Padding(
                             padding: const EdgeInsets.only(top: 2),
                             child: Icon(
-                              item.done
+                              checked
                                   ? Icons.check_box_rounded
                                   : Icons.check_box_outline_blank_rounded,
-                              color: item.doneConfirmed
-                                  ? PrivetTheme.signal
-                                  : (item.done
-                                      ? const Color(0xFFF0A83D)
-                                      : PrivetTheme.mist),
+                              color: checkColor,
                               size: 22,
                             ),
                           ),
@@ -2148,46 +3096,74 @@ class _TaskRowState extends State<_TaskRow> {
                         ),
                         Padding(
                           padding: const EdgeInsets.only(top: 3),
-                          child: Text.rich(
-                            TextSpan(
-                              children: [
-                                TextSpan(text: 'Created ${_fmtTaskDate(item.createdAt)}'),
-                                if (item.createdBy != null) ...[
-                                  const TextSpan(text: ' · '),
+                          child: Row(
+                            children: [
+                              _TaskMetaChip(
+                                label: _taskStatusLabel(item.status),
+                                color: statusColor,
+                                onTap: widget.onSetStatus != null
+                                    ? () => _openTaskMenu(
+                                          context: context,
+                                          item: item,
+                                          editable: !isHistory,
+                                          onSetStatus: widget.onSetStatus,
+                                          onSetPriority: widget.onSetPriority,
+                                          onAssign: widget.onAssign,
+                                          onShowDetails: widget.onShowDetails,
+                                        )
+                                    : null,
+                                small: true,
+                              ),
+                              const SizedBox(width: 5),
+                              _TaskMetaChip(
+                                label: _taskPriorityLabel(item.priority),
+                                color: _taskPriorityColor(item.priority),
+                                icon: _taskPriorityIcon(item.priority),
+                                onTap: () => _openTaskMenu(
+                                  context: context,
+                                  item: item,
+                                  editable: !isHistory,
+                                  onSetStatus: widget.onSetStatus,
+                                  onSetPriority: widget.onSetPriority,
+                                  onAssign: widget.onAssign,
+                                  onShowDetails: widget.onShowDetails,
+                                ),
+                                small: true,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text.rich(
                                   TextSpan(
-                                    text: 'by ${item.createdBy!.displayName}',
+                                    children: [
+                                      TextSpan(
+                                        text:
+                                            'Created ${_fmtTaskDate(item.createdAt)}',
+                                      ),
+                                      if (item.createdBy != null) ...[
+                                        const TextSpan(text: ' · '),
+                                        TextSpan(
+                                          text:
+                                              'by ${item.createdBy!.displayName}',
+                                        ),
+                                      ],
+                                      if (item.assignedTo != null) ...[
+                                        const TextSpan(text: ' → '),
+                                        TextSpan(
+                                          text: item.assignedTo!.displayName,
+                                        ),
+                                      ],
+                                    ],
                                   ),
-                                ],
-                                if (item.assignedTo != null) ...[
-                                  const TextSpan(text: ' → '),
-                                  TextSpan(
-                                    text: item.assignedTo!.displayName,
+                                  style: GoogleFonts.ibmPlexSans(
+                                    fontSize: 11,
+                                    color: PrivetTheme.mist
+                                        .withValues(alpha: 0.55),
                                   ),
-                                ],
-                                if (item.done && !item.doneConfirmed)
-                                  TextSpan(
-                                    text: ' · awaiting approval',
-                                    style: GoogleFonts.ibmPlexSans(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w700,
-                                      color: const Color(0xFFF0A83D),
-                                    ),
-                                  ),
-                                if (item.doneConfirmed)
-                                  TextSpan(
-                                    text: ' · Done',
-                                    style: GoogleFonts.ibmPlexSans(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w700,
-                                      color: PrivetTheme.signal,
-                                    ),
-                                  ),
-                              ],
-                            ),
-                            style: GoogleFonts.ibmPlexSans(
-                              fontSize: 11,
-                              color: PrivetTheme.mist.withValues(alpha: 0.55),
-                            ),
+                                  overflow: TextOverflow.ellipsis,
+                                  maxLines: 1,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ],
@@ -2200,7 +3176,20 @@ class _TaskRowState extends State<_TaskRow> {
                     onPin: widget.onPin,
                     onEdit: widget.onSaveBody != null ? _openEditDialog : null,
                     onDelete: widget.onDelete,
-                    onConfirmDone: widget.onConfirmDone,
+                    onMore: () => _openTaskMenu(
+                      context: context,
+                      item: item,
+                      editable: !isHistory,
+                      onSetStatus: widget.onSetStatus,
+                      onSetPriority: widget.onSetPriority,
+                      onAssign: widget.onAssign,
+                      onShowDetails: widget.onShowDetails,
+                      onAttach: !isHistory ? widget.onAttach : null,
+                      attachDisabled: media.length >= 10,
+                      onEdit:
+                          widget.onSaveBody != null ? _openEditDialog : null,
+                      onDelete: widget.onDelete,
+                    ),
                     history: isHistory,
                   ),
                 ],
@@ -2297,9 +3286,17 @@ class _TaskRowState extends State<_TaskRow> {
                           onToggle: widget.onToggleSubtask == null
                               ? null
                               : () => widget.onToggleSubtask!(sub),
-                          onConfirm: widget.onConfirmSubtask == null
+                          onSetStatus: (s) =>
+                              widget.onSetSubtaskStatus!(sub, s),
+                          onSetPriority: widget.onSetSubtaskPriority == null
                               ? null
-                              : widget.onConfirmSubtask!(sub),
+                              : (p) => widget.onSetSubtaskPriority!(sub, p),
+                          onAssign: widget.onAssignSubtask == null
+                              ? null
+                              : () => widget.onAssignSubtask!(sub),
+                          onShowDetails: widget.onShowDetailsSubtask == null
+                              ? null
+                              : () => widget.onShowDetailsSubtask!(sub),
                           onSaveBody: widget.onSaveSubtaskBody == null
                               ? null
                               : (body) =>
@@ -2425,7 +3422,7 @@ class _TaskRowActions extends StatelessWidget {
     required this.onPin,
     required this.onEdit,
     required this.onDelete,
-    required this.onConfirmDone,
+    required this.onMore,
     required this.history,
   });
 
@@ -2435,24 +3432,17 @@ class _TaskRowActions extends StatelessWidget {
   final VoidCallback? onPin;
   final VoidCallback? onEdit;
   final VoidCallback? onDelete;
-  final VoidCallback? onConfirmDone;
+  final VoidCallback onMore;
   final bool history;
 
   @override
   Widget build(BuildContext context) {
     if (PrivetTheme.isCompact(context)) {
-      if (onAttach == null &&
-          onPin == null &&
-          onEdit == null &&
-          onDelete == null &&
-          onConfirmDone == null) {
-        return const SizedBox.shrink();
-      }
       return MouseRegion(
         cursor: SystemMouseCursors.click,
         child: IconButton(
           tooltip: 'More',
-          onPressed: () => _showMenu(context),
+          onPressed: onMore,
           icon: const Icon(Icons.more_horiz_rounded, size: 20),
           color: PrivetTheme.mist,
           visualDensity: VisualDensity.compact,
@@ -2510,140 +3500,17 @@ class _TaskRowActions extends StatelessWidget {
               visualDensity: VisualDensity.compact,
             ),
           ),
-        if (onConfirmDone != null)
-          MouseRegion(
-            cursor: SystemMouseCursors.click,
-            child: Tooltip(
-              message: 'Approve — mark done and move to history',
-              child: InkWell(
-                borderRadius: BorderRadius.circular(10),
-                onTap: onConfirmDone,
-                mouseCursor: SystemMouseCursors.click,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 5,
-                  ),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: PrivetTheme.signal.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: PrivetTheme.signal.withValues(alpha: 0.5),
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.done_all_rounded,
-                          size: 14,
-                          color: PrivetTheme.signal,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          'Approve',
-                          style: GoogleFonts.syne(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            color: PrivetTheme.signal,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
+        MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: IconButton(
+            tooltip: 'Status · priority · assign · activity',
+            onPressed: onMore,
+            icon: const Icon(Icons.more_horiz_rounded, size: 18),
+            color: PrivetTheme.mist,
+            visualDensity: VisualDensity.compact,
           ),
-      ],
-    );
-  }
-
-  void _showMenu(BuildContext context) {
-    final tiles = <Widget>[];
-    void addTile({
-      required IconData icon,
-      required String label,
-      VoidCallback? onTap,
-      bool disabled = false,
-      Color? color,
-      bool prominent = false,
-    }) {
-      tiles.add(
-        ListTile(
-          enabled: !disabled && onTap != null,
-          leading: Icon(
-            icon,
-            color: color ?? (prominent ? PrivetTheme.signal : null),
-          ),
-          title: Text(
-            label,
-            style: prominent
-                ? GoogleFonts.syne(
-                    fontWeight: FontWeight.w700,
-                    color: PrivetTheme.signal,
-                  )
-                : null,
-          ),
-          onTap: (disabled || onTap == null)
-              ? null
-              : () {
-                  Navigator.pop(context);
-                  onTap!();
-                },
         ),
-      );
-    }
-
-    if (onAttach != null) {
-      addTile(
-        icon: Icons.attach_file_rounded,
-        label: attachDisabled ? 'Max 10 files' : 'Attach files',
-        onTap: onAttach,
-        disabled: attachDisabled,
-      );
-    }
-    if (onPin != null) {
-      addTile(
-        icon: pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined,
-        label: pinned ? 'Unpin from header' : 'Pin to header',
-        onTap: onPin,
-      );
-    }
-    if (onEdit != null) {
-      addTile(icon: Icons.edit_outlined, label: 'Edit text', onTap: onEdit);
-    }
-    if (onConfirmDone != null) {
-      addTile(
-        icon: Icons.done_all_rounded,
-        label: 'Approve — move to history',
-        onTap: onConfirmDone,
-        prominent: true,
-      );
-    }
-    if (onDelete != null) {
-      addTile(
-        icon: Icons.close_rounded,
-        label: history ? 'Remove from history' : 'Remove',
-        onTap: onDelete,
-        color: PrivetTheme.danger,
-      );
-    }
-    if (tiles.isEmpty) return;
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: PrivetTheme.panel,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: tiles),
-      ),
+      ],
     );
   }
 }
@@ -2655,7 +3522,10 @@ class _SubtaskRow extends StatefulWidget {
     required this.mediaBase,
     required this.editable,
     required this.onToggle,
-    required this.onConfirm,
+    required this.onSetStatus,
+    required this.onSetPriority,
+    required this.onAssign,
+    required this.onShowDetails,
     required this.onSaveBody,
     required this.onDelete,
     required this.onAttach,
@@ -2668,7 +3538,10 @@ class _SubtaskRow extends StatefulWidget {
   final String mediaBase;
   final bool editable;
   final VoidCallback? onToggle;
-  final VoidCallback? onConfirm;
+  final ValueChanged<String>? onSetStatus;
+  final ValueChanged<String>? onSetPriority;
+  final VoidCallback? onAssign;
+  final VoidCallback? onShowDetails;
   final ValueChanged<String>? onSaveBody;
   final VoidCallback? onDelete;
   final VoidCallback? onAttach;
@@ -2770,13 +3643,13 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                   child: GestureDetector(
                     onTap: widget.onToggle,
                     child: Icon(
-                      item.done
+                      (item.status == 'review' || item.status == 'done')
                           ? Icons.check_box_rounded
                           : Icons.check_box_outline_blank_rounded,
                       size: 18,
-                      color: item.doneConfirmed
+                      color: item.status == 'done'
                           ? PrivetTheme.signal
-                          : (item.done
+                          : (item.status == 'review'
                               ? const Color(0xFFF0A83D)
                               : PrivetTheme.mist),
                     ),
@@ -2825,7 +3698,21 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                         ? _openEditDialog
                         : null,
                 onDelete: widget.onDelete,
-                onConfirm: widget.editable ? widget.onConfirm : null,
+                onMore: () => _openTaskMenu(
+                  context: context,
+                  item: item,
+                  editable: widget.editable,
+                  onSetStatus: widget.onSetStatus,
+                  onSetPriority: widget.onSetPriority,
+                  onAssign: widget.onAssign,
+                  onShowDetails: widget.onShowDetails,
+                  onAttach: widget.onAttach,
+                  attachDisabled: media.length >= 10,
+                  onEdit: widget.editable && widget.onSaveBody != null
+                      ? _openEditDialog
+                      : null,
+                  onDelete: widget.onDelete,
+                ),
               ),
             ],
           ),
@@ -2922,7 +3809,7 @@ class _SubtaskActions extends StatelessWidget {
     required this.attachDisabled,
     required this.onEdit,
     required this.onDelete,
-    required this.onConfirm,
+    required this.onMore,
   });
 
   final bool editable;
@@ -2930,22 +3817,16 @@ class _SubtaskActions extends StatelessWidget {
   final bool attachDisabled;
   final VoidCallback? onEdit;
   final VoidCallback? onDelete;
-  final VoidCallback? onConfirm;
-
-  bool get _hasAny =>
-      (editable &&
-          (onAttach != null || onEdit != null || onConfirm != null)) ||
-      onDelete != null;
+  final VoidCallback onMore;
 
   @override
   Widget build(BuildContext context) {
-    if (!_hasAny) return const SizedBox.shrink();
     if (PrivetTheme.isCompact(context)) {
       return MouseRegion(
         cursor: SystemMouseCursors.click,
         child: IconButton(
           tooltip: 'More',
-          onPressed: () => _showMenu(context),
+          onPressed: onMore,
           icon: const Icon(Icons.more_horiz_rounded, size: 18),
           color: PrivetTheme.mist,
           visualDensity: VisualDensity.compact,
@@ -2995,129 +3876,171 @@ class _SubtaskActions extends StatelessWidget {
               padding: EdgeInsets.zero,
             ),
           ),
-        if (editable && onConfirm != null)
-          MouseRegion(
-            cursor: SystemMouseCursors.click,
-            child: Tooltip(
-              message: 'Approve subtask',
-              child: InkWell(
-                borderRadius: BorderRadius.circular(8),
-                onTap: onConfirm,
-                mouseCursor: SystemMouseCursors.click,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 7,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: PrivetTheme.signal.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: PrivetTheme.signal.withValues(alpha: 0.5),
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.done_all_rounded,
-                          size: 12,
-                          color: PrivetTheme.signal,
-                        ),
-                        const SizedBox(width: 3),
-                        Text(
-                          'Approve',
-                          style: GoogleFonts.syne(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
-                            color: PrivetTheme.signal,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
+        MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: IconButton(
+            tooltip: 'Status · priority · assign · activity',
+            onPressed: onMore,
+            icon: const Icon(Icons.more_horiz_rounded, size: 16),
+            color: PrivetTheme.mist,
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            padding: EdgeInsets.zero,
           ),
+        ),
       ],
     );
   }
+}
 
-  void _showMenu(BuildContext context) {
-    final tiles = <Widget>[];
-    void addTile({
-      required IconData icon,
-      required String label,
-      VoidCallback? onTap,
-      bool disabled = false,
-      Color? color,
-      bool prominent = false,
-    }) {
-      tiles.add(
-        ListTile(
-          enabled: !disabled && onTap != null,
-          leading: Icon(
-            icon,
-            color: color ?? (prominent ? PrivetTheme.signal : null),
-          ),
-          title: Text(
-            label,
-            style: prominent
-                ? GoogleFonts.syne(
-                    fontWeight: FontWeight.w700,
-                    color: PrivetTheme.signal,
-                  )
-                : null,
-          ),
-          onTap: (disabled || onTap == null)
-              ? null
-              : () {
-                  Navigator.pop(context);
-                  onTap!();
-                },
+/// Compact kanban card for a task (board view).
+class _TaskBoardCard extends StatelessWidget {
+  const _TaskBoardCard({
+    required this.item,
+    required this.board,
+    required this.editable,
+    this.onToggle,
+    this.onSetStatus,
+    this.onSetPriority,
+    this.onAssign,
+    this.onShowDetails,
+  });
+
+  final TaskItem item;
+  final ConversationTasks board;
+  final bool editable;
+  final VoidCallback? onToggle;
+  final ValueChanged<String>? onSetStatus;
+  final ValueChanged<String>? onSetPriority;
+  final VoidCallback? onAssign;
+  final VoidCallback? onShowDetails;
+
+  @override
+  Widget build(BuildContext context) {
+    final statusColor = _taskStatusColor(item.status);
+    final subtasks = board.subtasksOf(item.id);
+    final prog = board.progressFor(item);
+    return Material(
+      color: PrivetTheme.panelElevated,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 3,
+              height: 38,
+              decoration: BoxDecoration(
+                color: statusColor,
+                borderRadius: BorderRadius.circular(3),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.body,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.ibmPlexSans(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: PrivetTheme.paper,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Icon(
+                        _taskPriorityIcon(item.priority),
+                        size: 12,
+                        color: _taskPriorityColor(item.priority),
+                      ),
+                      const SizedBox(width: 3),
+                      Text(
+                        _taskPriorityLabel(item.priority),
+                        style: GoogleFonts.ibmPlexSans(
+                          fontSize: 10,
+                          color: PrivetTheme.mist,
+                        ),
+                      ),
+                      if (subtasks.isNotEmpty) ...[
+                        const SizedBox(width: 8),
+                        Icon(
+                          Icons.checklist_rounded,
+                          size: 11,
+                          color: PrivetTheme.mist.withValues(alpha: 0.8),
+                        ),
+                        const SizedBox(width: 2),
+                        Text(
+                          '${prog.done}/${prog.total}',
+                          style: GoogleFonts.ibmPlexSans(
+                            fontSize: 10,
+                            color: PrivetTheme.mist,
+                          ),
+                        ),
+                      ],
+                      if (item.assignedTo != null) ...[
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            item.assignedTo!.displayName,
+                            overflow: TextOverflow.ellipsis,
+                            style: GoogleFonts.ibmPlexSans(
+                              fontSize: 10,
+                              color: PrivetTheme.mist,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            if (editable && onToggle != null)
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: onToggle,
+                  child: Icon(
+                    (item.status == 'review' || item.status == 'done')
+                        ? Icons.check_box_rounded
+                        : Icons.check_box_outline_blank_rounded,
+                    size: 18,
+                    color: item.status == 'done'
+                        ? PrivetTheme.signal
+                        : (item.status == 'review'
+                            ? const Color(0xFFF0A83D)
+                            : PrivetTheme.mist),
+                  ),
+                ),
+              ),
+            MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: IconButton(
+                tooltip: 'Status · priority · assign · activity',
+                onPressed: () => _openTaskMenu(
+                  context: context,
+                  item: item,
+                  editable: editable,
+                  onSetStatus: onSetStatus,
+                  onSetPriority: onSetPriority,
+                  onAssign: onAssign,
+                  onShowDetails: onShowDetails,
+                ),
+                icon: const Icon(Icons.more_horiz_rounded, size: 16),
+                color: PrivetTheme.mist,
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                padding: EdgeInsets.zero,
+              ),
+            ),
+          ],
         ),
-      );
-    }
-
-    if (editable && onAttach != null) {
-      addTile(
-        icon: Icons.attach_file_rounded,
-        label: attachDisabled ? 'Max 10 files' : 'Attach file',
-        onTap: onAttach,
-        disabled: attachDisabled,
-      );
-    }
-    if (editable && onEdit != null) {
-      addTile(icon: Icons.edit_outlined, label: 'Edit text', onTap: onEdit);
-    }
-    if (editable && onConfirm != null) {
-      addTile(
-        icon: Icons.done_all_rounded,
-        label: 'Approve subtask',
-        onTap: onConfirm,
-        prominent: true,
-      );
-    }
-    if (onDelete != null) {
-      addTile(
-        icon: Icons.close_rounded,
-        label: 'Remove',
-        onTap: onDelete,
-        color: PrivetTheme.danger,
-      );
-    }
-    if (tiles.isEmpty) return;
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: PrivetTheme.panel,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: tiles),
       ),
     );
   }

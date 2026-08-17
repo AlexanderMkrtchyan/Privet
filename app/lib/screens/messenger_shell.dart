@@ -41,6 +41,7 @@ import '../util/privet_sheet.dart';
 import '../util/low_resource.dart';
 import '../util/recording_bytes.dart';
 import '../util/rich_text_markup.dart';
+import '../util/shared_intent.dart';
 import '../util/sounds.dart';
 import '../util/throttle.dart';
 import '../util/web_bootstrap.dart';
@@ -74,6 +75,8 @@ class _MessengerShellState extends State<MessengerShell> {
   /// spinner) for one frame so we never freeze an indeterminate indicator
   /// mid-arc while the inbox builds — that looked like a slideshow.
   bool _shellReady = false;
+  /// Guards the "Send to…" sheet so sessionTick replays can't stack it.
+  bool _sharePickerOpen = false;
 
   @override
   void initState() {
@@ -85,6 +88,11 @@ class _MessengerShellState extends State<MessengerShell> {
       _maybeShowWelcome();
       _maybeShowLowResourceHint();
       _maybeShowNotificationsPrompt();
+      // A share that cold-started the app may have set pendingShare before
+      // this listener existed — sessionTick does not replay past bumps.
+      if (widget.state.pendingShare != null) {
+        unawaited(_maybeShowSharePicker());
+      }
     });
   }
 
@@ -100,6 +108,30 @@ class _MessengerShellState extends State<MessengerShell> {
     }
     if (widget.state.notificationsDenied) {
       _maybeShowNotificationsPrompt();
+    }
+    if (widget.state.pendingShare != null) {
+      unawaited(_maybeShowSharePicker());
+    }
+  }
+
+  /// Opens the "Send to…" sheet for an OS share. Picking a chat routes the
+  /// shared content into its composer; dismissing clears the pending share.
+  Future<void> _maybeShowSharePicker() async {
+    if (!mounted || _sharePickerOpen) return;
+    final state = widget.state;
+    final share = state.pendingShare;
+    if (share == null) return;
+    _sharePickerOpen = true;
+    try {
+      final target = await showSharePicker(context, state: state, share: share);
+      if (!mounted) return;
+      if (target != null) {
+        await state.routeSharedDraftTo(target);
+      } else {
+        state.discardPendingShare();
+      }
+    } finally {
+      _sharePickerOpen = false;
     }
   }
 
@@ -350,6 +382,246 @@ class _MessengerShellState extends State<MessengerShell> {
   }
 }
 
+/// "Send to…" sheet for content shared from another Android app. Returns the
+/// chosen conversation id, or null when the user cancels.
+Future<String?> showSharePicker(
+  BuildContext context, {
+  required PrivetState state,
+  required SharedDraft share,
+}) {
+  return showModalBottomSheet<String>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    barrierColor: Colors.black54,
+    builder: (context) => _SharePickerSheet(state: state, share: share),
+  );
+}
+
+class _SharePickerSheet extends StatefulWidget {
+  const _SharePickerSheet({required this.state, required this.share});
+
+  final PrivetState state;
+  final SharedDraft share;
+
+  @override
+  State<_SharePickerSheet> createState() => _SharePickerSheetState();
+}
+
+class _SharePickerSheetState extends State<_SharePickerSheet> {
+  final _search = TextEditingController();
+  String _query = '';
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  List<Conversation> get _matches {
+    final q = _query.trim().toLowerCase();
+    final all = widget.state.conversations;
+    if (q.isEmpty) return all;
+    return all
+        .where(
+          (c) =>
+              c.title.toLowerCase().contains(q) ||
+              (c.peer?.handle.toLowerCase().contains(q) ?? false),
+        )
+        .toList(growable: false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = widget.state;
+    final matches = _matches;
+    final height = MediaQuery.sizeOf(context).height;
+    return SafeArea(
+      child: Container(
+        height: (height * 0.72).clamp(320.0, 720.0),
+        decoration: BoxDecoration(
+          color: PrivetTheme.panel,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 10),
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: PrivetTheme.line,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+              child: Text(
+                'Send to',
+                style: GoogleFonts.syne(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 20,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: _SharePreview(share: widget.share),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
+              child: TextField(
+                controller: _search,
+                onChanged: (v) => setState(() => _query = v),
+                textInputAction: TextInputAction.search,
+                decoration: InputDecoration(
+                  hintText: 'Search chats',
+                  isDense: true,
+                  prefixIcon: const Icon(Icons.search, size: 20),
+                  filled: true,
+                  fillColor: PrivetTheme.panelElevated,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Expanded(
+              child: matches.isEmpty
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Text(
+                          state.conversations.isEmpty
+                              ? 'No chats yet — start one from the inbox, '
+                                  'then share again.'
+                              : 'No chats match “$_query”.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: PrivetTheme.mist),
+                        ),
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: matches.length,
+                      itemBuilder: (context, i) {
+                        final c = matches[i];
+                        final peerOnline =
+                            c.peer != null && state.online.contains(c.peer!.id);
+                        return Material(
+                          color: Colors.transparent,
+                          child: ListTile(
+                            leading: PrivetAvatar(
+                              name: c.title,
+                              hue: c.peer?.avatarHue ?? (c.isGroup ? 90 : 160),
+                              avatarUrl: c.peer?.avatarUrl == null
+                                  ? null
+                                  : state.api.absoluteMediaUrl(c.peer!.avatarUrl),
+                              online: peerOnline,
+                            ),
+                            title: Text(
+                              c.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: GoogleFonts.syne(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            onTap: () => Navigator.of(context).pop(c.id),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact preview of the shared payload shown at the top of the sheet.
+class _SharePreview extends StatelessWidget {
+  const _SharePreview({required this.share});
+
+  final SharedDraft share;
+
+  @override
+  Widget build(BuildContext context) {
+    final files = share.files;
+    final text = share.text;
+    final showText = text != null && text.trim().isNotEmpty;
+    final IconData icon;
+    if (files.isNotEmpty) {
+      final mime = files.first.mimeType;
+      icon = mime.startsWith('video/')
+          ? Icons.videocam
+          : mime.startsWith('audio/')
+              ? Icons.audiotrack
+              : mime.startsWith('image/')
+                  ? Icons.image
+                  : Icons.insert_drive_file;
+    } else {
+      icon = Icons.notes;
+    }
+    final String label;
+    if (files.length == 1) {
+      label = files.first.filename;
+    } else if (files.isNotEmpty) {
+      label = '${files.length} files';
+    } else {
+      label = 'Text';
+    }
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: PrivetTheme.panelElevated.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: PrivetTheme.line),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: PrivetTheme.signal),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (showText)
+                  Text(
+                    text,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: PrivetTheme.mist,
+                      height: 1.3,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// Active AI model badge — lives in the left sidebar under the signed-in line.
 class AiModelChip extends StatelessWidget {
   const AiModelChip({super.key, required this.state});
@@ -569,6 +841,16 @@ class InboxPane extends StatelessWidget {
                   final selected = c.id == state.activeConversationId;
                   final peerOnline =
                       c.peer != null && state.online.contains(c.peer!.id);
+                  // Inbox preview must hide markup tags (bold/font/highlight) —
+                  // message bodies now routinely carry `[font=…]` wrappers.
+                  final last = c.lastMessage;
+                  final lastPreview = last == null
+                      ? null
+                      : last.kind == 'call'
+                          ? CallHistoryPayload.preview(last.body)
+                          : last.body.contains('[')
+                              ? markupToPlain(last.body)
+                              : last.body;
                   return Material(
                     color: selected
                         ? PrivetTheme.panelElevated
@@ -685,13 +967,7 @@ class InboxPane extends StatelessWidget {
                                     )
                                   else
                                     Text(
-                                      c.lastMessage == null
-                                          ? 'No messages yet'
-                                          : c.lastMessage!.kind == 'call'
-                                              ? CallHistoryPayload.preview(
-                                                  c.lastMessage!.body,
-                                                )
-                                              : c.lastMessage!.body,
+                                      lastPreview ?? 'No messages yet',
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
@@ -714,13 +990,7 @@ class InboxPane extends StatelessWidget {
                                       maintainState: true,
                                       maintainAnimation: true,
                                       child: Text(
-                                        c.lastMessage == null
-                                            ? 'No messages yet — say hi'
-                                            : c.lastMessage!.kind == 'call'
-                                                ? CallHistoryPayload.preview(
-                                                    c.lastMessage!.body,
-                                                  )
-                                                : c.lastMessage!.body,
+                                        lastPreview ?? 'No messages yet — say hi',
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
                                         style: c.lastMessage == null
@@ -2841,6 +3111,7 @@ class _ConversationPaneState extends State<ConversationPane>
   String? _folderConversationId;
   String? _draftConversationId;
   int? _composerMediaAttachId;
+  int? _composerTextAttachId;
   /// Optimistic until a real call/getUserMedia — never block chat open on
   /// enumerateDevices (Linux WebRTC ADM stall).
   MediaPermissionStatus _mediaPerms = const MediaPermissionStatus(
@@ -2879,6 +3150,7 @@ class _ConversationPaneState extends State<ConversationPane>
     });
     _composerMediaAttachId =
         registerComposerMediaAttach(_onAnnotatedImageFromLightbox);
+    _composerTextAttachId = registerComposerTextAttach(_onSharedText);
     // Do NOT enumerateDevices / init WebRTC ADM on chat open — on Linux+NVIDIA
     // that stalls frame presentation for many seconds (isolate stays alive,
     // fps→0). Probe lazily when the user taps mic or call controls.
@@ -4450,6 +4722,7 @@ class _ConversationPaneState extends State<ConversationPane>
     _focusReplyTimer?.cancel();
     unbindImagePaste(_pasteBindId);
     unregisterComposerMediaAttach(_composerMediaAttachId);
+    unregisterComposerTextAttach(_composerTextAttachId);
     _controller.dispose();
     _composerFocus.dispose();
     _scroll.dispose();
@@ -4463,6 +4736,23 @@ class _ConversationPaneState extends State<ConversationPane>
   void _onAnnotatedImageFromLightbox(PickedBytes file) {
     if (!mounted || widget.state.activeConversationId == null) return;
     _applyPickedFile(file);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _composerFocus.requestFocus();
+    });
+  }
+
+  /// Stages OS-shared text into the composer ("share" → Privet → chat).
+  /// [subject] (e.g. a browser tab title) is prefixed above the shared body.
+  void _onSharedText(String text, {String? subject}) {
+    if (!mounted) return;
+    setState(() {
+      final subjectLine =
+          (subject != null && subject.trim().isNotEmpty) ? '$subject\n' : '';
+      _draftVoice = null;
+      _controller.loadMarkup(subjectLine + text);
+      _showEmoji = false;
+    });
+    _syncComposerHasContent();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _composerFocus.requestFocus();
     });
@@ -5010,7 +5300,10 @@ class _ConversationPaneState extends State<ConversationPane>
                           showSender: true,
                           highlighted: highlighted,
                           fontScale: state.chatFontSize / 15.0,
-                          defaultFontFamily: state.chatFontFamily,
+                          // My font applies only to my own messages; a peer's
+                          // bubbles carry their own `[font=…]` or render in the
+                          // app default, so my pick never overrides theirs.
+                          defaultFontFamily: mine ? state.chatFontFamily : '',
                           onSetDefaultFont: state.setChatFontFamily,
                           readByPeer:
                               mine &&
@@ -5659,6 +5952,12 @@ class _ConversationPaneState extends State<ConversationPane>
         onDiscard: _discardVoiceDraft,
       );
     }
+    // WYSIWYG: type in the font picked in the "Aa" menu, not just the sent
+    // bubbles. Explicit [font=…] runs on selected text still win over this base.
+    final baseStyle = Theme.of(context).textTheme.bodyLarge ?? const TextStyle();
+    final composerStyle = state.chatFontFamily.isEmpty
+        ? null
+        : messageFontStyle(state.chatFontFamily, baseStyle);
     return TextField(
       key: _composerFieldKey,
       controller: _controller,
@@ -5666,6 +5965,7 @@ class _ConversationPaneState extends State<ConversationPane>
       minLines: 1,
       maxLines: compact ? 5 : 6,
       keyboardType: TextInputType.multiline,
+      style: composerStyle,
       textInputAction: TextInputAction.newline,
       // Mobile (Android/iOS) gets the native keyboard suggestion strip +
       // autocorrect, like Teams. Desktop/web keep the in-app autocorrect and
@@ -6569,7 +6869,8 @@ class _ConversationPaneState extends State<ConversationPane>
     }
     final body = message.body.trim();
     if (body.isNotEmpty) {
-      return body.length > 800 ? '${body.substring(0, 800)}…' : body;
+      final plain = markupToPlain(body);
+      return plain.length > 800 ? '${plain.substring(0, 800)}…' : plain;
     }
     switch (message.kind) {
       case 'image':
@@ -7626,6 +7927,14 @@ class _ComposerFormatBarState extends State<_ComposerFormatBar> {
     return selectionFormat(widget.controller.formatRuns, start, end);
   }
 
+  /// Font actually in effect here: the selection's own font if any, else the
+  /// app-wide default the user last picked in the "Aa" menu.
+  String get _effectiveFont {
+    final selFont = _selectionFormat().fontFamily;
+    if (selFont != null && selFont.isNotEmpty) return selFont;
+    return widget.state.chatFontFamily;
+  }
+
   Widget _barButton({
     required Widget child,
     required String tooltip,
@@ -7738,6 +8047,7 @@ class _ComposerFormatBarState extends State<_ComposerFormatBar> {
   @override
   Widget build(BuildContext context) {
     final cur = _selectionFormat();
+    final eff = _effectiveFont;
     return Material(
       color: PrivetTheme.panelElevated,
       elevation: 12,
@@ -7793,18 +8103,18 @@ class _ComposerFormatBarState extends State<_ComposerFormatBar> {
             ),
             _barButton(
               tooltip: 'Font family',
-              active: cur.fontFamily != null,
+              active: eff.isNotEmpty,
               onTap: _pickFont,
               child: Text(
                 'Aa',
-                style: cur.fontFamily == null
+                style: eff.isEmpty
                     ? TextStyle(
                         fontSize: 15,
                         fontWeight: FontWeight.w700,
                         color: PrivetTheme.paper,
                       )
                     : messageFontStyle(
-                        cur.fontFamily!,
+                        eff,
                         const TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.w700,

@@ -2502,7 +2502,7 @@ class _ReplyQuote extends StatelessWidget {
                 // Soft-wrap without forcing the bubble to maxWidth (ellipsis
                 // Text does).
                 Text(
-                  reply.body,
+                  markupToPlain(reply.body),
                   maxLines: 2,
                   style: defaultFont.isEmpty
                       ? TextStyle(

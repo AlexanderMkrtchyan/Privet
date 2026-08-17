@@ -17,6 +17,7 @@ import {
 } from '../auth/register.js';
 import {
   getUserByHandle,
+  getUserById,
   listUsersExcept,
   requireUser,
   updateProfile,
@@ -58,6 +59,7 @@ import {
   createTaskItem,
   deleteTaskItem,
   listDoneTaskItems,
+  listTaskActivity,
   listTaskItems,
   unpinAllTasks,
   updateTaskItem,
@@ -910,6 +912,8 @@ export async function registerRoutes(app) {
         attachments: Array.isArray(request.body?.attachments) ? request.body.attachments : null,
         assignedTo: request.body?.assignedTo ? String(request.body.assignedTo) : null,
         parentId: request.body?.parentId ? String(request.body.parentId) : null,
+        status: request.body?.status ? String(request.body.status) : 'todo',
+        priority: request.body?.priority ? String(request.body.priority) : 'medium',
       });
       broadcastTasks(id);
       return { item, items: listTaskItems(id) };
@@ -924,11 +928,14 @@ export async function registerRoutes(app) {
     const user = await requireUser(request, reply);
     if (!user) return;
     const { id } = request.params;
+    const before = db.prepare('SELECT * FROM task_items WHERE id = ?').get(id);
     try {
       const item = updateTaskItem(id, user.id, {
         body: request.body?.body,
         done: request.body?.done,
         doneConfirmed: request.body?.doneConfirmed,
+        status: request.body?.status,
+        priority: request.body?.priority,
         assignedTo: request.body?.assignedTo,
         pinned: request.body?.pinned,
         mediaUrl: request.body?.mediaUrl,
@@ -942,6 +949,45 @@ export async function registerRoutes(app) {
         clearMedia: request.body?.clearMedia === true,
       });
       broadcastTasks(item.conversationId);
+
+      // Notify a newly assigned member (not the actor themselves).
+      const newAssignee = request.body?.assignedTo
+        ? String(request.body.assignedTo)
+        : null;
+      if (
+        newAssignee &&
+        before &&
+        String(before.assigned_to || '') !== newAssignee &&
+        newAssignee !== user.id
+      ) {
+        const assignee = getUserById(newAssignee);
+        const actorName = user.displayName || user.handle || 'Someone';
+        const assigneeName = assignee?.display_name || assignee?.handle || '';
+        const title = assigneeName
+          ? `${actorName} assigned you a task`
+          : 'You were assigned a task';
+        const bodyText = (item.body || '').slice(0, 120);
+        broadcastToUsers([newAssignee], {
+          type: 'notify',
+          conversationId: item.conversationId,
+          taskId: item.id,
+          title,
+          body: bodyText,
+          kind: 'task.assigned',
+        });
+        if (!isOnline(newAssignee)) {
+          void pushToUser(newAssignee, {
+            title,
+            body: bodyText,
+            data: {
+              type: 'task.assigned',
+              conversationId: item.conversationId,
+              taskId: item.id,
+            },
+          });
+        }
+      }
+
       return { item, items: listTaskItems(item.conversationId) };
     } catch (err) {
       const message = err.message || 'could not update task';
@@ -965,6 +1011,19 @@ export async function registerRoutes(app) {
         message === 'forbidden' ? 403 : message === 'not found' ? 404 : 400;
       return reply.code(code).send({ error: message });
     }
+  });
+
+  app.get('/tasks/:id/activity', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params;
+    const task = db.prepare('SELECT * FROM task_items WHERE id = ?').get(id);
+    if (!task) return reply.code(404).send({ error: 'not found' });
+    if (!userInConversation(task.conversation_id, user.id)) {
+      return reply.code(403).send({ error: 'forbidden' });
+    }
+    const limit = request.query?.limit;
+    return { items: listTaskActivity(id, { limit }) };
   });
 
   app.post('/conversations/:id/tasks/clear-done', async (request, reply) => {

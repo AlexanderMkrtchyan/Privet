@@ -15,6 +15,19 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
 class MainActivity : FlutterActivity() {
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        // A cold start from another app's share sheet delivers the payload in
+        // onCreate; parse it before the engine builds so Flutter can poll.
+        SharedIntentHandler.onIntent(this, intent)
+        super.onCreate(savedInstanceState)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        SharedIntentHandler.onIntent(this, intent)
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         FlutterEngineHolder.attach(flutterEngine)
@@ -143,6 +156,15 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
                 "setInputLock" -> result.success(false)
+                else -> result.notImplemented()
+            }
+        }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "privet/shared_intent",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "takePending" -> result.success(SharedIntentHandler.takePending())
                 else -> result.notImplemented()
             }
         }

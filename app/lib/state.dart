@@ -20,6 +20,7 @@ import 'util/display_capture.dart';
 import 'util/display_rate.dart';
 import 'util/emoticon_expand.dart';
 import 'util/gpu_capability.dart';
+import 'util/low_resource.dart';
 import 'util/mobile_push.dart';
 import 'util/mobile_push_io.dart' show decodeNotificationPayload;
 import 'util/mobile_push_notifications.dart';
@@ -27,9 +28,9 @@ import 'util/page_title.dart';
 import 'util/page_uri.dart';
 import 'util/media_ui_wake.dart';
 import 'util/remote_input.dart';
+import 'util/rich_text_markup.dart';
 import 'util/server_time.dart';
 import 'util/sounds.dart';
-import 'util/low_resource.dart';
 import 'util/throttle.dart';
 import 'util/ui_overlay_pause.dart';
 import 'util/recv_media_stream.dart';
@@ -39,8 +40,10 @@ import 'util/desktop_call_window.dart';
 import 'util/desktop_launcher_badge.dart';
 import 'util/desktop_tray.dart';
 import 'util/android_realtime_service.dart';
+import 'util/composer_media_attach.dart';
 import 'util/incoming_call_android.dart';
 import 'util/mobile_app_lifecycle.dart';
+import 'util/shared_intent.dart';
 import 'util/web_notifications.dart';
 
 /// How Privet AI replies are delivered once the user enables AI.
@@ -2406,6 +2409,11 @@ class PrivetState extends ChangeNotifier {
   /// Conversation opened after accepting an invite (DM with inviter).
   String? _pendingOpenConversationId;
 
+  /// Payload received from another Android app's share sheet, waiting to be
+  /// routed to a conversation through the "Send to…" picker. Cleared when the
+  /// user picks a chat (or dismisses the picker).
+  SharedDraft? pendingShare;
+
   /// Saved AI profiles (key + model). Device-local.
   List<AiProfile> aiProfiles = [];
 
@@ -3457,6 +3465,9 @@ class PrivetState extends ChangeNotifier {
     _attachAndroidCallChannel();
     await _attachMobilePushIfNeeded();
     await initMobilePush();
+    // A share that cold-started the app is parsed natively before the engine
+    // boots; stage it now that the session exists.
+    unawaited(_pollSharedIntents());
     // If the native ring screen accepted or declined a call while the app was
     // killed (Flutter engine not running), replay that action now.
     unawaited(_replayPendingCallAction());
@@ -4004,6 +4015,37 @@ class PrivetState extends ChangeNotifier {
     }
   }
 
+  /// Route the pending share into [conversationId] and stage it in that
+  /// chat's composer (files attached, shared text pre-filled) for review.
+  /// The pending share is cleared first so the "Send to…" picker cannot
+  /// re-open mid-route.
+  Future<void> routeSharedDraftTo(String conversationId) async {
+    final share = pendingShare;
+    if (share == null) return;
+    pendingShare = null;
+    notifySession();
+    await openConversation(conversationId);
+    if (share.isEmpty) return;
+    // ConversationPane mounts (and registers its composer hooks) in the frame
+    // after openConversation's notifyShell — hand off after that frame.
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      for (final file in share.files) {
+        attachMediaToComposer(file);
+      }
+      final text = share.text;
+      if (text != null && text.trim().isNotEmpty) {
+        attachTextToComposer(text, subject: share.subject);
+      }
+    });
+  }
+
+  /// User dismissed the "Send to…" picker without choosing a chat.
+  void discardPendingShare() {
+    if (pendingShare == null) return;
+    pendingShare = null;
+    notifySession();
+  }
+
   /// Call from UI pointer/keyboard activity so idle windows don't eat unread.
   ///
   /// When the user returns to an open chat that accumulated unread while AFK,
@@ -4284,7 +4326,10 @@ class PrivetState extends ChangeNotifier {
   Future<void> editMessage(String messageId, String body) async {
     final text = expandEmoticons(body.trim());
     if (text.isEmpty) return;
-    _rt.editMessage(messageId: messageId, body: text);
+    _rt.editMessage(
+      messageId: messageId,
+      body: applyDefaultMessageFont(text, chatFontFamily),
+    );
   }
 
   Future<void> deleteMessage(String messageId) async {
@@ -4304,6 +4349,26 @@ class PrivetState extends ChangeNotifier {
     if (user == null || token == null) return;
     await _rt.ensureConnected(token);
     unawaited(refreshInbox());
+    // A share from another app brought us to the front — pick up the payload.
+    unawaited(_pollSharedIntents());
+  }
+
+  /// Android only: read share-sheet payloads queued natively since the last
+  /// poll and stage the first one for the "Send to…" picker. Extra queued
+  /// payloads are dropped — users share one thing at a time.
+  Future<void> _pollSharedIntents() async {
+    if (!_isMobilePlatform || defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    try {
+      final drafts = await takePendingShares();
+      if (drafts.isEmpty || pendingShare != null) return;
+      pendingShare = drafts.first;
+      notifySession();
+    } catch (_) {
+      // Channel not up yet (engine still warming) — the next resume or
+      // session start re-polls, and the native side keeps the payload.
+    }
   }
 
   static String _draftKey(String conversationId) =>
@@ -4430,6 +4495,8 @@ class PrivetState extends ChangeNotifier {
     List<MediaAttachment>? attachments,
     String? assignedTo,
     String? parentId,
+    String status = 'todo',
+    String priority = 'medium',
   }) async {
     final result = await _api.createTaskDetailed(
       conversationId: conversationId,
@@ -4441,6 +4508,8 @@ class PrivetState extends ChangeNotifier {
       attachments: attachments?.map((e) => e.toJson()).toList(),
       assignedTo: assignedTo,
       parentId: parentId,
+      status: status,
+      priority: priority,
     );
     _setTasks(conversationId, result.items);
     return result.item;
@@ -4448,7 +4517,7 @@ class PrivetState extends ChangeNotifier {
 
   Future<void> addMessageToTask(ChatMessage message) async {
     final body = message.body.trim().isNotEmpty
-        ? message.body.trim()
+        ? markupToPlain(message.body.trim())
         : switch (message.kind) {
             'image' => 'Photo',
             'video' => 'Video',
@@ -4470,17 +4539,30 @@ class PrivetState extends ChangeNotifier {
     );
   }
 
-  Future<void> toggleTaskDone(TaskItem item) async {
-    final items = await _api.updateTask(taskId: item.id, done: !item.done);
+  Future<void> setTaskStatus(TaskItem item, String status) async {
+    final items = await _api.updateTask(taskId: item.id, status: status);
+    _setTasks(item.conversationId, items);
+    if (status == 'done') await refreshTaskHistory(item.conversationId);
+  }
+
+  Future<void> setTaskPriority(TaskItem item, String priority) async {
+    final items = await _api.updateTask(taskId: item.id, priority: priority);
     _setTasks(item.conversationId, items);
   }
 
-  /// Only the task creator can call this — approves a done task and moves it
-  /// to history (crossed out, off the active board).
-  Future<void> confirmTaskDone(TaskItem item) async {
-    final items = await _api.updateTask(taskId: item.id, doneConfirmed: true);
+  /// Assign (or unassign, when [assigneeId] is null) a task to a member.
+  Future<void> assignTask(TaskItem item, String? assigneeId) async {
+    final items = await _api.updateTask(
+      taskId: item.id,
+      assignedTo: assigneeId ?? '',
+    );
     _setTasks(item.conversationId, items);
-    await refreshTaskHistory(item.conversationId);
+  }
+
+  Future<void> toggleTaskDone(TaskItem item) async {
+    // Checkbox semantics: checked means "finished, awaiting confirmation" →
+    // review. Unchecking returns the task to the open board (todo).
+    await setTaskStatus(item, item.status == 'review' ? 'todo' : 'review');
   }
 
   Future<void> updateTaskBody(TaskItem item, String body) async {
@@ -4798,18 +4880,21 @@ class PrivetState extends ChangeNotifier {
     final chatId = activeConversationId;
     final me = user;
     if (chatId == null || me == null) return;
-    final text = expandEmoticons(body.trim());
-    if (text.isEmpty) return;
+    final expanded = expandEmoticons(body.trim());
+    if (expanded.isEmpty) return;
 
     // Cancel before the WS send so a trailing throttle cannot fire after.
     stopOutgoingTyping();
 
-    if (text.startsWith('#')) {
-      unawaited(sendAiCommand(text));
+    if (expanded.startsWith('#')) {
+      unawaited(sendAiCommand(expanded));
       unawaited(clearDraft(chatId));
       return;
     }
 
+    // Bake the sender's default font into the body so the peer renders this
+    // message in *my* font, not their own default.
+    final text = applyDefaultMessageFont(expanded, chatFontFamily);
     final clientId = _uuid.v4();
     final optimistic = ChatMessage(
       id: clientId,
@@ -5076,7 +5161,10 @@ Examples:
     // box" with a loading animation instead of nothing for 1-2s. The bubble
     // renders that box because its attachments have no mediaUrl yet.
     final clientId = _uuid.v4();
-    final body = expandEmoticons((caption ?? '').trim());
+    final body = applyDefaultMessageFont(
+      expandEmoticons((caption ?? '').trim()),
+      chatFontFamily,
+    );
     final placeholder = ChatMessage(
       id: clientId,
       conversationId: chatId,

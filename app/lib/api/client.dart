@@ -420,6 +420,8 @@ class ApiClient {
     List<Map<String, dynamic>>? attachments,
     String? assignedTo,
     String? parentId,
+    String status = 'todo',
+    String priority = 'medium',
   }) async {
     final res = await http.post(
       _u('/conversations/$conversationId/tasks'),
@@ -433,6 +435,8 @@ class ApiClient {
         if (attachments != null) 'attachments': attachments,
         if (assignedTo != null) 'assignedTo': assignedTo,
         if (parentId != null) 'parentId': parentId,
+        'status': status,
+        'priority': priority,
       }),
     );
     final data = _decode(res);
@@ -452,6 +456,8 @@ class ApiClient {
     List<Map<String, dynamic>>? attachments,
     String? assignedTo,
     String? parentId,
+    String status = 'todo',
+    String priority = 'medium',
   }) async {
     final res = await http.post(
       _u('/conversations/$conversationId/tasks'),
@@ -465,6 +471,8 @@ class ApiClient {
         if (attachments != null) 'attachments': attachments,
         if (assignedTo != null) 'assignedTo': assignedTo,
         if (parentId != null) 'parentId': parentId,
+        'status': status,
+        'priority': priority,
       }),
     );
     final data = _decode(res);
@@ -482,6 +490,8 @@ class ApiClient {
     String? body,
     bool? done,
     bool? doneConfirmed,
+    String? status,
+    String? priority,
     String? assignedTo,
     bool? pinned,
     String? mediaUrl,
@@ -497,6 +507,8 @@ class ApiClient {
         if (body != null) 'body': body,
         if (done != null) 'done': done,
         if (doneConfirmed != null) 'doneConfirmed': doneConfirmed,
+        if (status != null) 'status': status,
+        if (priority != null) 'priority': priority,
         if (assignedTo != null) 'assignedTo': assignedTo,
         if (pinned != null) 'pinned': pinned,
         if (mediaUrl != null) 'mediaUrl': mediaUrl,
@@ -509,6 +521,18 @@ class ApiClient {
     final data = _decode(res);
     return (data['items'] as List)
         .map((e) => TaskItem.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Change log for a single task (newest first).
+  Future<List<TaskActivity>> taskActivity(String taskId) async {
+    final res = await http.get(
+      _u('/tasks/$taskId/activity'),
+      headers: _authHeaders,
+    );
+    final data = _decode(res);
+    return (data['items'] as List)
+        .map((e) => TaskActivity.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 

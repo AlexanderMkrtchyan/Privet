@@ -256,4 +256,51 @@ void main() {
       expect(markupToPlain('[b]a[/b] [i]b[/i] [bg]c[/bg]'), 'a b c');
     });
   });
+
+  group('applyDefaultMessageFont', () {
+    test('empty or blank default leaves markup unchanged', () {
+      expect(applyDefaultMessageFont('hello', ''), 'hello');
+      expect(applyDefaultMessageFont('[b]hi[/b]', '   '), '[b]hi[/b]');
+    });
+
+    test('plain text is wrapped in the default font', () {
+      expect(
+        applyDefaultMessageFont('hello world', 'gothic'),
+        '[font=gothic]hello world[/font]',
+      );
+    });
+
+    test('already fully explicit font is left alone', () {
+      expect(
+        applyDefaultMessageFont('[font=serif]hello[/font]', 'gothic'),
+        '[font=serif]hello[/font]',
+      );
+    });
+
+    test('partial explicit font nests inside the wrapper', () {
+      final out = applyDefaultMessageFont(
+        '[font=monospace]code[/font] rest',
+        'gothic',
+      );
+      expect(out, '[font=gothic][font=monospace]code[/font] rest[/font]');
+      final parsed = parseMarkup(out);
+      expect(parsed.plainText, 'code rest');
+      expect(parsed.runs[0].format.fontFamily, 'monospace');
+      expect(parsed.runs[1].format.fontFamily, 'gothic');
+    });
+
+    test('inline markup survives the wrap', () {
+      final out = applyDefaultMessageFont('[b]bold[/b] rest', 'cinzel');
+      expect(out, '[font=cinzel][b]bold[/b] rest[/font]');
+      final parsed = parseMarkup(out);
+      expect(parsed.plainText, 'bold rest');
+      expect(parsed.runs[0].format.bold, isTrue);
+      expect(parsed.runs[0].format.fontFamily, 'cinzel');
+      expect(parsed.runs[1].format.fontFamily, 'cinzel');
+    });
+
+    test('empty message stays empty', () {
+      expect(applyDefaultMessageFont('', 'gothic'), '');
+    });
+  });
 }

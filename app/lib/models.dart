@@ -1,4 +1,5 @@
 import 'util/call_history.dart';
+import 'util/rich_text_markup.dart';
 import 'util/server_time.dart';
 
 class PrivetUser {
@@ -220,12 +221,14 @@ class ReplyPreview {
     final firstImage = images.isNotEmpty ? images.first : null;
     return ReplyPreview(
       id: m.id,
+      // Reply quotes are plain text — strip any [font=…]/[b] markup so the
+      // quote never shows literal tags.
       body: (bodyOverride != null && bodyOverride.isNotEmpty)
           ? bodyOverride
           : m.kind == 'call'
               ? CallHistoryPayload.preview(m.body)
               : m.body.isNotEmpty
-                  ? m.body
+                  ? markupToPlain(m.body)
                   : switch (m.kind) {
                       'image' => '📷 Photo',
                       'video' => '🎬 Video',
@@ -233,9 +236,9 @@ class ReplyPreview {
                       'voice' => '🎤 Voice message',
                       'file' => m.fileName ?? '📎 File',
                       'album' => m.body.isNotEmpty
-                          ? m.body
+                          ? markupToPlain(m.body)
                           : '📎 ${m.mediaItems.length} attachments',
-                      _ => m.body,
+                      _ => markupToPlain(m.body),
                     },
       kind: m.kind,
       senderName: m.sender.displayName,
@@ -280,8 +283,8 @@ class TaskItem {
     required this.id,
     required this.conversationId,
     required this.body,
-    required this.done,
-    required this.doneConfirmed,
+    required this.status,
+    required this.priority,
     required this.sortOrder,
     required this.createdAt,
     this.parentId,
@@ -303,9 +306,10 @@ class TaskItem {
   /// Null for top-level tasks; set for subtasks.
   final String? parentId;
   final String body;
-  final bool done;
-  /// True only when creator (setter) has confirmed the task is done — it disappears from active list.
-  final bool doneConfirmed;
+  /// Jira-style workflow status: todo | in_progress | review | done.
+  final String status;
+  /// Priority: lowest | low | medium | high | highest.
+  final String priority;
   final int sortOrder;
   final String? messageId;
   final String? mediaUrl;
@@ -322,6 +326,12 @@ class TaskItem {
   final int? subtaskTotal;
 
   bool get isSubtask => parentId != null && parentId!.isNotEmpty;
+
+  /// Convenience: the task is closed (status done → moves to history).
+  bool get done => status == 'done';
+
+  /// Checked off in the UI: review (awaiting confirmation) or done.
+  bool get isComplete => status == 'review' || status == 'done';
 
   bool get hasMedia =>
       attachments.isNotEmpty || (mediaUrl != null && mediaUrl!.isNotEmpty);
@@ -355,13 +365,25 @@ class TaskItem {
         .whereType<Map>()
         .map((e) => MediaAttachment.fromJson(Map<String, dynamic>.from(e)))
         .toList();
+    // Prefer the explicit status; fall back to legacy booleans for old
+    // cached payloads from servers that still emit done/doneConfirmed.
+    final rawStatus = json['status'] as String?;
+    final doneLegacy = json['done'] == true;
+    final doneConfirmedLegacy = json['doneConfirmed'] == true;
+    final status = (rawStatus != null && rawStatus.isNotEmpty)
+        ? rawStatus
+        : doneConfirmedLegacy
+            ? 'done'
+            : doneLegacy
+                ? 'review'
+                : 'todo';
     return TaskItem(
       id: json['id'] as String,
       conversationId: json['conversationId'] as String,
       parentId: json['parentId'] as String?,
       body: (json['body'] as String?) ?? '',
-      done: json['done'] == true,
-      doneConfirmed: json['doneConfirmed'] == true,
+      status: status,
+      priority: (json['priority'] as String?) ?? 'medium',
       sortOrder: (json['sortOrder'] as num?)?.toInt() ?? 0,
       messageId: json['messageId'] as String?,
       mediaUrl: json['mediaUrl'] as String?,
@@ -384,8 +406,8 @@ class TaskItem {
 
   TaskItem copyWith({
     String? body,
-    bool? done,
-    bool? doneConfirmed,
+    String? status,
+    String? priority,
     String? mediaUrl,
     String? mimeType,
     String? fileName,
@@ -400,8 +422,8 @@ class TaskItem {
         conversationId: conversationId,
         parentId: parentId,
         body: body ?? this.body,
-        done: done ?? this.done,
-        doneConfirmed: doneConfirmed ?? this.doneConfirmed,
+        status: status ?? this.status,
+        priority: priority ?? this.priority,
         sortOrder: sortOrder,
         messageId: messageId,
         mediaUrl: clearMedia ? null : (mediaUrl ?? this.mediaUrl),
@@ -418,6 +440,42 @@ class TaskItem {
       );
 }
 
+/// One entry from a task's change log (who changed what, when).
+class TaskActivity {
+  TaskActivity({
+    required this.id,
+    required this.taskId,
+    required this.action,
+    this.user,
+    this.userId,
+    this.fromValue,
+    this.toValue,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String taskId;
+  final String? userId;
+  final PrivetUser? user;
+  final String action;
+  final String? fromValue;
+  final String? toValue;
+  final DateTime createdAt;
+
+  factory TaskActivity.fromJson(Map<String, dynamic> json) => TaskActivity(
+        id: json['id'] as String,
+        taskId: json['taskId'] as String,
+        userId: json['userId'] as String?,
+        user: json['user'] is Map<String, dynamic>
+            ? PrivetUser.fromJson(json['user'] as Map<String, dynamic>)
+            : null,
+        action: (json['action'] as String?) ?? '',
+        fromValue: json['fromValue'] as String?,
+        toValue: json['toValue'] as String?,
+        createdAt: parseServerUtc(json['createdAt']) ?? DateTime.now(),
+      );
+}
+
 class ConversationTasks {
   ConversationTasks({required this.items});
 
@@ -427,15 +485,13 @@ class ConversationTasks {
   List<TaskItem> get rootItems =>
       items.where((i) => !i.isSubtask).toList();
 
-  /// Root tasks still on the board — everything not confirmed done.
-  /// Tasks marked done stay visible until the creator approves them.
+  /// Root tasks still on the board — everything with a status other than done.
   List<TaskItem> get activeItems =>
-      rootItems.where((i) => !i.doneConfirmed).toList();
+      rootItems.where((i) => !i.done).toList();
 
   /// Undone subtasks only (for remaining-work counts).
   List<TaskItem> activeSubtasksOf(String parentId) => items
-      .where((i) =>
-          i.parentId == parentId && !i.done && !i.doneConfirmed)
+      .where((i) => i.parentId == parentId && !i.isComplete)
       .toList();
 
   /// All subtasks under a parent (includes done — shown until group completes).
@@ -457,11 +513,11 @@ class ConversationTasks {
         total: parent.subtaskTotal!,
       );
     }
-    final kids = activeSubtasksOf(parent.id);
+    final kids = subtasksOf(parent.id);
     if (kids.isNotEmpty) {
-      return (done: 0, total: kids.length);
+      return (done: kids.where((s) => s.isComplete).length, total: kids.length);
     }
-    return (done: parent.done ? 1 : 0, total: 1);
+    return (done: parent.isComplete ? 1 : 0, total: 1);
   }
 
   /// Board total: work units across every active (non-confirmed) root.
@@ -479,9 +535,9 @@ class ConversationTasks {
     for (final t in activeItems) {
       final kids = subtasksOf(t.id);
       if (kids.isEmpty) {
-        if (t.done) n += 1;
+        if (t.isComplete) n += 1;
       } else {
-        n += kids.where((s) => s.done).length;
+        n += kids.where((s) => s.isComplete).length;
       }
     }
     return n;
@@ -491,6 +547,20 @@ class ConversationTasks {
   double get progress {
     if (total == 0) return 1.0;
     return doneCount / total;
+  }
+
+  /// Root tasks grouped by status, for the Kanban board columns.
+  Map<String, List<TaskItem>> get countByStatus {
+    final out = <String, List<TaskItem>>{
+      'todo': [],
+      'in_progress': [],
+      'review': [],
+      'done': [],
+    };
+    for (final t in rootItems) {
+      (out[t.status] ??= []).add(t);
+    }
+    return out;
   }
 
   factory ConversationTasks.fromJsonList(List<dynamic> list) =>

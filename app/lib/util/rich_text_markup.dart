@@ -499,6 +499,28 @@ bool _hasAttr(TextFormat f, String name) {
 /// Strips markup, returning only the visible text (for reply/edit previews).
 String markupToPlain(String text) => parseMarkup(text).plainText;
 
+/// Bakes [defaultFont] (a [kMessageFonts] key or '' for Default) into a
+/// serialized message [markup] so the sender's font travels with the message
+/// and renders the same for the peer, no matter what *their* default font is.
+///
+/// The whole body is wrapped in `[font=…]`; any explicit `[font=…]` runs
+/// already inside the body still win because they nest inside the wrapper.
+/// Returns [markup] unchanged when [defaultFont] is empty or every segment
+/// already carries an explicit font.
+String applyDefaultMessageFont(String markup, String defaultFont) {
+  final family = defaultFont.trim();
+  if (family.isEmpty) return markup;
+  final parsed = parseMarkup(markup);
+  if (parsed.plainText.isEmpty) return markup;
+  for (final s in styledSegments(parsed)) {
+    final f = s.format.fontFamily;
+    if (f == null || f.isEmpty) {
+      return '[font=$family]$markup[/font]';
+    }
+  }
+  return markup;
+}
+
 // ---------------------------------------------------------------------------
 // Selection operations (shared by composer + sent-message redaction)
 // ---------------------------------------------------------------------------

@@ -5,6 +5,44 @@ import { userInConversation } from './chat.js';
 
 const MAX_TASK_ATTACHMENTS = 10;
 
+export const TASK_STATUSES = ['todo', 'in_progress', 'review', 'done'];
+export const TASK_PRIORITIES = ['lowest', 'low', 'medium', 'high', 'highest'];
+
+export const PRIORITY_WEIGHT = {
+  lowest: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  highest: 4,
+};
+
+const VALID_STATUS = new Set(TASK_STATUSES);
+const VALID_PRIORITY = new Set(TASK_PRIORITIES);
+
+function normalizeStatus(value) {
+  const s = String(value || 'todo').toLowerCase().replace(/_/g, '_');
+  return VALID_STATUS.has(s) ? s : 'todo';
+}
+
+function normalizePriority(value) {
+  const p = String(value || 'medium').toLowerCase();
+  return VALID_PRIORITY.has(p) ? p : 'medium';
+}
+
+function logActivity({
+  taskId,
+  conversationId,
+  userId,
+  action,
+  fromValue = null,
+  toValue = null,
+}) {
+  db.prepare(
+    `INSERT INTO task_activity (id, task_id, conversation_id, user_id, action, from_value, to_value)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(uuid(), taskId, conversationId, userId || null, action, fromValue, toValue);
+}
+
 function kindFromMime(mimeType, fileName) {
   const mime = String(mimeType || '').toLowerCase();
   if (mime.startsWith('image/')) return 'image';
@@ -74,13 +112,24 @@ function mapItem(row) {
     fileName: row.file_name,
   });
   const primary = attachments[0] || null;
+  // Prefer the explicit status column; fall back to legacy booleans for rows
+  // written before the migration ran.
+  const status =
+    row.status && row.status !== 'todo'
+      ? row.status
+      : row.done_confirmed
+        ? 'done'
+        : row.done
+          ? 'review'
+          : 'todo';
   return {
     id: row.id,
     conversationId: row.conversation_id,
     parentId: row.parent_id || null,
     body: row.body || '',
-    done: !!row.done,
-    doneConfirmed: !!row.done_confirmed,
+    status,
+    priority: normalizePriority(row.priority),
+    done: status === 'done',
     sortOrder: row.sort_order,
     messageId: row.message_id || null,
     mediaUrl: primary?.mediaUrl || row.media_url || null,
@@ -112,16 +161,21 @@ function nextSortOrder(conversationId, parentId = null) {
     .get(conversationId).m + 1;
 }
 
-// Active tasks: everything not yet confirmed done. Tasks marked done stay on the
-// board until the creator approves them (doneConfirmed) — Jira-style done/review.
+// Active tasks: everything not yet done (status workflow, Jira-style). Done
+// tasks move to history; nothing blocks completion — any member can close.
 export function listTaskItems(conversationId) {
   const roots = db
     .prepare(
       `SELECT * FROM task_items t
        WHERE t.conversation_id = ?
          AND t.parent_id IS NULL
-         AND t.done_confirmed = 0
-       ORDER BY t.pinned DESC, t.sort_order ASC, t.created_at ASC`,
+         AND t.status != 'done'
+       ORDER BY t.pinned DESC,
+         CASE t.priority
+           WHEN 'highest' THEN 4 WHEN 'high' THEN 3
+           WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0
+         END DESC,
+         t.sort_order ASC, t.created_at ASC`,
     )
     .all(conversationId);
 
@@ -165,14 +219,14 @@ export function listTaskItems(conversationId) {
   });
 }
 
-// History: confirmed-complete groups only (creator approved them).
+// History: done tasks only.
 export function listDoneTaskItems(conversationId, { limit = 20, before = null } = {}) {
   const lim = Math.min(Math.max(Number(limit) || 20, 1), 50);
   let sql = `
     SELECT * FROM task_items t
     WHERE t.conversation_id = ?
       AND t.parent_id IS NULL
-      AND t.done_confirmed = 1
+      AND t.status = 'done'
   `;
   const params = [conversationId];
   if (before) {
@@ -217,6 +271,8 @@ export function createTaskItem({
   attachments = null,
   assignedTo = null,
   parentId = null,
+  status = 'todo',
+  priority = 'medium',
 }) {
   const text = String(body || '').trim();
   let attachList = normalizeAttachments(attachments, { mediaUrl, mimeType, fileName });
@@ -232,7 +288,7 @@ export function createTaskItem({
     if (!parent) throw new Error('parent not found');
     if (parent.conversation_id !== conversationId) throw new Error('forbidden');
     if (parent.parent_id) throw new Error('subtasks cannot nest');
-    if (parent.done_confirmed) throw new Error('parent archived');
+    if (parent.status === 'done') throw new Error('parent archived');
     resolvedParentId = parent.id;
   }
 
@@ -242,16 +298,22 @@ export function createTaskItem({
   const primary = attachList[0] || null;
   const fallbackName = primary?.fileName || (attachList.length > 1 ? `${attachList.length} files` : null);
 
+  const taskStatus = normalizeStatus(status);
+  const taskPriority = normalizePriority(priority);
+
   db.prepare(
     `INSERT INTO task_items (
        id, conversation_id, parent_id, body, done, done_confirmed, sort_order, message_id,
-       media_url, mime_type, file_name, attachments, created_by, assigned_to, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       media_url, mime_type, file_name, attachments, created_by, assigned_to, status, priority,
+       created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     conversationId,
     resolvedParentId,
     text || fallbackName || 'Attachment',
+    taskStatus === 'done' ? 1 : 0,
+    taskStatus === 'done' ? 1 : 0,
     sortOrder,
     messageId || null,
     primary?.mediaUrl || null,
@@ -260,9 +322,28 @@ export function createTaskItem({
     serializeAttachments(attachList),
     createdBy,
     assignedTo || null,
+    taskStatus,
+    taskPriority,
     now,
     now,
   );
+
+  logActivity({
+    taskId: id,
+    conversationId,
+    userId: createdBy,
+    action: 'created',
+    toValue: text || fallbackName || 'Attachment',
+  });
+  if (assignedTo) {
+    logActivity({
+      taskId: id,
+      conversationId,
+      userId: createdBy,
+      action: 'assigned',
+      toValue: assignedTo,
+    });
+  }
 
   return getTaskItem(id);
 }
@@ -273,8 +354,6 @@ export function updateTaskItem(id, userId, patch) {
   if (!userInConversation(existing.conversation_id, userId)) throw new Error('forbidden');
 
   let body = existing.body;
-  let done = existing.done;
-  let doneConfirmed = existing.done_confirmed;
   let mediaUrl = existing.media_url;
   let mimeType = existing.mime_type;
   let fileName = existing.file_name;
@@ -282,31 +361,62 @@ export function updateTaskItem(id, userId, patch) {
   let assignedTo = existing.assigned_to;
   let pinned = existing.pinned;
 
+  let status =
+    existing.status && existing.status !== 'todo'
+      ? existing.status
+      : existing.done_confirmed
+        ? 'done'
+        : existing.done
+          ? 'review'
+          : 'todo';
+  let priority = normalizePriority(existing.priority);
+
   let attachList = normalizeAttachments(attachmentsJson, { mediaUrl, mimeType, fileName });
+
+  const activity = [];
 
   if (patch.body !== undefined) {
     body = String(patch.body || '').trim();
     if (!body && attachList.length === 0 && !patch.mediaUrl && !patch.attachments) {
       throw new Error('empty task');
     }
-  }
-  // Any member can toggle done (optimistic check mark). Done keeps the task on
-  // the board awaiting approval, so it stays pinned if it was pinned.
-  if (patch.done !== undefined) {
-    done = patch.done ? 1 : 0;
-  }
-  // Only the creator (setter) can confirm-done, which removes it from active list.
-  if (patch.doneConfirmed !== undefined) {
-    if (userId !== existing.created_by) throw new Error('only creator can confirm');
-    doneConfirmed = patch.doneConfirmed ? 1 : 0;
-    // Archiving a parent archives its subtasks too.
-    if (doneConfirmed && !existing.parent_id) {
-      db.prepare(
-        `UPDATE task_items
-         SET done = 1, done_confirmed = 1, pinned = 0, updated_at = ?
-         WHERE parent_id = ?`,
-      ).run(new Date().toISOString(), id);
+    if (body !== existing.body) {
+      activity.push({ action: 'body', fromValue: existing.body || null, toValue: body });
     }
+  }
+
+  // New status workflow. Legacy patches (done / doneConfirmed) map onto it so
+  // older clients keep working during rollout.
+  let nextStatus = status;
+  if (patch.status !== undefined) {
+    nextStatus = normalizeStatus(patch.status);
+  } else if (patch.doneConfirmed !== undefined) {
+    nextStatus = patch.doneConfirmed ? 'done' : 'todo';
+  } else if (patch.done !== undefined) {
+    nextStatus = patch.done ? 'review' : 'todo';
+  }
+  if (nextStatus !== status) {
+    activity.push({ action: 'status', fromValue: status, toValue: nextStatus });
+    status = nextStatus;
+  }
+
+  let nextPriority = priority;
+  if (patch.priority !== undefined) {
+    nextPriority = normalizePriority(patch.priority);
+    if (nextPriority !== priority) {
+      activity.push({ action: 'priority', fromValue: priority, toValue: nextPriority });
+      priority = nextPriority;
+    }
+  }
+
+  // Marking a parent done cascades to its subtasks (matches the old
+  // group-archive behavior: the whole board group closes together).
+  if (status === 'done' && !existing.parent_id) {
+    db.prepare(
+      `UPDATE task_items
+       SET done = 1, done_confirmed = 1, status = 'done', pinned = 0, updated_at = ?
+       WHERE parent_id = ? AND status != 'done'`,
+    ).run(new Date().toISOString(), id);
   }
 
   if (patch.attachments !== undefined) {
@@ -346,7 +456,13 @@ export function updateTaskItem(id, userId, patch) {
     attachList = [];
   }
 
-  if (patch.assignedTo !== undefined) assignedTo = patch.assignedTo || null;
+  if (patch.assignedTo !== undefined) {
+    const nextAssignee = patch.assignedTo || null;
+    if (nextAssignee !== assignedTo) {
+      activity.push({ action: 'assigned', fromValue: assignedTo || null, toValue: nextAssignee });
+      assignedTo = nextAssignee;
+    }
+  }
   if (patch.pinned !== undefined) {
     if (existing.parent_id) throw new Error('cannot pin subtask');
     pinned = patch.pinned ? 1 : 0;
@@ -354,7 +470,7 @@ export function updateTaskItem(id, userId, patch) {
     if (pinned) {
       db.prepare(
         `UPDATE task_items SET pinned = 0
-         WHERE conversation_id = ? AND id != ? AND done_confirmed = 0`,
+         WHERE conversation_id = ? AND id != ? AND status != 'done'`,
       ).run(existing.conversation_id, id);
     }
   }
@@ -363,28 +479,41 @@ export function updateTaskItem(id, userId, patch) {
     throw new Error('empty task');
   }
 
+  // A task marked done can no longer be pinned.
+  if (status === 'done') pinned = 0;
+
   const now = new Date().toISOString();
   db.prepare(
     `UPDATE task_items
      SET body=?, done=?, done_confirmed=?, media_url=?, mime_type=?, file_name=?,
-         attachments=?, assigned_to=?, pinned=?, updated_at=?
+         attachments=?, assigned_to=?, pinned=?, status=?, priority=?, updated_at=?
      WHERE id=?`,
   ).run(
     body,
-    done,
-    doneConfirmed,
+    status === 'review' || status === 'done' ? 1 : 0,
+    status === 'done' ? 1 : 0,
     mediaUrl,
     mimeType,
     fileName,
     attachmentsJson,
     assignedTo,
     pinned,
+    status,
+    priority,
     now,
     id,
   );
 
-  // Marking a parent done just flags it for approval — subtasks stay as they are
-  // (no cascade; the creator's approval archives the whole group instead).
+  for (const entry of activity) {
+    logActivity({
+      taskId: id,
+      conversationId: existing.conversation_id,
+      userId,
+      action: entry.action,
+      fromValue: entry.fromValue,
+      toValue: entry.toValue,
+    });
+  }
 
   return getTaskItem(id);
 }
@@ -410,17 +539,40 @@ export function deleteTaskItem(id, userId) {
 
 export function clearDoneTaskItems(conversationId, userId) {
   if (!userInConversation(conversationId, userId)) throw new Error('forbidden');
-  // Only clear tasks that are fully confirmed done (and their subtasks).
+  // Only clear tasks that are fully done (and their subtasks).
   db.prepare(
     `DELETE FROM task_items
      WHERE conversation_id = ?
        AND (
-         done_confirmed = 1
+         status = 'done'
          OR parent_id IN (
            SELECT id FROM task_items
-           WHERE conversation_id = ? AND done_confirmed = 1
+           WHERE conversation_id = ? AND status = 'done'
          )
        )`,
   ).run(conversationId, conversationId);
   return listTaskItems(conversationId);
+}
+
+/** Change log for one task (newest first). */
+export function listTaskActivity(taskId, { limit = 50 } = {}) {
+  const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const rows = db
+    .prepare(
+      `SELECT * FROM task_activity
+       WHERE task_id = ?
+       ORDER BY created_at DESC
+       LIMIT ?`,
+    )
+    .all(taskId, lim);
+  return rows.map((row) => ({
+    id: row.id,
+    taskId: row.task_id,
+    userId: row.user_id || null,
+    user: row.user_id ? publicUser(getUserById(row.user_id)) : null,
+    action: row.action,
+    fromValue: row.from_value,
+    toValue: row.to_value,
+    createdAt: row.created_at,
+  }));
 }

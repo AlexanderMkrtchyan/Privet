@@ -150,6 +150,8 @@ export function migrate() {
       created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
       assigned_to TEXT REFERENCES users(id) ON DELETE SET NULL,
       done_confirmed INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'todo',
+      priority TEXT NOT NULL DEFAULT 'medium',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -225,9 +227,40 @@ export function migrate() {
   addColIfMissing('task_items', 'parent_id', 'TEXT REFERENCES task_items(id) ON DELETE CASCADE');
   addColIfMissing('task_items', 'attachments', 'TEXT');
   addColIfMissing('payment_reminders', 'pinned', 'INTEGER NOT NULL DEFAULT 0');
+  addColIfMissing('task_items', 'status', "TEXT NOT NULL DEFAULT 'todo'");
+  addColIfMissing('task_items', 'priority', "TEXT NOT NULL DEFAULT 'medium'");
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_task_items_parent
       ON task_items(conversation_id, parent_id, sort_order);
+    CREATE INDEX IF NOT EXISTS idx_task_items_status
+      ON task_items(conversation_id, status);
+
+    -- Per-task change log (Jira-style activity feed).
+    CREATE TABLE IF NOT EXISTS task_activity (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES task_items(id) ON DELETE CASCADE,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+      action TEXT NOT NULL,
+      from_value TEXT,
+      to_value TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_activity_task
+      ON task_activity(task_id, created_at);
+  `);
+
+  // One-time migration: legacy done/done_confirmed booleans → status workflow.
+  // Only touches rows that still carry the legacy flags (status defaulted to 'todo'
+  // when the column was added), so it is safe to re-run.
+  db.exec(`
+    UPDATE task_items
+    SET status = 'done'
+    WHERE status = 'todo' AND done_confirmed = 1;
+
+    UPDATE task_items
+    SET status = 'review'
+    WHERE status = 'todo' AND done = 1 AND done_confirmed = 0;
   `);
 
   // Older DBs created amount_cents as NOT NULL — recreate table so reminders can omit amount.
