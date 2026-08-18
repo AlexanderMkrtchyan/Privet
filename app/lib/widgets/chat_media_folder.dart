@@ -23,28 +23,41 @@ class SharedMediaEntry {
   final String senderName;
 }
 
-/// Collect shared media from chat messages, newest first (Teams-style).
+/// Collect shared media from chat messages (and task attachments) newest
+/// first (Teams-style).
 List<SharedMediaEntry> collectSharedMedia(
   List<ChatMessage> messages, {
   required ChatMediaFolderKind folder,
+  List<TaskItem>? tasks,
 }) {
   final out = <SharedMediaEntry>[];
+  void add(MediaAttachment item, DateTime createdAt, String senderName) {
+    final isPhoto = item.kind == 'image';
+    final isFile = item.kind == 'file' ||
+        item.kind == 'video' ||
+        item.kind == 'audio' ||
+        item.kind == 'voice';
+    if (folder == ChatMediaFolderKind.photos && !isPhoto) return;
+    if (folder == ChatMediaFolderKind.files && !isFile) return;
+    out.add(
+      SharedMediaEntry(
+        attachment: item,
+        createdAt: createdAt,
+        senderName: senderName,
+      ),
+    );
+  }
+
   for (final m in messages) {
     for (final item in m.mediaItems) {
-      final isPhoto = item.kind == 'image';
-      final isFile = item.kind == 'file' ||
-          item.kind == 'video' ||
-          item.kind == 'audio' ||
-          item.kind == 'voice';
-      if (folder == ChatMediaFolderKind.photos && !isPhoto) continue;
-      if (folder == ChatMediaFolderKind.files && !isFile) continue;
-      out.add(
-        SharedMediaEntry(
-          attachment: item,
-          createdAt: m.createdAt,
-          senderName: m.sender.displayName,
-        ),
-      );
+      add(item, m.createdAt, m.sender.displayName);
+    }
+  }
+  // Images/files attached to tasks show up in shared media too, so nothing
+  // shared in a task is hidden from the chat's Photos / Files browser.
+  for (final t in tasks ?? const <TaskItem>[]) {
+    for (final item in t.mediaItems) {
+      add(item, t.createdAt, t.createdBy?.displayName ?? 'Task');
     }
   }
   out.sort((a, b) => b.createdAt.compareTo(a.createdAt));
@@ -82,6 +95,7 @@ class ChatMediaFolderPane extends StatelessWidget {
     required this.mediaBase,
     required this.onClose,
     required this.onSelectFolder,
+    this.tasks,
   });
 
   final ChatMediaFolderKind folder;
@@ -90,9 +104,16 @@ class ChatMediaFolderPane extends StatelessWidget {
   final VoidCallback onClose;
   final ValueChanged<ChatMediaFolderKind> onSelectFolder;
 
+  /// Task attachments (active + history) shown alongside message media.
+  final List<TaskItem>? tasks;
+
   @override
   Widget build(BuildContext context) {
-    final items = collectSharedMedia(messages, folder: folder);
+    final items = collectSharedMedia(
+      messages,
+      folder: folder,
+      tasks: tasks,
+    );
     final emptyLabel = folder == ChatMediaFolderKind.photos
         ? 'No photos shared yet'
         : 'No files shared yet';

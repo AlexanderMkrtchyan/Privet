@@ -12,6 +12,7 @@ import '../models.dart';
 import '../state.dart';
 import '../theme.dart';
 import '../util/clipboard_files.dart';
+import '../util/image_context_menu.dart';
 import '../util/perf.dart';
 import '../util/privet_sheet.dart';
 import 'avatar.dart';
@@ -248,6 +249,7 @@ Future<void> _openTaskMenu({
   bool attachDisabled = false,
   VoidCallback? onEdit,
   VoidCallback? onDelete,
+  VoidCallback? onRestore,
 }) async {
   final tiles = <Widget>[];
   void addSection(String title) {
@@ -320,6 +322,15 @@ Future<void> _openTaskMenu({
     );
   }
   tiles.add(Divider(height: 12, color: PrivetTheme.line));
+  if (onRestore != null) {
+    add(
+      icon: Icons.replay_rounded,
+      label: 'Restore task…',
+      color: PrivetTheme.signal,
+      onTap: onRestore,
+    );
+    tiles.add(Divider(height: 12, color: PrivetTheme.line));
+  }
   if (editable && onAssign != null) {
     add(
       icon: Icons.person_add_alt_1_rounded,
@@ -600,7 +611,8 @@ class TaskHeaderChip extends StatelessWidget {
   }
 }
 
-/// Tabbed side panel: Tasks | Reminders, each with active + history sections.
+/// Task-first side panel with an overflow menu for the rarely-used
+/// Payments / Reminders views, each with active + history sections.
 class ChatTaskPane extends StatefulWidget {
   const ChatTaskPane({
     super.key,
@@ -700,6 +712,130 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         widget.state.setTaskFontSize(widget.state.taskFontSize + step),
       ),
     );
+  }
+
+  /// Pane header title follows the current view so the panel reads as a
+  /// task-first workspace; payments / reminders are one tap away in the ⋮ menu.
+  String get _paneTitle => switch (_tab.index) {
+        1 => 'Payments',
+        2 => 'Reminders',
+        _ => 'Tasks',
+      };
+
+  /// Overflow menu for the task pane — keeps the rare Payments / Reminders
+  /// views (and their quick-add actions) tucked away so tasks own the panel.
+  Future<void> _showPaneMenu(Offset anchor, Size anchorSize) async {
+    final reminders = widget.state.remindersFor(widget.conversationId);
+    final activePayments = reminders
+        .where((r) => !r.paid && r.isPayment)
+        .length;
+    final activeReminders = reminders
+        .where((r) => !r.paid && !r.isPayment)
+        .length;
+    final val = await showMenu<String>(
+      context: context,
+      color: PrivetTheme.panelElevated,
+      position: RelativeRect.fromLTRB(
+        anchor.dx,
+        anchor.dy + anchorSize.height + 4,
+        anchor.dx + anchorSize.width,
+        0,
+      ),
+      items: [
+        if (_tab.index != 0)
+          PopupMenuItem(
+            value: 'tasks',
+            mouseCursor: SystemMouseCursors.click,
+            child: Row(
+              children: [
+                Icon(Icons.checklist_rounded, size: 16, color: PrivetTheme.signal),
+                const SizedBox(width: 8),
+                Text('Tasks', style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13)),
+              ],
+            ),
+          ),
+        PopupMenuItem(
+          value: 'payments',
+          mouseCursor: SystemMouseCursors.click,
+          child: Row(
+            children: [
+              Icon(Icons.account_balance_wallet_rounded, size: 16, color: PrivetTheme.signal),
+              const SizedBox(width: 8),
+              Text(
+                activePayments > 0
+                    ? 'Payments · $activePayments'
+                    : 'Payments',
+                style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13),
+              ),
+            ],
+          ),
+        ),
+        PopupMenuItem(
+          value: 'reminders',
+          mouseCursor: SystemMouseCursors.click,
+          child: Row(
+            children: [
+              Icon(Icons.notifications_active_outlined, size: 16, color: PrivetTheme.signal),
+              const SizedBox(width: 8),
+              Text(
+                activeReminders > 0
+                    ? 'Reminders · $activeReminders'
+                    : 'Reminders',
+                style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13),
+              ),
+            ],
+          ),
+        ),
+        const PopupMenuDivider(),
+        PopupMenuItem(
+          value: 'addPayment',
+          mouseCursor: SystemMouseCursors.click,
+          child: Row(
+            children: [
+              Icon(Icons.add_circle_outline_rounded, size: 16, color: PrivetTheme.mist),
+              const SizedBox(width: 8),
+              Text('Add payment…', style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13)),
+            ],
+          ),
+        ),
+        PopupMenuItem(
+          value: 'addReminder',
+          mouseCursor: SystemMouseCursors.click,
+          child: Row(
+            children: [
+              Icon(Icons.add_alert_rounded, size: 16, color: PrivetTheme.mist),
+              const SizedBox(width: 8),
+              Text('Add reminder…', style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13)),
+            ],
+          ),
+        ),
+      ],
+    );
+    if (!mounted || val == null) return;
+    switch (val) {
+      case 'tasks':
+        _tab.animateTo(0);
+      case 'payments':
+        _tab.animateTo(1);
+      case 'reminders':
+        _tab.animateTo(2);
+      case 'addPayment':
+        _tab.animateTo(1);
+        await showReminderDialog(
+          context,
+          state: widget.state,
+          conversationId: widget.conversationId,
+          initialKind: 'payment',
+        );
+      case 'addReminder':
+        _tab.animateTo(2);
+        await showReminderDialog(
+          context,
+          state: widget.state,
+          conversationId: widget.conversationId,
+          initialKind: 'reminder',
+        );
+    }
   }
 
   /// Applies the current search + status/priority/assignee filters.
@@ -967,6 +1103,66 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     } catch (e) {
       widget.state.setError('Could not load members: $e');
     }
+  }
+
+  /// Restore a done (archived) task back onto the open board, letting the user
+  /// pick which status it returns in.
+  Future<void> _restoreTask(TaskItem item) async {
+    final label = item.body.trim().isNotEmpty ? item.body.trim() : 'this task';
+    final status = await showPrivetSheet<String>(
+      context: context,
+      backgroundColor: PrivetTheme.panel,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        return ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 380),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+                child: Text(
+                  'Restore task',
+                  style: GoogleFonts.syne(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                child: Text(
+                  'Bring “$label” back to the open board.',
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.ibmPlexSans(
+                    fontSize: 12,
+                    color: PrivetTheme.mist,
+                  ),
+                ),
+              ),
+              for (final (v, l) in kTaskStatusOptions)
+                if (v != 'done')
+                  ListTile(
+                    leading: Icon(
+                      Icons.replay_rounded,
+                      color: _taskStatusColor(v),
+                      size: 18,
+                    ),
+                    title: Text(
+                      l,
+                      style: GoogleFonts.ibmPlexSans(fontSize: 14),
+                    ),
+                    onTap: () => Navigator.pop(sheetContext, v),
+                  ),
+            ],
+          ),
+        );
+      },
+    );
+    if (status == null || !mounted) return;
+    await widget.state.setTaskStatus(item, status);
   }
 
   /// Details popover for a task: metadata + change log (activity feed).
@@ -1316,6 +1512,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         onToggle: history ? null : () => widget.state.toggleTaskDone(item),
         onSetStatus:
             history ? null : (s) => widget.state.setTaskStatus(item, s),
+        onRestore: history ? () => _restoreTask(item) : null,
         onSetPriority: (p) => widget.state.setTaskPriority(item, p),
         onAssign: history ? null : () => _assignTo(item),
         onShowDetails: () => _showTaskDetails(item),
@@ -1385,13 +1582,19 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
             const SizedBox(height: 6),
             ...filtered.asMap().entries.map((e) {
               final prog = board.progressFor(e.value);
-              return _buildTaskRow(
-                item: e.value,
-                number: e.key + 1,
-                board: board,
-                progressLabel: (e.value.subtaskTotal ?? 0) > 0
-                    ? '${prog.done}/${prog.total}'
-                    : null,
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildTaskRow(
+                    item: e.value,
+                    number: e.key + 1,
+                    board: board,
+                    progressLabel: (e.value.subtaskTotal ?? 0) > 0
+                        ? '${prog.done}/${prog.total}'
+                        : null,
+                  ),
+                  if (e.key < filtered.length - 1) const _TaskDivider(),
+                ],
               );
             }),
           ] else if (board.activeItems.isNotEmpty) ...[
@@ -1410,11 +1613,18 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                   : 'History — ${historyRoots.length}',
             ),
             const SizedBox(height: 6),
-            ...historyRoots.asMap().entries.map((e) => _buildTaskRow(
-                  item: e.value,
-                  number: e.key + 1,
-                  board: historyBoard,
-                  history: true,
+            ...historyRoots.asMap().entries.map((e) => Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _buildTaskRow(
+                      item: e.value,
+                      number: e.key + 1,
+                      board: historyBoard,
+                      history: true,
+                    ),
+                    if (e.key < historyRoots.length - 1)
+                      const _TaskDivider(),
+                  ],
                 )),
             if (historyLoading || _loadingTaskHistory)
               const Padding(
@@ -1550,6 +1760,9 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                       onSetPriority: (p) => widget.state.setTaskPriority(item, p),
                       onAssign: editable ? () => _assignTo(item) : null,
                       onShowDetails: () => _showTaskDetails(item),
+                      onRestore: editable
+                          ? null
+                          : () => _restoreTask(item),
                     ),
                   ),
                 if (items.isEmpty)
@@ -1609,14 +1822,59 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 10, 8, 0),
+                padding: const EdgeInsets.fromLTRB(16, 10, 4, 10),
                 child: Row(
                   children: [
-                    Text(
-                      'Tasks · Payments · Reminders',
-                      style: GoogleFonts.syne(fontWeight: FontWeight.w700, fontSize: 16),
+                    Expanded(
+                      child: Text(
+                        _paneTitle,
+                        style: GoogleFonts.syne(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 16,
+                        ),
+                      ),
                     ),
-                    const Spacer(),
+                    Builder(
+                      builder: (btnCtx) {
+                        final hasOverdue =
+                            activePayments.any((r) => r.isOverdue) ||
+                            activePlainReminders.any((r) => r.isOverdue);
+                        return MouseRegion(
+                          cursor: SystemMouseCursors.click,
+                          child: IconButton(
+                            tooltip: 'Payments & reminders',
+                            onPressed: () {
+                              final RenderBox box =
+                                  btnCtx.findRenderObject()! as RenderBox;
+                              final Offset offset = box.localToGlobal(
+                                Offset.zero,
+                              );
+                              _showPaneMenu(offset, box.size);
+                            },
+                            icon: Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                const Icon(Icons.more_horiz_rounded),
+                                if (hasOverdue)
+                                  Positioned(
+                                    right: -2,
+                                    top: -2,
+                                    child: Container(
+                                      width: 7,
+                                      height: 7,
+                                      decoration: BoxDecoration(
+                                        color: PrivetTheme.danger,
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                        );
+                      },
+                    ),
                     MouseRegion(
                       cursor: SystemMouseCursors.click,
                       child: IconButton(
@@ -1628,62 +1886,6 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                     ),
                   ],
                 ),
-              ),
-              TabBar(
-                controller: _tab,
-                indicatorColor: PrivetTheme.signal,
-                labelColor: PrivetTheme.signal,
-                unselectedLabelColor: PrivetTheme.mist,
-                labelStyle: GoogleFonts.syne(fontWeight: FontWeight.w700, fontSize: 13),
-                unselectedLabelStyle: GoogleFonts.syne(fontSize: 13),
-                tabs: [
-                  Tab(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Text('Tasks'),
-                        if (activeItems.isNotEmpty) ...[
-                          const SizedBox(width: 6),
-                          _CountBadge(activeItems.length, color: PrivetTheme.signal),
-                        ],
-                      ],
-                    ),
-                  ),
-                  Tab(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Text('Payments'),
-                        if (activePayments.isNotEmpty) ...[
-                          const SizedBox(width: 6),
-                          _CountBadge(
-                            activePayments.length,
-                            color: activePayments.any((r) => r.isOverdue)
-                                ? PrivetTheme.danger
-                                : PrivetTheme.signal,
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                  Tab(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Text('Reminders'),
-                        if (activePlainReminders.isNotEmpty) ...[
-                          const SizedBox(width: 6),
-                          _CountBadge(
-                            activePlainReminders.length,
-                            color: activePlainReminders.any((r) => r.isOverdue)
-                                ? PrivetTheme.danger
-                                : PrivetTheme.signal,
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ],
               ),
             ],
           ),
@@ -2673,18 +2875,6 @@ class _ReminderKindTab extends StatelessWidget {
   }
 }
 
-class _CountBadge extends StatelessWidget {
-  const _CountBadge(this.count, {required this.color});
-  final int count;
-  final Color color;
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-    decoration: BoxDecoration(color: color.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(99), border: Border.all(color: color.withValues(alpha: 0.4))),
-    child: Text('$count', style: GoogleFonts.syne(fontSize: 10, fontWeight: FontWeight.w700, color: color)),
-  );
-}
-
 class _SectionLabel extends StatelessWidget {
   const _SectionLabel(this.text);
   final String text;
@@ -2820,6 +3010,7 @@ class _TaskRow extends StatefulWidget {
     required this.progressLabel,
     required this.onToggle,
     required this.onSetStatus,
+    required this.onRestore,
     required this.onSetPriority,
     required this.onAssign,
     required this.onShowDetails,
@@ -2852,6 +3043,7 @@ class _TaskRow extends StatefulWidget {
   final String? progressLabel;
   final VoidCallback? onToggle;
   final ValueChanged<String>? onSetStatus;
+  final VoidCallback? onRestore;
   final ValueChanged<String>? onSetPriority;
   final VoidCallback? onAssign;
   final VoidCallback? onShowDetails;
@@ -2944,7 +3136,13 @@ class _TaskRowState extends State<_TaskRow> {
         backgroundColor: PrivetTheme.ink,
         insetPadding: const EdgeInsets.all(24),
         child: Stack(children: [
-          InteractiveViewer(child: Image.network(url, fit: BoxFit.contain)),
+          _TaskImageCopyMenu(
+            url: url,
+            filename: att.fileName ?? 'image',
+            child: InteractiveViewer(
+              child: Image.network(url, fit: BoxFit.contain),
+            ),
+          ),
           Positioned(
             top: 8,
             right: 8,
@@ -3127,6 +3325,9 @@ class _TaskRowState extends State<_TaskRow> {
                                   onSetPriority: widget.onSetPriority,
                                   onAssign: widget.onAssign,
                                   onShowDetails: widget.onShowDetails,
+                                  onRestore: isHistory
+                                      ? widget.onRestore
+                                      : null,
                                 ),
                                 small: true,
                               ),
@@ -3189,7 +3390,9 @@ class _TaskRowState extends State<_TaskRow> {
                       onEdit:
                           widget.onSaveBody != null ? _openEditDialog : null,
                       onDelete: widget.onDelete,
+                      onRestore: isHistory ? widget.onRestore : null,
                     ),
+                    onRestore: widget.onRestore,
                     history: isHistory,
                   ),
                 ],
@@ -3209,33 +3412,37 @@ class _TaskRowState extends State<_TaskRow> {
                         return Stack(
                           clipBehavior: Clip.none,
                           children: [
-                            MouseRegion(
-                              cursor: SystemMouseCursors.click,
-                              child: GestureDetector(
-                                onTap: () => _openPreview(att),
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(8),
-                                  child: _isImageAtt(att)
-                                      ? Image.network(
-                                          url,
-                                          width: 52,
-                                          height: 52,
-                                          fit: BoxFit.cover,
-                                          cacheWidth: ImageDecodeCaps.cacheWidth(
-                                            52,
-                                            dpr: MediaQuery.devicePixelRatioOf(
-                                                context),
-                                          ),
-                                          cacheHeight:
-                                              ImageDecodeCaps.cacheHeight(
-                                            52,
-                                            dpr: MediaQuery.devicePixelRatioOf(
-                                                context),
-                                          ),
-                                          errorBuilder: (_, __, ___) =>
-                                              _fileThumb(att.fileName),
-                                        )
-                                      : _fileThumb(att.fileName),
+                            _TaskImageCopyMenu(
+                              url: url,
+                              filename: att.fileName ?? 'image',
+                              child: MouseRegion(
+                                cursor: SystemMouseCursors.click,
+                                child: GestureDetector(
+                                  onTap: () => _openPreview(att),
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: _isImageAtt(att)
+                                        ? Image.network(
+                                            url,
+                                            width: 52,
+                                            height: 52,
+                                            fit: BoxFit.cover,
+                                            cacheWidth: ImageDecodeCaps.cacheWidth(
+                                              52,
+                                              dpr: MediaQuery.devicePixelRatioOf(
+                                                  context),
+                                            ),
+                                            cacheHeight:
+                                                ImageDecodeCaps.cacheHeight(
+                                              52,
+                                              dpr: MediaQuery.devicePixelRatioOf(
+                                                  context),
+                                            ),
+                                            errorBuilder: (_, __, ___) =>
+                                                _fileThumb(att.fileName),
+                                          )
+                                        : _fileThumb(att.fileName),
+                                  ),
                                 ),
                               ),
                             ),
@@ -3423,6 +3630,7 @@ class _TaskRowActions extends StatelessWidget {
     required this.onEdit,
     required this.onDelete,
     required this.onMore,
+    required this.onRestore,
     required this.history,
   });
 
@@ -3433,6 +3641,7 @@ class _TaskRowActions extends StatelessWidget {
   final VoidCallback? onEdit;
   final VoidCallback? onDelete;
   final VoidCallback onMore;
+  final VoidCallback? onRestore;
   final bool history;
 
   @override
@@ -3489,6 +3698,17 @@ class _TaskRowActions extends StatelessWidget {
               visualDensity: VisualDensity.compact,
             ),
           ),
+        if (onRestore != null)
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: IconButton(
+              tooltip: 'Restore task',
+              onPressed: onRestore,
+              icon: const Icon(Icons.replay_rounded, size: 18),
+              color: PrivetTheme.signal,
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
         if (onDelete != null)
           MouseRegion(
             cursor: SystemMouseCursors.click,
@@ -3511,6 +3731,23 @@ class _TaskRowActions extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Subtle separator between consecutive task cards so one task visually ends
+/// where the next one begins.
+class _TaskDivider extends StatelessWidget {
+  const _TaskDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Container(
+        height: 1,
+        color: PrivetTheme.line.withValues(alpha: 0.55),
+      ),
     );
   }
 }
@@ -3630,11 +3867,15 @@ class _SubtaskRowState extends State<_SubtaskRow> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(
-                Icons.subdirectory_arrow_right_rounded,
-                size: 16,
-                color: PrivetTheme.mist.withValues(alpha: 0.55),
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Icon(
+                  Icons.subdirectory_arrow_right_rounded,
+                  size: 16,
+                  color: PrivetTheme.mist.withValues(alpha: 0.55),
+                ),
               ),
               const SizedBox(width: 4),
               if (widget.onToggle != null)
@@ -3642,24 +3883,30 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                   cursor: SystemMouseCursors.click,
                   child: GestureDetector(
                     onTap: widget.onToggle,
-                    child: Icon(
-                      (item.status == 'review' || item.status == 'done')
-                          ? Icons.check_box_rounded
-                          : Icons.check_box_outline_blank_rounded,
-                      size: 18,
-                      color: item.status == 'done'
-                          ? PrivetTheme.signal
-                          : (item.status == 'review'
-                              ? const Color(0xFFF0A83D)
-                              : PrivetTheme.mist),
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Icon(
+                        (item.status == 'review' || item.status == 'done')
+                            ? Icons.check_box_rounded
+                            : Icons.check_box_outline_blank_rounded,
+                        size: 18,
+                        color: item.status == 'done'
+                            ? PrivetTheme.signal
+                            : (item.status == 'review'
+                                ? const Color(0xFFF0A83D)
+                                : PrivetTheme.mist),
+                      ),
                     ),
                   ),
                 )
               else
-                Icon(
-                  Icons.check_box_rounded,
-                  size: 18,
-                  color: PrivetTheme.signal.withValues(alpha: 0.45),
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Icon(
+                    Icons.check_box_rounded,
+                    size: 18,
+                    color: PrivetTheme.signal.withValues(alpha: 0.45),
+                  ),
                 ),
               const SizedBox(width: 6),
               Expanded(
@@ -3732,26 +3979,30 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                     return Stack(
                       clipBehavior: Clip.none,
                       children: [
-                        MouseRegion(
-                          cursor: clickable
-                              ? SystemMouseCursors.click
-                              : MouseCursor.defer,
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTap: clickable
-                                ? () => widget.onPreview!(att)
-                                : null,
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(6),
-                              child: _isImageAtt(att)
-                                  ? Image.network(
-                                      url,
-                                      width: 44,
-                                      height: 44,
-                                      fit: BoxFit.cover,
-                                      errorBuilder: (_, __, ___) => _fileThumb(att.fileName),
-                                    )
-                                  : _fileThumb(att.fileName),
+                        _TaskImageCopyMenu(
+                          url: url,
+                          filename: att.fileName ?? 'image',
+                          child: MouseRegion(
+                            cursor: clickable
+                                ? SystemMouseCursors.click
+                                : MouseCursor.defer,
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: clickable
+                                  ? () => widget.onPreview!(att)
+                                  : null,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(6),
+                                child: _isImageAtt(att)
+                                    ? Image.network(
+                                        url,
+                                        width: 44,
+                                        height: 44,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (_, __, ___) => _fileThumb(att.fileName),
+                                      )
+                                    : _fileThumb(att.fileName),
+                              ),
                             ),
                           ),
                         ),
@@ -3904,6 +4155,7 @@ class _TaskBoardCard extends StatelessWidget {
     this.onSetPriority,
     this.onAssign,
     this.onShowDetails,
+    this.onRestore,
   });
 
   final TaskItem item;
@@ -3914,6 +4166,7 @@ class _TaskBoardCard extends StatelessWidget {
   final ValueChanged<String>? onSetPriority;
   final VoidCallback? onAssign;
   final VoidCallback? onShowDetails;
+  final VoidCallback? onRestore;
 
   @override
   Widget build(BuildContext context) {
@@ -4019,6 +4272,19 @@ class _TaskBoardCard extends StatelessWidget {
                   ),
                 ),
               ),
+            if (onRestore != null)
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: IconButton(
+                  tooltip: 'Restore task',
+                  onPressed: onRestore,
+                  icon: const Icon(Icons.replay_rounded, size: 16),
+                  color: PrivetTheme.signal,
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  padding: EdgeInsets.zero,
+                ),
+              ),
             MouseRegion(
               cursor: SystemMouseCursors.click,
               child: IconButton(
@@ -4031,6 +4297,7 @@ class _TaskBoardCard extends StatelessWidget {
                   onSetPriority: onSetPriority,
                   onAssign: onAssign,
                   onShowDetails: onShowDetails,
+                  onRestore: onRestore,
                 ),
                 icon: const Icon(Icons.more_horiz_rounded, size: 16),
                 color: PrivetTheme.mist,
@@ -4763,4 +5030,40 @@ class _ReminderDialogState extends State<_ReminderDialog> {
         counterStyle: TextStyle(color: PrivetTheme.mist.withValues(alpha: 0.4), fontSize: 10),
         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       );
+}
+
+/// Right-click on a task image (thumbnail or the enlarged preview) opens the
+/// same Copy image / Download menu chats use. Left click still opens the
+/// preview — the menu is secondary-button only.
+class _TaskImageCopyMenu extends StatelessWidget {
+  const _TaskImageCopyMenu({
+    super.key,
+    required this.url,
+    required this.filename,
+    required this.child,
+  });
+
+  final String url;
+  final String filename;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: url.isEmpty
+          ? null
+          : (event) {
+              if (event.buttons == kSecondaryMouseButton) {
+                handleImageContextMenu(
+                  context,
+                  url: url,
+                  filename: filename,
+                  globalPosition: event.position,
+                );
+              }
+            },
+      child: child,
+    );
+  }
 }

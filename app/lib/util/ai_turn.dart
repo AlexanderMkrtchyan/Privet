@@ -72,8 +72,6 @@ class AiTurnPayload {
   String get headerLabel {
     final bits = <String>['Privet AI'];
     if (private) bits.add('only you');
-    final m = model?.trim();
-    if (m != null && m.isNotEmpty) bits.add(m);
     return bits.join(' · ');
   }
 

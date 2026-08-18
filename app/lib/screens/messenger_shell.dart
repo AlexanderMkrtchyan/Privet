@@ -4092,9 +4092,10 @@ class _ConversationPaneState extends State<ConversationPane>
     );
   }
 
-  /// Header center actions: pinned chips → Search → [+]. Pinned reminders/tasks
+  /// Header center actions: pinned chips → Search → Tasks. Pinned reminders/tasks
   /// sit at the far left; folder, call, video, screen share, and remote control
-  /// buttons follow this group in the desktop header row.
+  /// buttons follow this group in the desktop header row. The Tasks chip opens the
+  /// task pane directly.
   List<Widget> _buildHeaderCenterActions(PrivetState state) {
     final convId = state.activeConversationId;
     if (convId == null) return const [];
@@ -4151,27 +4152,9 @@ class _ConversationPaneState extends State<ConversationPane>
       onPressed: _toggleSearch,
     ));
 
-    chips.add(_AddChipButton(
-      onAddTask: () => _toggleTasks(tab: 0),
-      onAddPayment: () {
-        _toggleTasks(tab: 1);
-        showReminderDialog(
-          context,
-          state: state,
-          conversationId: convId,
-          initialKind: 'payment',
-        );
-      },
-      onAddReminder: () {
-        _toggleTasks(tab: 2);
-        showReminderDialog(
-          context,
-          state: state,
-          conversationId: convId,
-          initialKind: 'reminder',
-        );
-      },
-    ));
+    // Tasks chip opens the task pane directly. Payments / reminders stay
+    // reachable inside the task pane's ⋮ menu so tasks own the header.
+    chips.add(_AddChipButton(onTap: () => _toggleTasks(tab: 0)));
 
     return chips;
   }
@@ -5203,6 +5186,10 @@ class _ConversationPaneState extends State<ConversationPane>
                 folder: _mediaFolder!,
                 messages: messages,
                 mediaBase: mediaBase,
+                tasks: [
+                  ...state.tasksFor(state.activeConversationId),
+                  ...state.taskHistoryFor(state.activeConversationId),
+                ],
                 onClose: () => setState(() => _mediaFolder = null),
                 onSelectFolder: (kind) => setState(() {
                   _showTasks = false;
@@ -7722,24 +7709,19 @@ class _ThemeModeSelector extends StatelessWidget {
   }
 }
 
-/// [+ Add] chip — always visible after search. Creates Task / Payment / Reminder.
+/// [✓ Tasks] chip — opens the task pane directly. Payments / reminders live in
+/// the adjacent [⋮] overflow so tasks dominate the header.
 class _AddChipButton extends StatelessWidget {
-  const _AddChipButton({
-    required this.onAddTask,
-    required this.onAddPayment,
-    required this.onAddReminder,
-  });
+  const _AddChipButton({required this.onTap});
 
-  final VoidCallback onAddTask;
-  final VoidCallback onAddPayment;
-  final VoidCallback onAddReminder;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.only(left: 4),
       child: Tooltip(
-        message: 'Add task, payment, or reminder',
+        message: 'Tasks',
         waitDuration: const Duration(milliseconds: 280),
         child: Material(
           color: Colors.transparent,
@@ -7756,62 +7738,12 @@ class _AddChipButton extends StatelessWidget {
               mouseCursor: SystemMouseCursors.click,
               hoverColor: PrivetTheme.paper.withValues(alpha: 0.06),
               splashColor: PrivetTheme.paper.withValues(alpha: 0.08),
-              onTap: () {
-                final RenderBox box = context.findRenderObject()! as RenderBox;
-                final Offset offset = box.localToGlobal(Offset.zero);
-                showMenu<String>(
-                  context: context,
-                  color: PrivetTheme.panelElevated,
-                  position: RelativeRect.fromLTRB(
-                    offset.dx, offset.dy + box.size.height + 4,
-                    offset.dx + box.size.width, 0,
-                  ),
-                  items: [
-                    PopupMenuItem(
-                      value: 'task',
-                      mouseCursor: SystemMouseCursors.click,
-                      child: Row(
-                        children: [
-                          Icon(Icons.checklist_rounded, size: 16, color: PrivetTheme.signal),
-                          const SizedBox(width: 8),
-                          Text('Task list', style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13)),
-                        ],
-                      ),
-                    ),
-                    PopupMenuItem(
-                      value: 'payment',
-                      mouseCursor: SystemMouseCursors.click,
-                      child: Row(
-                        children: [
-                          Icon(Icons.account_balance_wallet_rounded, size: 16, color: PrivetTheme.signal),
-                          const SizedBox(width: 8),
-                          Text('Payment', style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13)),
-                        ],
-                      ),
-                    ),
-                    PopupMenuItem(
-                      value: 'reminder',
-                      mouseCursor: SystemMouseCursors.click,
-                      child: Row(
-                        children: [
-                          Icon(Icons.notifications_active_outlined, size: 16, color: PrivetTheme.signal),
-                          const SizedBox(width: 8),
-                          Text('Reminder', style: GoogleFonts.syne(color: PrivetTheme.mist, fontSize: 13)),
-                        ],
-                      ),
-                    ),
-                  ],
-                ).then((val) {
-                  if (val == 'task') onAddTask();
-                  if (val == 'payment') onAddPayment();
-                  if (val == 'reminder') onAddReminder();
-                });
-              },
+              onTap: onTap,
               child: SizedBox(
                 height: kChatHeaderChipHeight,
                 width: kChatHeaderChipHeight,
                 child: Icon(
-                  Icons.add_rounded,
+                  Icons.checklist_rounded,
                   size: 18,
                   color: PrivetTheme.signal,
                 ),

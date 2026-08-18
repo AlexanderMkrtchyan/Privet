@@ -4542,7 +4542,11 @@ class PrivetState extends ChangeNotifier {
   Future<void> setTaskStatus(TaskItem item, String status) async {
     final items = await _api.updateTask(taskId: item.id, status: status);
     _setTasks(item.conversationId, items);
-    if (status == 'done') await refreshTaskHistory(item.conversationId);
+    // History must be refreshed in both directions: marking done archives the
+    // task, and restoring a done task brings it back to the open board.
+    if (item.status == 'done' || status == 'done') {
+      await refreshTaskHistory(item.conversationId);
+    }
   }
 
   Future<void> setTaskPriority(TaskItem item, String priority) async {
@@ -5915,6 +5919,9 @@ Examples:
           tasksByChat[taskChatId] = raw
               .map((e) => TaskItem.fromJson(e as Map<String, dynamic>))
               .toList();
+          // Keep the History view in sync too: a task may have been marked
+          // done (moves in) or restored (moves back out).
+          unawaited(refreshTaskHistory(taskChatId));
           notifyListeners();
         }
       case 'reminders.updated':
