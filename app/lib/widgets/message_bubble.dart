@@ -453,7 +453,7 @@ class MessageBubble extends StatelessWidget {
                           ),
                         ),
                       Text(
-                        _messageTimeFormat.format(message.createdAt),
+                        _messageTimeFormat.format(message.createdAt.toLocal()),
                         style: TextStyle(
                           color: PrivetTheme.mist.withValues(alpha: 0.8),
                           fontSize: 10,
@@ -557,20 +557,7 @@ class MessageBubble extends StatelessWidget {
                                     : PrivetTheme.line,
                               ),
                             ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                PrivetEmoji(r.emoji, size: 16),
-                                const SizedBox(width: 4),
-                                Text(
-                                  '${r.count}',
-                                  style: const TextStyle(
-                                    fontSize: 13,
-                                    height: 1.1,
-                                  ),
-                                ),
-                              ],
-                            ),
+                            child: PrivetEmoji(r.emoji, size: 16),
                           ),
                         ),
                       );
@@ -1256,14 +1243,20 @@ class _CallHistoryChip extends StatelessWidget {
 
 /// Returns the trimmed body when it is 1–3 emoji graphemes and nothing else.
 String? _emojiOnlyPayload(String raw) {
-  final text = raw.trim();
+  // Bodies can wrap the emoji in markup — e.g. `applyDefaultMessageFont` bakes
+  // `[font=…]…[/font]` around the text — so detect on the visible plain text,
+  // not the raw tag soup, or a lone emoji degrades to inline size.
+  final text = markupToPlain(raw).trim();
   if (text.isEmpty || text.length > 24) return null;
-  // Strip ZWJ / variation selectors for a rough grapheme count.
   final chars = text.characters;
   if (chars.isEmpty || chars.length > 3) return null;
-  // Reject if any code unit looks like plain latin/digit/punctuation-heavy text.
-  final hasLetterOrDigit = RegExp(r'[A-Za-z0-9]').hasMatch(text);
-  if (hasLetterOrDigit) return null;
+  // Reject plain latin/digit/punctuation-heavy text. A grapheme that mixes in
+  // a letter/digit is still a single emoji only when it is a keycap (e.g. 1️⃣).
+  for (final g in chars) {
+    if (RegExp(r'[A-Za-z0-9]').hasMatch(g) && !g.contains('\u20e3')) {
+      return null;
+    }
+  }
   return text;
 }
 
@@ -1321,7 +1314,9 @@ class _BigEmojiState extends State<_BigEmoji>
 
   @override
   Widget build(BuildContext context) {
-    final base = widget.text.characters.length == 1 ? 64.0 : 48.0;
+    // One emoji is the hero of the message — render it extra large so it reads
+    // as a big animated sticker rather than inline text. 2–3 stay medium.
+    final base = widget.text.characters.length == 1 ? 80.0 : 48.0;
     final size = base * widget.fontScale;
     final scale = _scale;
     if (privetLowResource || scale == null) {
@@ -2788,11 +2783,45 @@ class _LinkifiedTextState extends State<_LinkifiedText> {
     final origin = box.localToGlobal(Offset.zero);
     final size = MediaQuery.sizeOf(context);
     const barWidth = 372.0;
-    final left = (origin.dx + box.size.width / 2 - barWidth / 2).clamp(
+    // The bar is ~40px tall; budget a bit more so its material shadow also
+    // stays clear of the text — a highlight must never slide under the bar.
+    const barHeight = 52.0;
+    const gap = 8.0;
+
+    // Anchor to the selected range's own box so the bar hugs the selection
+    // (and the highlight being applied) instead of floating over the whole
+    // message or being clamped onto it near the top of the chat.
+    final painter = _webPainter;
+    final selection = _webSel;
+    Rect? selRect;
+    if (painter != null && selection.isValid && !selection.isCollapsed) {
+      final boxes = painter.getBoxesForSelection(selection);
+      if (boxes.isNotEmpty) {
+        var r = boxes.first.toRect();
+        for (final b in boxes.skip(1)) {
+          r = r.expandToInclude(b.toRect());
+        }
+        selRect = r.shift(origin);
+      }
+    }
+    final anchorTop = selRect?.top ?? origin.dy;
+    final anchorBottom = selRect?.bottom ?? origin.dy + box.size.height;
+
+    // Prefer the bar above the selection; if it would not fit on screen
+    // (message near the top), flip it below so it never covers the text.
+    double top;
+    if (anchorTop - barHeight - gap >= 8.0) {
+      top = anchorTop - barHeight - gap;
+    } else {
+      top = anchorBottom + gap;
+    }
+    top = top.clamp(8.0, size.height - barHeight - 8.0);
+
+    final centerX = selRect?.center.dx ?? origin.dx + box.size.width / 2;
+    final left = (centerX - barWidth / 2).clamp(
       8.0,
       size.width - barWidth - 8,
     );
-    final top = (origin.dy - 44).clamp(8.0, size.height - 52.0);
 
     _claimSelectionDismiss();
     final String? currentFont;
@@ -3369,66 +3398,14 @@ class _MessageSelectionBar extends StatelessWidget {
     }
 
     void pickHighlight() {
-      final overlay = Overlay.maybeOf(context);
-      if (overlay == null || onFormat == null) return;
       final box = context.findRenderObject() as RenderBox?;
-      if (box == null || !box.hasSize) return;
-      final anchor = box.localToGlobal(Offset.zero);
-      showMenu<_HighlightPick>(
-        context: context,
-        position: RelativeRect.fromLTRB(
-          anchor.dx,
-          anchor.dy + box.size.height + 4,
-          anchor.dx,
-          anchor.dy + box.size.height + 4,
-        ),
-        items: [
-          for (final c in kHighlightColors)
-            PopupMenuItem<_HighlightPick>(
-              value: _HighlightPick(color: c),
-              height: 40,
-              child: Row(
-                children: [
-                  Container(
-                    width: 22,
-                    height: 22,
-                    decoration: BoxDecoration(
-                      color: c,
-                      borderRadius: BorderRadius.circular(5),
-                      border: Border.all(
-                        color: PrivetTheme.line,
-                        width: 1,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Text(
-                    '#${(c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}',
-                    style: GoogleFonts.ibmPlexSans(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          const PopupMenuDivider(),
-          const PopupMenuItem<_HighlightPick>(
-            value: _HighlightPick(clear: true),
-            height: 40,
-            child: Text(
-              'Remove highlight',
-              style: TextStyle(fontSize: 13),
-            ),
-          ),
-        ],
-      ).then((pick) {
-        if (pick == null || onFormat == null) return;
-        if (pick.clear) {
-          onFormat!(background: Colors.transparent);
-        } else if (pick.color != null) {
-          onFormat!(background: pick.color);
-        }
+      if (box == null || !box.hasSize || onFormat == null) return;
+      showMessageHighlightPicker(
+        context,
+        anchor: box.localToGlobal(Offset.zero) & box.size,
+      ).then((color) {
+        if (color == null || onFormat == null) return;
+        onFormat!(background: color);
       });
     }
 
@@ -3574,13 +3551,6 @@ class _MessageSelectionBar extends StatelessWidget {
       ),
     );
   }
-}
-
-class _HighlightPick {
-  const _HighlightPick({this.color, this.clear = false});
-
-  final Color? color;
-  final bool clear;
 }
 
 class _LinkPreviewCard extends StatelessWidget {

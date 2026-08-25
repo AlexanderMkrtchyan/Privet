@@ -1519,7 +1519,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         onSaveBody: history
             ? null
             : (body) => widget.state.updateTaskBody(item, body),
-        onDelete: history ? null : () => widget.state.deleteTask(item),
+        onDelete: history ? null : () => _confirmDeleteTask(item),
         onRemoveAttachment: history
             ? null
             : (url) => widget.state.removeTaskAttachment(item, url),
@@ -1544,7 +1544,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
             ? null
             : (sub, body) => widget.state.updateTaskBody(sub, body),
         onDeleteSubtask:
-            history ? null : (sub) => widget.state.deleteTask(sub),
+            history ? null : (sub) => _confirmDeleteTask(sub),
         onAttachSubtask:
             history ? null : (sub) => _attachToItem(sub),
         onRemoveSubtaskAttachment: history
@@ -1552,6 +1552,74 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
             : (sub, url) => widget.state.removeTaskAttachment(sub, url),
       ),
     );
+  }
+
+  /// Asks for confirmation before permanently removing a task (and its
+  /// subtasks), so a stray tap on the X button can't wipe a big task.
+  /// Returns true if the task was deleted.
+  Future<bool> _confirmDeleteTask(TaskItem item) async {
+    final context = this.context;
+    final subtasks =
+        widget.state.taskBoardFor(widget.conversationId).subtasksOf(item.id);
+    final label = item.isSubtask ? 'subtask' : 'task';
+    final message = subtasks.isEmpty
+        ? 'Remove this $label? This cannot be undone.'
+        : 'Remove this $label and its ${subtasks.length} '
+            'subtask${subtasks.length == 1 ? '' : 's'}? This cannot be undone.';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: PrivetTheme.panelElevated,
+        title: Text(
+          'Remove $label?',
+          style: GoogleFonts.syne(
+            color: PrivetTheme.mist,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        content: Text(
+          message,
+          style: GoogleFonts.ibmPlexSans(
+            color: PrivetTheme.paper,
+            fontSize: 14,
+          ),
+        ),
+        actions: [
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: Text('Cancel', style: TextStyle(color: PrivetTheme.mist)),
+            ),
+          ),
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: TextButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: Text(
+                'Remove',
+                style: TextStyle(
+                  color: PrivetTheme.danger,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return false;
+    try {
+      await widget.state.deleteTask(item);
+      return true;
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e')),
+        );
+      }
+      return false;
+    }
   }
 
   /// Classic vertical list: active board + history section.

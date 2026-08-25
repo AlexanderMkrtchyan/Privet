@@ -28,6 +28,7 @@ import '../util/app_update.dart';
 import '../util/clipboard_files.dart';
 import '../util/ai_turn.dart';
 import '../util/call_history.dart';
+import '../util/camera_capture.dart';
 import '../util/composer_autocomplete.dart';
 import '../util/emoticon_expand.dart';
 import '../util/composer_autocorrect.dart';
@@ -5561,13 +5562,28 @@ class _ConversationPaneState extends State<ConversationPane>
                                           color: PrivetTheme.mist,
                                         ),
                                       ),
-                                      suffixIcon: WebAttachButton(
-                                        tooltip: 'Attach files',
-                                        onPicked: _applyPickedFile,
-                                        onPressedFallback: _pickFile,
-                                        onError: (e) => widget.state.setError(
-                                          'Could not attach file: $e',
-                                        ),
+                                      suffixIcon: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          if (cameraCaptureAvailable)
+                                            IconButton(
+                                              tooltip: 'Take a picture',
+                                              onPressed: _takePicture,
+                                              icon: Icon(
+                                                Icons.photo_camera_outlined,
+                                                color: PrivetTheme.mist,
+                                              ),
+                                            ),
+                                          WebAttachButton(
+                                            tooltip: 'Attach files',
+                                            onPicked: _applyPickedFile,
+                                            onPressedFallback: _pickFile,
+                                            onError: (e) =>
+                                                widget.state.setError(
+                                              'Could not attach file: $e',
+                                            ),
+                                          ),
+                                        ],
                                       ),
                                     ),
                                   ),
@@ -5642,6 +5658,14 @@ class _ConversationPaneState extends State<ConversationPane>
                                   : Icons.emoji_emotions_outlined,
                             ),
                           ),
+                          if (cameraCaptureAvailable)
+                            IconButton(
+                              tooltip: 'Take a picture',
+                              onPressed: _takePicture,
+                              icon: const Icon(
+                                Icons.photo_camera_outlined,
+                              ),
+                            ),
                           WebAttachButton(
                             tooltip: 'Attach files',
                             onPicked: _applyPickedFile,
@@ -6986,6 +7010,30 @@ class _ConversationPaneState extends State<ConversationPane>
     }
   }
 
+  /// Telegram/Teams-style "Take a picture": opens the system camera, stages the
+  /// photo in the composer as a draft attachment, and lets the user caption +
+  /// send. Android's manifest declares CAMERA (video calls), so the runtime
+  /// grant must be held before the camera intent will open.
+  Future<void> _takePicture() async {
+    try {
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+        final after = await requestMediaPermissions(camera: true);
+        if (!after.cameraGranted) {
+          if (mounted) {
+            widget.state.setError('Camera permission required to take a picture');
+          }
+          return;
+        }
+      }
+      final picked = await takePictureFromCamera();
+      if (!mounted || picked == null) return; // cancelled
+      _applyPickedFile(picked);
+    } catch (e) {
+      if (!mounted) return;
+      widget.state.setError('Could not take a picture: $e');
+    }
+  }
+
   String _mimeFor(String name) {
     final lower = name.toLowerCase();
     if (lower.endsWith('.png')) return 'image/png';
@@ -7897,60 +7945,14 @@ class _ComposerFormatBarState extends State<_ComposerFormatBar> {
   }
 
   void _pickHighlight() {
-    final overlay = Overlay.maybeOf(context);
-    if (overlay == null) return;
     final box = context.findRenderObject() as RenderBox?;
     if (box == null || !box.hasSize) return;
-    final anchor = box.localToGlobal(Offset.zero);
-    showMenu<_HighlightPick>(
-      context: context,
-      position: RelativeRect.fromLTRB(
-        anchor.dx,
-        anchor.dy + box.size.height + 4,
-        anchor.dx,
-        anchor.dy + box.size.height + 4,
-      ),
-      items: [
-        for (final c in kHighlightColors)
-          PopupMenuItem<_HighlightPick>(
-            value: _HighlightPick(color: c),
-            height: 40,
-            child: Row(
-              children: [
-                Container(
-                  width: 22,
-                  height: 22,
-                  decoration: BoxDecoration(
-                    color: c,
-                    borderRadius: BorderRadius.circular(5),
-                    border: Border.all(color: PrivetTheme.line, width: 1),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Text(
-                  '#${(c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}',
-                  style: GoogleFonts.ibmPlexSans(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        const PopupMenuDivider(),
-        const PopupMenuItem<_HighlightPick>(
-          value: _HighlightPick(clear: true),
-          height: 40,
-          child: Text('Remove highlight', style: TextStyle(fontSize: 13)),
-        ),
-      ],
-    ).then((pick) {
-      if (pick == null) return;
-      if (pick.clear) {
-        widget.onHighlight(Colors.transparent);
-      } else if (pick.color != null) {
-        widget.onHighlight(pick.color!);
-      }
+    showMessageHighlightPicker(
+      context,
+      anchor: box.localToGlobal(Offset.zero) & box.size,
+    ).then((color) {
+      if (color == null) return;
+      widget.onHighlight(color);
     });
   }
 
@@ -8074,11 +8076,4 @@ class _ComposerFormatBarState extends State<_ComposerFormatBar> {
       ),
     );
   }
-}
-
-class _HighlightPick {
-  const _HighlightPick({this.color, this.clear = false});
-
-  final Color? color;
-  final bool clear;
 }

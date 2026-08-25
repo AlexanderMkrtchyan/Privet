@@ -84,9 +84,29 @@ Future<PickedBytes?> readClipboardImage() async {
   if (os != null) return os;
   // Fallback: in-app image clipboard for platforms without native image
   // clipboard support (e.g. iOS where the remote_input channel is absent).
+  // Only use it while the copied image is still the clipboard's latest
+  // content — if the OS clipboard now holds text, a newer copy superseded the
+  // image and this fallback would paste the stale image alongside that text
+  // on every Ctrl+V.
+  if (await _osClipboardHasText()) return null;
   final appBytes = peekCopiedImage();
   if (appBytes != null) return _pickedFromBytes(appBytes);
   return null;
+}
+
+/// Whether the OS clipboard currently holds non-empty text.
+Future<bool> _osClipboardHasText() async {
+  try {
+    final text = await RemoteInput.getClipboardText();
+    if (text != null && text.isNotEmpty) return true;
+  } catch (_) {}
+  try {
+    final data = await Clipboard.getData(Clipboard.kTextPlain)
+        .timeout(const Duration(milliseconds: 300));
+    return data?.text?.isNotEmpty ?? false;
+  } catch (_) {
+    return false;
+  }
 }
 
 /// Wraps raw image bytes with the correct MIME + filename from the magic
