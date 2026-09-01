@@ -19,11 +19,17 @@ bool imageContextMenuOpen = false;
 /// Shows the image right-click menu at [globalPosition], then performs the
 /// chosen action: Download, or Copy image. Used by the lightbox. Success is
 /// silent — feedback appears only when copying fails.
+///
+/// [messengerKey] lets a full-screen surface (e.g. the lightbox) route the
+/// snackbar to its own scoped `ScaffoldMessenger`, which renders above the
+/// overlay. Without it, `ScaffoldMessenger.maybeOf(context)` walks past the
+/// dialog to the app-root messenger and the confirmation is hidden behind it.
 Future<void> handleImageContextMenu(
   BuildContext context, {
   required String url,
   required String filename,
   required Offset globalPosition,
+  GlobalKey<ScaffoldMessengerState>? messengerKey,
 }) async {
   if (imageContextMenuOpen) return;
   imageContextMenuOpen = true;
@@ -36,12 +42,20 @@ Future<void> handleImageContextMenu(
     );
     if (!context.mounted || action == null) return;
     if (action == ImageContextAction.download) {
-      await downloadMedia(url, filename: filename);
+      final saved = await downloadMedia(url, filename: filename);
+      if (saved != null && context.mounted) {
+        final messenger =
+            messengerKey?.currentState ?? ScaffoldMessenger.maybeOf(context);
+        messenger?.showSnackBar(
+          SnackBar(content: Text('Saved to $saved')),
+        );
+      }
       return;
     }
     final ok = await copyImageToClipboard(url, filename: filename);
     if (ok || !context.mounted) return;
-    final messenger = ScaffoldMessenger.maybeOf(context);
+    final messenger =
+        messengerKey?.currentState ?? ScaffoldMessenger.maybeOf(context);
     if (messenger == null) return;
     messenger
       ..hideCurrentSnackBar()

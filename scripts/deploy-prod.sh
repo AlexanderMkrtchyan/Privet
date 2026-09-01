@@ -76,11 +76,12 @@ if sw.is_file():
 # The freshly built Flutter shell lands at public/index.html — relocate it to
 # /app/ so the marketing landing page can own the site root.
 shell = (root / "index.html").read_text()
+# Stamp every flutter_bootstrap.js reference (preload hint + the loader's
+# s.src=) so the cache-buster never stays as the literal BUILD_STAMP placeholder.
 shell = re.sub(
     r"flutter_bootstrap\.js(\?v=[^'\"]+)?",
     f"flutter_bootstrap.js?v={stamp}",
     shell,
-    count=1,
 )
 # Prefer absolute PWA asset URLs after relocate under /app/.
 shell = shell.replace('href="manifest.json"', 'href="/manifest.json"')

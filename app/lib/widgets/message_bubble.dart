@@ -7,7 +7,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../models.dart';
 import '../theme.dart';
@@ -22,15 +21,16 @@ import '../util/perf.dart';
 import '../util/rich_text_markup.dart';
 import '../util/web_select_cursor.dart';
 import 'compact_emoji_picker.dart';
+import 'cached_media_image.dart';
 import 'image_lightbox.dart';
 import 'inline_video_player.dart';
-import 'message_font_picker.dart';
 import 'privet_emoji.dart';
+import 'selectable_markup_text.dart';
 
 const kQuickReactions = ['❤️', '👍', '😂', '😮'];
 
 /// Shared — constructing [DateFormat] per bubble every frame is wasteful.
-final _messageTimeFormat = DateFormat.Hm();
+final _messageTimeFormat = DateFormat.jm();
 
 /// Prevents double-open from Listener + GestureDetector both firing on web.
 bool _reactionMenuOpen = false;
@@ -41,49 +41,45 @@ bool _reactionMenuOpen = false;
 /// Reply / Forward / Add to task to THAT image instead of the first one.
 MediaAttachment? _imageMenuTarget;
 
-/// Non-empty while the user has selected message body text — used so drag
-/// selection can show Copy / Reply / Forward without also opening the
-/// reaction sheet on the pointer-up that ends the drag.
-String? _activeMessageSelection;
-
-/// Dismisses any floating selection action bar (one message at a time).
-VoidCallback? _dismissMessageSelectionUi;
-
-/// Bumped when primary pointer hits message body text.
-int _messageBodyPointerEpoch = 0;
-
-/// True while a web message-body drag-select is in progress (after slop).
-bool privetMessageSelectionDragging = false;
-
-/// Set on pointer-down when the message body text claims the hit; bubble
-/// chrome / empty-space probes use this so text taps are not treated as
-/// outside clicks.
-bool privetMessageBodyClaimedPointer = false;
+/// Selection state for message-body text lives in the shared
+/// [MarkupTextSelectionScope] (messages and tasks both select through
+/// `SelectableMarkupText`, and only one surface is mounted at a time).
 
 /// Set while a bubble is being horizontally dragged for swipe-to-reply so
 /// nested text MouseRegions can [MouseCursor.defer] and show grab/grabbing.
 bool privetBubbleDragging = false;
 
+/// True while a web message-body drag-select is in progress (after slop).
+bool get privetMessageSelectionDragging => MarkupTextSelectionScope.dragging;
+set privetMessageSelectionDragging(bool v) =>
+    MarkupTextSelectionScope.dragging = v;
+
+/// Set on pointer-down when the message body text claims the hit; bubble
+/// chrome / empty-space probes use this so text taps are not treated as
+/// outside clicks.
+bool get privetMessageBodyClaimedPointer =>
+    MarkupTextSelectionScope.bodyClaimedPointer;
+set privetMessageBodyClaimedPointer(bool v) =>
+    MarkupTextSelectionScope.bodyClaimedPointer = v;
+
 /// Clear message text selection + floating Copy/Reply/Forward bar.
-void privetClearMessageSelection() {
-  _dismissMessageSelectionUi?.call();
-}
+void privetClearMessageSelection() => MarkupTextSelectionScope.clearSelection();
 
 /// Non-empty while message body text is selected (floating Copy bar).
-String? get privetActiveMessageSelection => _activeMessageSelection;
+String? get privetActiveMessageSelection => MarkupTextSelectionScope.activeText;
 
 /// Same as the floating **Copy** button: write selection to [AppClipboard]
 /// and dismiss the selection UI. Returns true when something was copied.
 bool privetCopyActiveMessageSelection() {
-  final text = _activeMessageSelection;
+  final text = MarkupTextSelectionScope.activeText;
   if (text == null || text.isEmpty) return false;
-  _dismissMessageSelectionUi?.call();
+  MarkupTextSelectionScope.clearSelection();
   AppClipboard.setText(text);
   return true;
 }
 
 /// Epoch used by the chat list to clear selection on empty-space clicks.
-int get privetMessageBodyPointerEpoch => _messageBodyPointerEpoch;
+int get privetMessageBodyPointerEpoch => MarkupTextSelectionScope.pointerEpoch;
 
 class MessageBubble extends StatelessWidget {
   const MessageBubble({
@@ -281,7 +277,7 @@ class MessageBubble extends StatelessWidget {
                     ),
                   )
                 else
-                  _LinkifiedText(
+                  SelectableMarkupText(
                     text: answer,
                     fontScale: fontScale,
                     defaultFont: defaultFontFamily,
@@ -294,6 +290,13 @@ class MessageBubble extends StatelessWidget {
                         ? null
                         : (selected) =>
                               onForward!(message, selectedText: selected),
+                    hoverStyle: TextStyle(
+                      height: 1.35,
+                      fontSize: 15 * fontScale,
+                      color: PrivetTheme.signal,
+                    ),
+                    toolbarSuppressed: () => _reactionMenuOpen,
+                    dragging: () => privetBubbleDragging,
                   ),
               ],
             ),
@@ -316,7 +319,7 @@ class MessageBubble extends StatelessWidget {
                 // click was on an image, recorded it as the menu target.
                 final target = _imageMenuTarget;
                 _imageMenuTarget = null;
-                _dismissMessageSelectionUi?.call();
+                MarkupTextSelectionScope.clearSelection();
                 _openMenu(context, event.position, imageTarget: target);
               }
             },
@@ -329,7 +332,7 @@ class MessageBubble extends StatelessWidget {
           onLongPressStart: message.pending
               ? null
               : (details) {
-                  _dismissMessageSelectionUi?.call();
+                  MarkupTextSelectionScope.clearSelection();
                   // Long-press never targets a specific image.
                   _imageMenuTarget = null;
                   _openMenu(context, details.globalPosition);
@@ -1113,7 +1116,7 @@ class MessageBubble extends StatelessWidget {
     if (onlyEmoji != null) {
       return _BigEmoji(text: onlyEmoji, fontScale: fontScale);
     }
-    return _LinkifiedText(
+    return SelectableMarkupText(
       text: message.body,
       fontScale: fontScale,
       defaultFont: defaultFontFamily,
@@ -1121,6 +1124,13 @@ class MessageBubble extends StatelessWidget {
       onReply: onReply == null ? null : replyWithSelection,
       onForward: onForward == null ? null : forwardWithSelection,
       onFormat: onFormatMessage == null ? null : formatSelection,
+      hoverStyle: TextStyle(
+        height: 1.35,
+        fontSize: 15 * fontScale,
+        color: PrivetTheme.signal,
+      ),
+      toolbarSuppressed: () => _reactionMenuOpen,
+      dragging: () => privetBubbleDragging,
     );
   }
 
@@ -1430,7 +1440,7 @@ class _AlbumBody extends StatelessWidget {
         ),
         if (caption.isNotEmpty) ...[
           const SizedBox(height: 8),
-          _LinkifiedText(
+          SelectableMarkupText(
             text: caption,
             fontScale: fontScale,
             defaultFont: defaultFont,
@@ -1438,6 +1448,13 @@ class _AlbumBody extends StatelessWidget {
             onReply: onReplySelection,
             onForward: onForwardSelection,
             onFormat: onFormatSelection,
+            hoverStyle: TextStyle(
+              height: 1.35,
+              fontSize: 15 * fontScale,
+              color: PrivetTheme.signal,
+            ),
+            toolbarSuppressed: () => _reactionMenuOpen,
+            dragging: () => privetBubbleDragging,
           ),
         ],
       ],
@@ -1495,7 +1512,7 @@ class _SingleMediaBody extends StatelessWidget {
     };
   }
 
-  Widget _captionText() => _LinkifiedText(
+  Widget _captionText() => SelectableMarkupText(
     text: caption,
     fontScale: fontScale,
     defaultFont: defaultFont,
@@ -1503,6 +1520,13 @@ class _SingleMediaBody extends StatelessWidget {
     onReply: onReplySelection,
     onForward: onForwardSelection,
     onFormat: onFormatSelection,
+    hoverStyle: TextStyle(
+      height: 1.35,
+      fontSize: 15 * fontScale,
+      color: PrivetTheme.signal,
+    ),
+    toolbarSuppressed: () => _reactionMenuOpen,
+    dragging: () => privetBubbleDragging,
   );
 
   @override
@@ -1647,7 +1671,8 @@ class _SingleMediaBody extends StatelessWidget {
               hitTestBehavior: HitTestBehavior.opaque,
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: () => downloadMedia(_url, filename: _downloadName),
+                onTap: () =>
+                    _downloadMedia(context, _url, filename: _downloadName),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -1729,7 +1754,11 @@ class _AttachmentTile extends StatelessWidget {
     };
   }
 
-  Widget _clickableFileTile({required IconData icon, required String label}) {
+  Widget _clickableFileTile({
+    required BuildContext context,
+    required IconData icon,
+    required String label,
+  }) {
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       hitTestBehavior: HitTestBehavior.opaque,
@@ -1748,7 +1777,7 @@ class _AttachmentTile extends StatelessWidget {
       // #endregion
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => downloadMedia(url, filename: _downloadName),
+        onTap: () => _downloadMedia(context, url, filename: _downloadName),
         child: ColoredBox(
           color: PrivetTheme.ink,
           child: Padding(
@@ -1821,10 +1850,6 @@ class _AttachmentTile extends StatelessWidget {
                   width,
                   dpr: MediaQuery.devicePixelRatioOf(context),
                 ),
-                cacheHeight: ImageDecodeCaps.cacheHeight(
-                  height,
-                  dpr: MediaQuery.devicePixelRatioOf(context),
-                ),
               ),
             ),
           ),
@@ -1834,11 +1859,13 @@ class _AttachmentTile extends StatelessWidget {
       case 'audio':
       case 'voice':
         content = _clickableFileTile(
+          context: context,
           icon: Icons.audiotrack_rounded,
           label: item.fileName ?? 'Audio',
         );
       default:
         content = _clickableFileTile(
+          context: context,
           icon: Icons.insert_drive_file_rounded,
           label: item.fileName ?? 'File',
         );
@@ -1879,7 +1906,6 @@ class _ChatImage extends StatefulWidget {
     this.width,
     this.height,
     this.cacheWidth,
-    this.cacheHeight,
     this.placeholderHeight = 180,
   });
 
@@ -1888,7 +1914,6 @@ class _ChatImage extends StatefulWidget {
   final double? width;
   final double? height;
   final int? cacheWidth;
-  final int? cacheHeight;
 
   /// Height the ready box reserves while no image size is known yet (single
   /// images size to their natural aspect once decoded).
@@ -1987,13 +2012,15 @@ class _ChatImageState extends State<_ChatImage>
       // Optimistic pre-upload bubble — no URL yet, keep the ready box going.
       return _readyBox();
     }
-    return Image.network(
-      widget.url,
+    // Prefer the on-device cache (instant when already seen); the network
+    // path warms the cache in the background via the widget.
+    return CachedMediaImage(
+      url: widget.url,
       fit: widget.fit,
       width: widget.width,
       height: widget.height,
       cacheWidth: widget.cacheWidth,
-      cacheHeight: widget.cacheHeight,
+      placeholderHeight: widget.placeholderHeight,
       frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
         if (wasSynchronouslyLoaded) {
           _frameReady = true;
@@ -2113,7 +2140,7 @@ class _DownloadChip extends StatelessWidget {
           child: Material(
             color: Colors.transparent,
             child: InkWell(
-              onTap: () => downloadMedia(url, filename: filename),
+              onTap: () => _downloadMedia(context, url, filename: filename),
               mouseCursor: SystemMouseCursors.click,
               borderRadius: BorderRadius.circular(6),
               hoverColor: PrivetTheme.signal.withValues(alpha: 0.14),
@@ -2561,8 +2588,8 @@ class _ReplyThumbnailRow extends StatelessWidget {
             padding: EdgeInsets.only(right: i < thumbs.length - 1 ? 4 : 0),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(6),
-              child: Image.network(
-                thumbs[i].mediaUrl.startsWith('http')
+              child: CachedMediaImage(
+                url: thumbs[i].mediaUrl.startsWith('http')
                     ? thumbs[i].mediaUrl
                     : '$mediaBase${thumbs[i].mediaUrl}',
                 width: 36,
@@ -2599,958 +2626,20 @@ class _ReplyThumbnailRow extends StatelessWidget {
   }
 }
 
-final _urlPattern = RegExp(
-  r'''https?:\/\/[^\s<>"'\)\]]+''',
-  caseSensitive: false,
-);
-
-Future<void> _openExternal(String url) async {
-  final uri = Uri.tryParse(url);
-  if (uri == null) return;
-  await launchUrl(uri, mode: LaunchMode.externalApplication);
-}
-
-class _LinkifiedText extends StatefulWidget {
-  const _LinkifiedText({
-    required this.text,
-    this.onReply,
-    this.onForward,
-    this.onFormat,
-    this.fontScale = 1.0,
-    this.defaultFont = '',
-    this.onSetDefaultFont,
-  });
-
-  final String text;
-  final ValueChanged<String>? onReply;
-  final ValueChanged<String>? onForward;
-
-  /// Redacts a selection in this message. The selection is in plain-text
-  /// coordinates (markup already stripped).
-  final void Function(TextSelection selection, TextFormat format)? onFormat;
-
-  /// Multiplier around the 15px default body size (see [PrivetState.chatFontSize]).
-  final double fontScale;
-
-  /// App-wide default message font ('' = app default) — the base font every
-  /// segment inherits unless it carries an explicit `[font=…]` run.
-  final String defaultFont;
-
-  /// Persists a font picked in the "Aa" menu as the app-wide default font.
-  final ValueChanged<String>? onSetDefaultFont;
-
-  @override
-  State<_LinkifiedText> createState() => _LinkifiedTextState();
-}
-
-class _LinkifiedTextState extends State<_LinkifiedText> {
-  final GlobalKey _hostKey = GlobalKey();
-  OverlayEntry? _toolbar;
-  String _selected = '';
-  bool _blockToolbarForSecondary = false;
-  final List<TapGestureRecognizer> _linkRecognizers = [];
-  TextSpan? _cachedSpan;
-  String? _cachedSpanText;
-  bool _cachedWithRecognizers = false;
-  double? _cachedSpanScale;
-  String _cachedSpanFont = '';
-
-  /// Visible text with markup stripped — selection offsets live in this space.
-  String _plainText = '';
-
-  // Web: TextPainter-owned selection (never SelectableText).
-  TextSelection _webSel = const TextSelection.collapsed(offset: -1);
-  TextPainter? _webPainter;
-  double _webMaxWidth = 0;
-  double _webPainterScale = 1.0;
-  String _webPainterFont = '';
-  final _WebSelRepaint _webSelRepaint = _WebSelRepaint();
-
-  // Web pointer-driven select (Listener — does not fight ListView pan arena).
-  int? _webSelectPointer;
-  int _webSelectBase = 0;
-  Offset? _webSelectOrigin;
-  bool _webSelectMoved = false;
-  // Double-click → word; triple-click → whole message (SelectableText elsewhere).
-  int _webTapCount = 0;
-  DateTime? _webLastTapDownAt;
-  Offset? _webLastTapDownOffset;
-  bool _webMultiTapSelect = false;
-  ScrollHoldController? _webScrollHold;
-  bool _hoveringLink = false;
-  bool _webPainterHover = false;
-
-  @override
-  void dispose() {
-    setPrivetMessageLinkHover(false);
-    setPrivetMessageSelectHover(false);
-    _releaseWebScrollHold();
-    _removeToolbar();
-    if (_activeMessageSelection == _selected) {
-      _activeMessageSelection = null;
-    }
-    if (_dismissMessageSelectionUi == _clearSelectionTracking) {
-      _dismissMessageSelectionUi = null;
-    }
-    privetMessageSelectionDragging = false;
-    _webSelRepaint.dispose();
-    _webPainter?.dispose();
-    for (final r in _linkRecognizers) {
-      r.dispose();
-    }
-    _linkRecognizers.clear();
-    super.dispose();
-  }
-
-  void _releaseWebScrollHold() {
-    _webScrollHold?.cancel();
-    _webScrollHold = null;
-  }
-
-  void _removeToolbar() {
-    _toolbar?.remove();
-    _toolbar = null;
-  }
-
-  void _clearSelectionTracking() {
-    _selected = '';
-    _webSel = const TextSelection.collapsed(offset: -1);
-    _webSelectMoved = false;
-    _webMultiTapSelect = false;
-    if (_activeMessageSelection != null) {
-      _activeMessageSelection = null;
-    }
-    if (_dismissMessageSelectionUi == _clearSelectionTracking) {
-      _dismissMessageSelectionUi = null;
-    }
-    _removeToolbar();
-    _webSelRepaint.tick();
-    if (mounted) setState(() {});
-  }
-
-  void _updateWebTapCount(Offset local) {
-    final now = DateTime.now();
-    final lastAt = _webLastTapDownAt;
-    final lastPos = _webLastTapDownOffset;
-    final withinTime =
-        lastAt != null && now.difference(lastAt) < kDoubleTapTimeout;
-    final withinSlop =
-        lastPos != null && (local - lastPos).distance < kDoubleTapSlop;
-    if (withinTime && withinSlop) {
-      _webTapCount += 1;
-    } else {
-      _webTapCount = 1;
-    }
-    _webLastTapDownAt = now;
-    _webLastTapDownOffset = local;
-  }
-
-  void _selectWebWordAt(int offset) {
-    final painter = _webPainter;
-    if (painter == null || _plainText.isEmpty) return;
-    final clamped = offset.clamp(0, _plainText.length);
-    final range = painter.getWordBoundary(TextPosition(offset: clamped));
-    if (range.start >= range.end) return;
-    _setWebSelection(
-      TextSelection(baseOffset: range.start, extentOffset: range.end),
-    );
-    _webMultiTapSelect = true;
-  }
-
-  void _selectWebAll() {
-    if (_plainText.isEmpty) return;
-    _setWebSelection(
-      TextSelection(baseOffset: 0, extentOffset: _plainText.length),
-    );
-    _webMultiTapSelect = true;
-  }
-
-  void _claimSelectionDismiss() {
-    if (_dismissMessageSelectionUi != null &&
-        _dismissMessageSelectionUi != _clearSelectionTracking) {
-      _dismissMessageSelectionUi!();
-    }
-    _dismissMessageSelectionUi = _clearSelectionTracking;
-  }
-
-  void _showToolbar() {
-    if (_blockToolbarForSecondary || _reactionMenuOpen) return;
-    _removeToolbar();
-    final overlay = Overlay.maybeOf(context);
-    final box = _hostKey.currentContext?.findRenderObject() as RenderBox?;
-    if (overlay == null || box == null || !box.hasSize) return;
-
-    final origin = box.localToGlobal(Offset.zero);
-    final size = MediaQuery.sizeOf(context);
-    const barWidth = 372.0;
-    // The bar is ~40px tall; budget a bit more so its material shadow also
-    // stays clear of the text — a highlight must never slide under the bar.
-    const barHeight = 52.0;
-    const gap = 8.0;
-
-    // Anchor to the selected range's own box so the bar hugs the selection
-    // (and the highlight being applied) instead of floating over the whole
-    // message or being clamped onto it near the top of the chat.
-    final painter = _webPainter;
-    final selection = _webSel;
-    Rect? selRect;
-    if (painter != null && selection.isValid && !selection.isCollapsed) {
-      final boxes = painter.getBoxesForSelection(selection);
-      if (boxes.isNotEmpty) {
-        var r = boxes.first.toRect();
-        for (final b in boxes.skip(1)) {
-          r = r.expandToInclude(b.toRect());
-        }
-        selRect = r.shift(origin);
-      }
-    }
-    final anchorTop = selRect?.top ?? origin.dy;
-    final anchorBottom = selRect?.bottom ?? origin.dy + box.size.height;
-
-    // Prefer the bar above the selection; if it would not fit on screen
-    // (message near the top), flip it below so it never covers the text.
-    double top;
-    if (anchorTop - barHeight - gap >= 8.0) {
-      top = anchorTop - barHeight - gap;
-    } else {
-      top = anchorBottom + gap;
-    }
-    top = top.clamp(8.0, size.height - barHeight - 8.0);
-
-    final centerX = selRect?.center.dx ?? origin.dx + box.size.width / 2;
-    final left = (centerX - barWidth / 2).clamp(
-      8.0,
-      size.width - barWidth - 8,
-    );
-
-    _claimSelectionDismiss();
-    final String? currentFont;
-    final sel = _webSel;
-    if (widget.onFormat != null && sel.isValid && !sel.isCollapsed) {
-      final parsed = parseMarkup(widget.text);
-      final start = sel.start.clamp(0, parsed.plainText.length);
-      final end = sel.end.clamp(0, parsed.plainText.length);
-      final selFont = end > start
-          ? selectionFormat(parsed.runs, start, end).fontFamily
-          : null;
-      // Prefer the selection's own font, else fall back to the app-wide
-      // default so the active row reflects what will be used/persisted.
-      currentFont = (selFont != null && selFont.isNotEmpty)
-          ? selFont
-          : widget.defaultFont;
-    } else {
-      currentFont = null;
-    }
-    _toolbar = OverlayEntry(
-      builder: (ctx) => Positioned(
-        left: left,
-        top: top,
-        child: _MessageSelectionBar(
-          onCopy: () {
-            final text = _selected;
-            _clearSelectionTracking();
-            if (text.isNotEmpty) {
-              AppClipboard.setText(text);
-            }
-          },
-          onReply: widget.onReply == null
-              ? null
-              : () {
-                  final text = _selected;
-                  _clearSelectionTracking();
-                  if (text.isNotEmpty) widget.onReply!(text);
-                },
-          onForward: widget.onForward == null
-              ? null
-              : () {
-                  final text = _selected;
-                  _clearSelectionTracking();
-                  if (text.isNotEmpty) widget.onForward!(text);
-                },
-          onFormat: widget.onFormat == null ? null : _applyFormatToSelection,
-          onSetDefaultFont: widget.onSetDefaultFont,
-          currentFont: currentFont,
-        ),
-      ),
-    );
-    overlay.insert(_toolbar!);
-  }
-
-  static TextStyle _baseStyleFor({
-    required bool hovering,
-    required double scale,
-    required String defaultFont,
-  }) {
-    final base = TextStyle(
-      height: 1.35,
-      fontSize: 15 * scale,
-      color: hovering ? PrivetTheme.signal : PrivetTheme.paper,
-    );
-    if (defaultFont.isEmpty) return base;
-    return messageFontStyle(defaultFont, base);
-  }
-
-  TextSpan _spanFor(
-    String text, {
-    required bool withRecognizers,
-    bool hovering = false,
-  }) {
-    // Hover recolors — don't use the recognizer cache for hover frames.
-    if (!hovering &&
-        _cachedSpanText == text &&
-        _cachedSpanScale == widget.fontScale &&
-        _cachedSpanFont == widget.defaultFont &&
-        _cachedSpan != null &&
-        _cachedWithRecognizers == withRecognizers) {
-      return _cachedSpan!;
-    }
-    for (final r in _linkRecognizers) {
-      r.dispose();
-    }
-    _linkRecognizers.clear();
-
-    final base = _baseStyleFor(
-      hovering: hovering,
-      scale: widget.fontScale,
-      defaultFont: widget.defaultFont,
-    );
-    final parsed = parseMarkup(text);
-    _plainText = parsed.plainText;
-    final spans = <InlineSpan>[];
-
-    for (final seg in styledSegments(parsed)) {
-      final segBase = seg.format.toTextStyle(base);
-      final segText = seg.text;
-      final matches = _urlPattern.allMatches(segText).toList();
-      if (matches.isEmpty) {
-        spans.add(TextSpan(text: segText, style: segBase));
-        continue;
-      }
-      var cursor = 0;
-      for (final m in matches) {
-        if (m.start > cursor) {
-          spans.add(
-            TextSpan(text: segText.substring(cursor, m.start), style: segBase),
-          );
-        }
-        var raw = m.group(0)!;
-        raw = raw.replaceFirst(RegExp(r'''[.,;:!?)\]>'"]+$'''), '');
-        TapGestureRecognizer? recognizer;
-        if (withRecognizers) {
-          recognizer = TapGestureRecognizer()..onTap = () => _openExternal(raw);
-          _linkRecognizers.add(recognizer);
-        }
-        spans.add(
-          TextSpan(
-            text: raw,
-            style: segBase.copyWith(
-              color: PrivetTheme.signal,
-              decoration: TextDecoration.underline,
-              decorationColor: PrivetTheme.signal.withValues(alpha: 0.7),
-            ),
-            recognizer: recognizer,
-          ),
-        );
-        cursor = m.start + raw.length;
-        if (cursor < m.end) {
-          spans.add(
-            TextSpan(text: segText.substring(cursor, m.end), style: segBase),
-          );
-          cursor = m.end;
-        }
-      }
-      if (cursor < segText.length) {
-        spans.add(TextSpan(text: segText.substring(cursor), style: segBase));
-      }
-    }
-
-    final span = TextSpan(style: base, children: spans);
-    if (!hovering) {
-      _cachedSpanText = text;
-      _cachedSpanScale = widget.fontScale;
-      _cachedSpanFont = widget.defaultFont;
-      _cachedWithRecognizers = withRecognizers;
-      _cachedSpan = span;
-    }
-    return span;
-  }
-
-  /// Applies [request] to the current web selection and hands the full desired
-  /// format + plain-text selection to the parent (which edits the message).
-  void _applyFormatToSelection({
-    bool? bold,
-    bool? italic,
-    Color? background,
-    String? fontFamily,
-  }) {
-    final sel = _webSel;
-    final cb = widget.onFormat;
-    if (cb == null || !sel.isValid || sel.isCollapsed) return;
-    final parsed = parseMarkup(widget.text);
-    final start = sel.start.clamp(0, parsed.plainText.length);
-    final end = sel.end.clamp(0, parsed.plainText.length);
-    if (end <= start) return;
-    final cur = selectionFormat(parsed.runs, start, end);
-    // Colors.transparent means "remove the highlight".
-    final bg = background == Colors.transparent
-        ? null
-        : (background ?? cur.background);
-    final desired = TextFormat(
-      bold: bold == null ? cur.bold : (bold ? true : cur.bold),
-      italic: italic == null ? cur.italic : (italic ? true : cur.italic),
-      background: bg,
-      fontFamily: fontFamily == null
-          ? cur.fontFamily
-          : (fontFamily.isEmpty ? null : fontFamily),
-    );
-    cb(TextSelection(baseOffset: start, extentOffset: end), desired);
-    _clearSelectionTracking();
-  }
-
-  void _ensureWebPainter(double maxWidth, {required bool hovering}) {
-    if (_webPainter != null &&
-        _webMaxWidth == maxWidth &&
-        _cachedSpanText == widget.text &&
-        _cachedSpanScale == widget.fontScale &&
-        _cachedSpanFont == widget.defaultFont &&
-        _webPainterScale == widget.fontScale &&
-        _webPainterFont == widget.defaultFont &&
-        !_cachedWithRecognizers &&
-        _webPainterHover == hovering) {
-      return;
-    }
-    _webPainter?.dispose();
-    _webMaxWidth = maxWidth;
-    _webPainterHover = hovering;
-    _webPainterScale = widget.fontScale;
-    _webPainterFont = widget.defaultFont;
-    _webPainter = TextPainter(
-      text: _spanFor(widget.text, withRecognizers: false, hovering: hovering),
-      textDirection: ui.TextDirection.ltr,
-      ellipsis: null,
-    )..layout(maxWidth: maxWidth);
-  }
-
-  int _webOffsetAt(Offset local) {
-    final painter = _webPainter;
-    if (painter == null) return 0;
-    final pos = Offset(
-      local.dx.clamp(0.0, painter.width),
-      local.dy.clamp(0.0, painter.height),
-    );
-    return painter
-        .getPositionForOffset(pos)
-        .offset
-        .clamp(0, _plainText.length);
-  }
-
-  void _setWebSelection(TextSelection next) {
-    final selected = next.isValid && !next.isCollapsed
-        ? next.textInside(_plainText)
-        : '';
-    _webSel = next;
-    _selected = selected;
-    _activeMessageSelection = selected.isEmpty ? null : selected;
-    if (selected.isEmpty) {
-      if (_dismissMessageSelectionUi == _clearSelectionTracking) {
-        _dismissMessageSelectionUi = null;
-      }
-    } else {
-      _claimSelectionDismiss();
-    }
-    _webSelRepaint.tick();
-  }
-
-  String? _linkAt(Offset local) {
-    final offset = _webOffsetAt(local);
-    for (final m in _urlPattern.allMatches(_plainText)) {
-      var raw = m.group(0)!;
-      raw = raw.replaceFirst(RegExp(r'''[.,;:!?)\]>'"]+$'''), '');
-      final end = m.start + raw.length;
-      if (offset >= m.start && offset < end) return raw;
-    }
-    return null;
-  }
-
-  void _openLinkAt(Offset local) {
-    final url = _linkAt(local);
-    if (url != null) _openExternal(url);
-  }
-
-  void _setHoveringLink(bool overLink) {
-    if (_hoveringLink == overLink) return;
-    _hoveringLink = overLink;
-    setPrivetMessageLinkHover(overLink);
-    if (mounted) setState(() {});
-  }
-
-  Widget _buildWebBody({required bool selectable}) {
-    // Hug content: layout at bubble max without LayoutBuilder (IntrinsicWidth
-    // used to need that; Column hug no longer does, but this stays cheap).
-    final maxW = (MediaQuery.sizeOf(context).width * 0.68 - 24).clamp(
-      64.0,
-      10000.0,
-    );
-    // Never rebuild glyphs for hover tint — that relayout felt like low CPU on
-    // Linux. The real system I-beam shows on hover; web paints its accent I-beam
-    // via CSS (web_select_cursor), so no glyph rebuild is needed anywhere.
-    _ensureWebPainter(maxW, hovering: false);
-    final painter = _webPainter!;
-    final size = Size(painter.width, painter.height);
-
-    return MouseRegion(
-      cursor: privetBubbleDragging
-          ? MouseCursor.defer
-          : _hoveringLink
-          ? SystemMouseCursors.click
-          : !selectable
-          ? SystemMouseCursors.basic
-          : SystemMouseCursors.text,
-      onEnter: (event) {
-        if (selectable) {
-          setPrivetMessageSelectHover(true);
-        }
-        _setHoveringLink(_linkAt(event.localPosition) != null);
-      },
-      onExit: (_) {
-        _setHoveringLink(false);
-        if (selectable) {
-          setPrivetMessageSelectHover(false);
-        }
-      },
-      onHover: (event) {
-        _setHoveringLink(_linkAt(event.localPosition) != null);
-      },
-      child: SizedBox(
-        width: size.width,
-        height: size.height,
-        child: Listener(
-          behavior: HitTestBehavior.opaque,
-          onPointerDown: (event) {
-            if (event.buttons == kSecondaryMouseButton) {
-              _blockToolbarForSecondary = true;
-              _removeToolbar();
-              return;
-            }
-            if (event.buttons != kPrimaryMouseButton) return;
-
-            FocusManager.instance.primaryFocus?.unfocus();
-
-            _messageBodyPointerEpoch++;
-            privetMessageBodyClaimedPointer = true;
-            _webSelectPointer = event.pointer;
-            _webSelectOrigin = event.localPosition;
-            _webSelectBase = _webOffsetAt(event.localPosition);
-            _webSelectMoved = false;
-            _webMultiTapSelect = false;
-            privetMessageSelectionDragging = false;
-            _removeToolbar();
-
-            // Mobile: tap only (links / long-press menu). No drag-select.
-            if (!selectable) return;
-
-            _updateWebTapCount(event.localPosition);
-            if (_webTapCount == 2) {
-              _selectWebWordAt(_webSelectBase);
-              setState(() {});
-            } else if (_webTapCount >= 3) {
-              _selectWebAll();
-              _webTapCount = 0;
-              setState(() {});
-            }
-
-            if (event.kind == PointerDeviceKind.mouse) {
-              _releaseWebScrollHold();
-              _webScrollHold = Scrollable.maybeOf(
-                context,
-              )?.position.hold(() {});
-            }
-          },
-          onPointerMove: (event) {
-            if (!selectable) return;
-            if (_webSelectPointer != event.pointer) return;
-            if (_blockToolbarForSecondary) return;
-            final origin = _webSelectOrigin;
-            if (origin == null) return;
-
-            final delta = event.localPosition - origin;
-            if (!_webSelectMoved) {
-              if (delta.distance < 2) return;
-              _webSelectMoved = true;
-              _webMultiTapSelect = false;
-              privetMessageSelectionDragging = true;
-            }
-
-            final extent = _webOffsetAt(event.localPosition);
-            _setWebSelection(
-              TextSelection(baseOffset: _webSelectBase, extentOffset: extent),
-            );
-          },
-          onPointerUp: (event) {
-            if (_webSelectPointer != event.pointer) return;
-            if (!selectable) {
-              _webSelectPointer = null;
-              final origin = _webSelectOrigin;
-              _webSelectOrigin = null;
-              if (_blockToolbarForSecondary) {
-                _blockToolbarForSecondary = false;
-                return;
-              }
-              // Tap (no drag): open link under finger when present.
-              if (origin != null &&
-                  (event.localPosition - origin).distance < kTouchSlop) {
-                _openLinkAt(event.localPosition);
-              }
-              return;
-            }
-            _finishWebPointer(event.localPosition);
-          },
-          onPointerCancel: (event) {
-            if (_webSelectPointer != event.pointer) return;
-            if (!selectable) {
-              _webSelectPointer = null;
-              _webSelectOrigin = null;
-              _blockToolbarForSecondary = false;
-              return;
-            }
-            _finishWebPointer(null);
-          },
-          child: CustomPaint(
-            key: _hostKey,
-            size: size,
-            painter: _WebMessageTextPainter(
-              textPainter: painter,
-              getSelection: () => _webSel,
-              repaint: _webSelRepaint,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _finishWebPointer(Offset? local) {
-    _webSelectPointer = null;
-    _webSelectOrigin = null;
-    _releaseWebScrollHold();
-    privetMessageSelectionDragging = false;
-
-    if (_blockToolbarForSecondary) {
-      _blockToolbarForSecondary = false;
-      _webMultiTapSelect = false;
-      return;
-    }
-
-    if (!_webSelectMoved) {
-      if (_webMultiTapSelect) {
-        _webMultiTapSelect = false;
-        if (_selected.isEmpty || _reactionMenuOpen) {
-          _removeToolbar();
-          if (mounted) setState(() {});
-          return;
-        }
-        if (mounted) setState(() {});
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || _selected.isEmpty || _reactionMenuOpen) return;
-          _showToolbar();
-        });
-        return;
-      }
-      // Click on this message's text: clear selection if any, else open link.
-      if (_webSel.isValid && !_webSel.isCollapsed) {
-        _clearSelectionTracking();
-        return;
-      }
-      if (local != null) _openLinkAt(local);
-      return;
-    }
-
-    _webMultiTapSelect = false;
-    if (_selected.isEmpty || _reactionMenuOpen) {
-      _webSelectMoved = false;
-      _removeToolbar();
-      if (mounted) setState(() {});
-      return;
-    }
-
-    // Mouseup: force a frame so the green highlight is visible immediately
-    // (without needing to leave the text / end hover).
-    if (mounted) setState(() {});
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _selected.isEmpty || _reactionMenuOpen) return;
-      _showToolbar();
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // Desktop / wide web: custom TextPainter selection (green highlight).
-    // Mobile / compact: tap only — long-press opens the reaction menu; no
-    // drag-select (matches typical mobile messengers).
-    return _buildWebBody(selectable: !PrivetTheme.isCompact(context));
-  }
-}
-
-class _WebSelRepaint extends ChangeNotifier {
-  void tick() => notifyListeners();
-}
-
-class _WebMessageTextPainter extends CustomPainter {
-  _WebMessageTextPainter({
-    required this.textPainter,
-    required this.getSelection,
-    required Listenable repaint,
-  }) : super(repaint: repaint);
-
-  final TextPainter textPainter;
-  final ValueGetter<TextSelection> getSelection;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final selection = getSelection();
-    if (selection.isValid && !selection.isCollapsed) {
-      final boxes = textPainter.getBoxesForSelection(selection);
-      final paint = Paint()..color = PrivetTheme.signal.withValues(alpha: 0.45);
-      for (final box in boxes) {
-        canvas.drawRRect(
-          RRect.fromRectAndRadius(box.toRect(), const Radius.circular(2)),
-          paint,
-        );
-      }
-    }
-    textPainter.paint(canvas, Offset.zero);
-  }
-
-  @override
-  bool shouldRepaint(covariant _WebMessageTextPainter oldDelegate) {
-    return oldDelegate.textPainter != textPainter;
-  }
-}
-
-class _MessageSelectionBar extends StatelessWidget {
-  const _MessageSelectionBar({
-    required this.onCopy,
-    this.onReply,
-    this.onForward,
-    this.onFormat,
-    this.onSetDefaultFont,
-    this.currentFont,
-  });
-
-  final VoidCallback onCopy;
-  final VoidCallback? onReply;
-  final VoidCallback? onForward;
-
-  /// Applies bold / italic / highlight / font to the current selection.
-  final void Function({
-    bool? bold,
-    bool? italic,
-    Color? background,
-    String? fontFamily,
-  })?
-      onFormat;
-
-  /// Persists a font picked in this menu as the app-wide default message font.
-  final ValueChanged<String>? onSetDefaultFont;
-
-  /// Font family of the current selection ('' or null = default), used to
-  /// highlight the active row in the font picker.
-  final String? currentFont;
-
-  @override
-  Widget build(BuildContext context) {
-    Widget action({
-      required Widget child,
-      required VoidCallback onTap,
-      String? tooltip,
-    }) {
-      return Tooltip(
-        message: tooltip ?? '',
-        waitDuration: const Duration(milliseconds: 400),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(8),
-          mouseCursor: SystemMouseCursors.click,
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-            child: child,
-          ),
-        ),
-      );
-    }
-
-    Widget textAction({
-      required String label,
-      required VoidCallback onTap,
-      String? tooltip,
-    }) {
-      return action(
-        tooltip: tooltip ?? label,
-        onTap: onTap,
-        child: Text(
-          label,
-          style: GoogleFonts.ibmPlexSans(
-            fontSize: 14,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      );
-    }
-
-    void pickHighlight() {
-      final box = context.findRenderObject() as RenderBox?;
-      if (box == null || !box.hasSize || onFormat == null) return;
-      showMessageHighlightPicker(
-        context,
-        anchor: box.localToGlobal(Offset.zero) & box.size,
-      ).then((color) {
-        if (color == null || onFormat == null) return;
-        onFormat!(background: color);
-      });
-    }
-
-    void pickFont() {
-      final overlay = Overlay.maybeOf(context);
-      if (overlay == null || onFormat == null) return;
-      final box = context.findRenderObject() as RenderBox?;
-      if (box == null || !box.hasSize) return;
-      showMessageFontPicker(
-        context,
-        anchor: box.localToGlobal(Offset.zero) & box.size,
-        current: currentFont,
-      ).then((value) {
-        if (value == null) return;
-        // Redact the selection and keep the choice as the app-wide default
-        // message font for every chat.
-        onFormat!(fontFamily: value);
-        onSetDefaultFont?.call(value);
-      });
-    }
-
-    final hasFormat = onFormat != null;
-
-    return Material(
-      color: PrivetTheme.panelElevated,
-      elevation: 12,
-      shadowColor: Colors.black54,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: PrivetTheme.line),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            action(
-              tooltip: 'Copy',
-              onTap: onCopy,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.copy_rounded, size: 16, color: PrivetTheme.signal),
-                  const SizedBox(width: 6),
-                  Text(
-                    'Copy',
-                    style: GoogleFonts.ibmPlexSans(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (onReply != null)
-              action(
-                tooltip: 'Reply',
-                onTap: onReply!,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.reply_rounded,
-                        size: 16, color: PrivetTheme.signal),
-                    const SizedBox(width: 6),
-                    Text(
-                      'Reply',
-                      style: GoogleFonts.ibmPlexSans(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            if (onForward != null)
-              action(
-                tooltip: 'Forward',
-                onTap: onForward!,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.shortcut_rounded,
-                        size: 16, color: PrivetTheme.signal),
-                    const SizedBox(width: 6),
-                    Text(
-                      'Forward',
-                      style: GoogleFonts.ibmPlexSans(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            if (hasFormat) ...[
-              Container(
-                width: 1,
-                height: 22,
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-                color: PrivetTheme.line,
-              ),
-              textAction(
-                label: 'B',
-                tooltip: 'Bold',
-                onTap: () => onFormat!(bold: true),
-              ),
-              textAction(
-                label: 'I',
-                tooltip: 'Italic',
-                onTap: () => onFormat!(italic: true),
-              ),
-              action(
-                tooltip: 'Highlight',
-                onTap: pickHighlight,
-                child: Icon(
-                  Icons.border_color_rounded,
-                  size: 18,
-                  color: PrivetTheme.signal,
-                ),
-              ),
-              action(
-                tooltip: 'Font family',
-                onTap: pickFont,
-                child: Text(
-                  'Aa',
-                  style: currentFont == null || currentFont!.isEmpty
-                      ? GoogleFonts.ibmPlexSans(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                        )
-                      : messageFontStyle(
-                          currentFont!,
-                          GoogleFonts.ibmPlexSans(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ).copyWith(color: PrivetTheme.signal),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
+/// Downloads [url] with [filename]. On native platforms the file lands in the
+/// OS Downloads folder and the saved path is confirmed via snackbar; on web
+/// the browser's own download handles it (no snackbar).
+Future<void> _downloadMedia(
+  BuildContext context,
+  String url, {
+  required String filename,
+}) async {
+  final saved = await downloadMedia(url, filename: filename);
+  if (saved == null || !context.mounted) return;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  messenger?.showSnackBar(
+    SnackBar(content: Text('Saved to $saved')),
+  );
 }
 
 class _LinkPreviewCard extends StatelessWidget {
@@ -3593,10 +2682,6 @@ class _LinkPreviewCard extends StatelessWidget {
                   fit: BoxFit.cover,
                   cacheWidth: ImageDecodeCaps.cacheWidth(
                     260,
-                    dpr: MediaQuery.devicePixelRatioOf(context),
-                  ),
-                  cacheHeight: ImageDecodeCaps.cacheHeight(
-                    136,
                     dpr: MediaQuery.devicePixelRatioOf(context),
                   ),
                   errorBuilder: (_, error, stack) => const SizedBox.shrink(),

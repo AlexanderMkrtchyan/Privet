@@ -12,8 +12,9 @@ import '../util/composer_media_attach.dart';
 import '../util/copy_image.dart';
 import '../util/image_context_menu.dart';
 import '../util/low_resource.dart';
-import '../util/media_download.dart';
+import '../util/media_cache.dart';
 import '../util/web_select_cursor.dart';
+import 'cached_media_image.dart';
 import 'image_annotation.dart';
 
 /// Full-screen messenger-style image viewer: tap backdrop / close to dismiss,
@@ -71,6 +72,12 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   static const double _minScale = 1;
   static const double _maxScale = 4;
   static const double _zoomStep = 0.5;
+
+  /// ScaffoldMessenger scoped to this full-screen dialog. The app's root
+  /// messenger renders its snackbars behind the lightbox, so confirmations
+  /// ("Saved to …") must be shown inside the dialog to be visible.
+  final GlobalKey<ScaffoldMessengerState> _snackKey =
+      GlobalKey<ScaffoldMessengerState>();
 
   late final PageController _pageController;
   late final List<TransformationController> _transforms;
@@ -194,6 +201,20 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   }
 
   void _close() => Navigator.of(context).maybePop();
+
+  /// Downloads the current image, serving cached bytes when available so the
+  /// save is instant instead of a fresh server download. Confirms in the
+  /// dialog's own messenger — the root one is hidden behind this overlay.
+  Future<void> _downloadCurrent() async {
+    final saved = await downloadMediaFromCache(_url, filename: _downloadName);
+    if (!mounted || saved == null) return;
+    _snackKey.currentState?.showSnackBar(
+      SnackBar(
+        content: Text('Saved to $saved'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
 
   void _onPageChanged(int page) {
     _transforms[_index].value = Matrix4.identity();
@@ -380,13 +401,11 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
 
   void _showExportError([String message = 'Could not add annotated image']) {
     if (!mounted) return;
-    final messenger = ScaffoldMessenger.maybeOf(context);
+    final messenger =
+        _snackKey.currentState ?? ScaffoldMessenger.maybeOf(context);
     if (messenger != null) {
       messenger.showSnackBar(
-        SnackBar(
-          content: Text(message),
-          behavior: SnackBarBehavior.floating,
-        ),
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
       );
       return;
     }
@@ -409,10 +428,12 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
       data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
 
   Future<Uint8List?> _captureViaBoundary() async {
-    final imageBoundary = _captureImageKeys[_index].currentContext
-        ?.findRenderObject() as RenderRepaintBoundary?;
-    final annotBoundary = _captureAnnotKeys[_index].currentContext
-        ?.findRenderObject() as RenderRepaintBoundary?;
+    final imageBoundary =
+        _captureImageKeys[_index].currentContext?.findRenderObject()
+            as RenderRepaintBoundary?;
+    final annotBoundary =
+        _captureAnnotKeys[_index].currentContext?.findRenderObject()
+            as RenderRepaintBoundary?;
     if (imageBoundary == null ||
         annotBoundary == null ||
         !imageBoundary.hasSize ||
@@ -659,8 +680,8 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
             child: MouseRegion(
               cursor: _zoomed
                   ? (_grabDragging
-                      ? SystemMouseCursors.grabbing
-                      : SystemMouseCursors.grab)
+                        ? SystemMouseCursors.grabbing
+                        : SystemMouseCursors.grab)
                   : SystemMouseCursors.basic,
               child: Listener(
                 behavior: HitTestBehavior.translucent,
@@ -672,9 +693,12 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                       url: _url,
                       filename: _downloadName,
                       globalPosition: event.position,
+                      // Confirm inside the lightbox, not behind it.
+                      messengerKey: _snackKey,
                     );
                   }
-                  if (event.buttons & kPrimaryMouseButton != 0 && !_grabDragging) {
+                  if (event.buttons & kPrimaryMouseButton != 0 &&
+                      !_grabDragging) {
                     setState(() => _grabDragging = true);
                   }
                 },
@@ -685,117 +709,123 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                   if (_grabDragging) setState(() => _grabDragging = false);
                 },
                 child: InteractiveViewer(
-          transformationController: _transforms[i],
-          minScale: _minScale,
-          maxScale: _maxScale,
-          panEnabled: !_annotateMode,
-          scaleEnabled: !_annotateMode,
-          clipBehavior: Clip.none,
-          onInteractionUpdate: (_) => _syncZoomed(),
-          onInteractionEnd: (_) => _syncZoomed(),
-          child: Stack(
-            fit: StackFit.passthrough,
-            children: [
-              // Image lives in its own repaint boundary so draw ticks (which
-              // only touch the annotation overlay) never re-rasterize it —
-              // on web that re-render of a large image was the freezing.
-              RepaintBoundary(
-                key: _captureImageKeys[i],
-                child: Image.network(
-                  widget.urls[i],
-                  fit: BoxFit.contain,
-                  gaplessPlayback: true,
-                  // Keep full-res bytes in the local copy cache while the
-                  // image is on screen — "Copy image" never re-downloads.
-                  frameBuilder: (context, child, frame, sync) {
-                    if (frame != null) {
-                      unawaited(prefetchImageForCopy(widget.urls[i]));
-                    }
-                    return child;
-                  },
-                  errorBuilder: (_, error, stack) => Padding(
-                    padding: const EdgeInsets.all(32),
-                    child: Text(
-                      'Image unavailable',
-                      style: TextStyle(color: PrivetTheme.mist),
-                    ),
-                  ),
-                ),
-              ),
-              Positioned.fill(
-                child: IgnorePointer(
-                  ignoring: !_annotateMode,
-                  child: MouseRegion(
-                    cursor: SystemMouseCursors.none,
-                    onEnter: (_) => setPrivetAnnotHover(true),
-                    onHover: (event) {
-                      setPrivetAnnotHover(true);
-                      _cursorLocal = event.localPosition;
-                      _cursorOver = true;
-                      // While drawing, onPanUpdate already tracks the pen —
-                      // skip the redundant hover tick (Chrome fires hover for
-                      // every pixel during a drag, doubling repaint rate).
-                      if (_draft == null) _bumpCursor();
-                    },
-                    onExit: (_) {
-                      setPrivetAnnotHover(false);
-                      _cursorOver = false;
-                      _cursorLocal = null;
-                      _bumpCursor();
-                    },
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onPanStart: (details) =>
-                          _onDrawStart(i, details.localPosition),
-                      onPanUpdate: (details) =>
-                          _onDrawUpdate(i, details.localPosition),
-                      onPanEnd: (_) => _onDrawEnd(i),
-                      onPanCancel: () {
-                        _draft = null;
-                        _bumpDraft();
-                      },
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          // Marks + in-progress stroke repaint in their own
-                          // small boundary — the image above stays cached.
-                          RepaintBoundary(
-                            key: _captureAnnotKeys[i],
-                            child: ValueListenableBuilder<int>(
-                              valueListenable: _draftTick,
-                              builder: (context, _, child) {
-                                final draft = i == _index ? _draft : null;
-                                return CustomPaint(
-                                  painter: ImageAnnotationPainter(
-                                    marks: marks,
-                                    draft: draft,
-                                    cachedPicture: _markPictures[i],
-                                  ),
-                                  child: const SizedBox.expand(),
-                                );
-                              },
+                  transformationController: _transforms[i],
+                  minScale: _minScale,
+                  maxScale: _maxScale,
+                  panEnabled: !_annotateMode,
+                  scaleEnabled: !_annotateMode,
+                  clipBehavior: Clip.none,
+                  onInteractionUpdate: (_) => _syncZoomed(),
+                  onInteractionEnd: (_) => _syncZoomed(),
+                  child: Stack(
+                    fit: StackFit.passthrough,
+                    children: [
+                      // Image lives in its own repaint boundary so draw ticks (which
+                      // only touch the annotation overlay) never re-rasterize it —
+                      // on web that re-render of a large image was the freezing.
+                      RepaintBoundary(
+                        key: _captureImageKeys[i],
+                        // Renders from the on-device cache when the image is already
+                        // local (instant open, no download); otherwise loads over the
+                        // network and warms the cache in the background.
+                        child: CachedMediaImage(
+                          url: widget.urls[i],
+                          fit: BoxFit.contain,
+                          gaplessPlayback: true,
+                          // Keep full-res bytes in the local copy cache while the
+                          // image is on screen — "Copy image" never re-downloads.
+                          frameBuilder: (context, child, frame, sync) {
+                            if (frame != null) {
+                              unawaited(prefetchImageForCopy(widget.urls[i]));
+                            }
+                            return child;
+                          },
+                          errorBuilder: (_, error, stack) => Padding(
+                            padding: const EdgeInsets.all(32),
+                            child: Text(
+                              'Image unavailable',
+                              style: TextStyle(color: PrivetTheme.mist),
                             ),
                           ),
-                          if (i == _index)
-                            ValueListenableBuilder<int>(
-                              valueListenable: _cursorTick,
-                              builder: (context, _, child) => _toolCursor(),
-                            ),
-                        ],
+                        ),
                       ),
-                    ),
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          ignoring: !_annotateMode,
+                          child: MouseRegion(
+                            cursor: SystemMouseCursors.none,
+                            onEnter: (_) => setPrivetAnnotHover(true),
+                            onHover: (event) {
+                              setPrivetAnnotHover(true);
+                              _cursorLocal = event.localPosition;
+                              _cursorOver = true;
+                              // While drawing, onPanUpdate already tracks the pen —
+                              // skip the redundant hover tick (Chrome fires hover for
+                              // every pixel during a drag, doubling repaint rate).
+                              if (_draft == null) _bumpCursor();
+                            },
+                            onExit: (_) {
+                              setPrivetAnnotHover(false);
+                              _cursorOver = false;
+                              _cursorLocal = null;
+                              _bumpCursor();
+                            },
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onPanStart: (details) =>
+                                  _onDrawStart(i, details.localPosition),
+                              onPanUpdate: (details) =>
+                                  _onDrawUpdate(i, details.localPosition),
+                              onPanEnd: (_) => _onDrawEnd(i),
+                              onPanCancel: () {
+                                _draft = null;
+                                _bumpDraft();
+                              },
+                              child: Stack(
+                                fit: StackFit.expand,
+                                children: [
+                                  // Marks + in-progress stroke repaint in their own
+                                  // small boundary — the image above stays cached.
+                                  RepaintBoundary(
+                                    key: _captureAnnotKeys[i],
+                                    child: ValueListenableBuilder<int>(
+                                      valueListenable: _draftTick,
+                                      builder: (context, _, child) {
+                                        final draft = i == _index
+                                            ? _draft
+                                            : null;
+                                        return CustomPaint(
+                                          painter: ImageAnnotationPainter(
+                                            marks: marks,
+                                            draft: draft,
+                                            cachedPicture: _markPictures[i],
+                                          ),
+                                          child: const SizedBox.expand(),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                  if (i == _index)
+                                    ValueListenableBuilder<int>(
+                                      valueListenable: _cursorTick,
+                                      builder: (context, _, child) =>
+                                          _toolCursor(),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
-            ],
+            ),
           ),
         ),
-      ),
-    ),
-    ),
-  ),
-],
-);
+      ],
+    );
   }
 
   Widget _addToMessageButton() {
@@ -860,10 +890,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (_hasMarks) ...[
-          _addToMessageButton(),
-          const SizedBox(height: 10),
-        ],
+        if (_hasMarks) ...[_addToMessageButton(), const SizedBox(height: 10)],
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: BoxDecoration(
@@ -894,10 +921,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                 onPressed: () => _selectTool(ImageAnnotTool.arrow),
               ),
               const SizedBox(width: 10),
-              _InkSwatchButton(
-                color: _ink,
-                onPressed: _cycleInk,
-              ),
+              _InkSwatchButton(color: _ink, onPressed: _cycleInk),
               const SizedBox(width: 6),
               _ChromeIconButton(
                 tooltip: 'Undo',
@@ -930,10 +954,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (_hasMarks) ...[
-          _addToMessageButton(),
-          const SizedBox(height: 10),
-        ],
+        if (_hasMarks) ...[_addToMessageButton(), const SizedBox(height: 10)],
         if (canPrev || canNext)
           Row(
             children: [
@@ -981,10 +1002,7 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
             _ChromeIconButton(
               tooltip: 'Download',
               icon: Icons.download_rounded,
-              onPressed: () => downloadMedia(
-                _url,
-                filename: _downloadName,
-              ),
+              onPressed: _downloadCurrent,
             ),
           ],
         ),
@@ -995,99 +1013,108 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   @override
   Widget build(BuildContext context) {
     final canPrev = _gallery && !_zoomed && !_annotateMode && _index > 0;
-    final canNext = _gallery &&
+    final canNext =
+        _gallery &&
         !_zoomed &&
         !_annotateMode &&
         _index < widget.urls.length - 1;
 
-    return Focus(
-      autofocus: true,
-      onKeyEvent: _onKey,
-      child: Material(
-        type: MaterialType.transparency,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: (_zoomed || _annotateMode) ? null : _close,
-              child: const SizedBox.expand(),
-            ),
-            PageView.builder(
-              controller: _pageController,
-              itemCount: widget.urls.length,
-              physics: (_zoomed || _annotateMode)
-                  ? const NeverScrollableScrollPhysics()
-                  : const PageScrollPhysics(),
-              onPageChanged: _onPageChanged,
-              itemBuilder: (context, i) => _buildImagePage(i),
-            ),
-            // Chrome overlays only — middle stays pass-through so drawing and
-            // tool buttons are not fighting a full-screen hit target.
-            SafeArea(
-              child: Align(
-                alignment: Alignment.topCenter,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
-                  child: MouseRegion(
-                    onEnter: (_) => setPrivetAnnotHover(false),
-                    child: Row(
-                      children: [
-                        if (_gallery)
-                          Padding(
-                            padding: const EdgeInsets.only(left: 8),
-                            child: Text(
-                              '${_index + 1} / ${widget.urls.length}',
-                              style: TextStyle(
-                                color:
-                                    PrivetTheme.paper.withValues(alpha: 0.85),
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
+    return ScaffoldMessenger(
+      key: _snackKey,
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: Focus(
+          autofocus: true,
+          onKeyEvent: _onKey,
+          child: Material(
+            type: MaterialType.transparency,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: (_zoomed || _annotateMode) ? null : _close,
+                  child: const SizedBox.expand(),
+                ),
+                PageView.builder(
+                  controller: _pageController,
+                  itemCount: widget.urls.length,
+                  physics: (_zoomed || _annotateMode)
+                      ? const NeverScrollableScrollPhysics()
+                      : const PageScrollPhysics(),
+                  onPageChanged: _onPageChanged,
+                  itemBuilder: (context, i) => _buildImagePage(i),
+                ),
+                // Chrome overlays only — middle stays pass-through so drawing and
+                // tool buttons are not fighting a full-screen hit target.
+                SafeArea(
+                  child: Align(
+                    alignment: Alignment.topCenter,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+                      child: MouseRegion(
+                        onEnter: (_) => setPrivetAnnotHover(false),
+                        child: Row(
+                          children: [
+                            if (_gallery)
+                              Padding(
+                                padding: const EdgeInsets.only(left: 8),
+                                child: Text(
+                                  '${_index + 1} / ${widget.urls.length}',
+                                  style: TextStyle(
+                                    color: PrivetTheme.paper.withValues(
+                                      alpha: 0.85,
+                                    ),
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
                               ),
-                            ),
-                          ),
-                        if (_annotateMode)
-                          Padding(
-                            padding: EdgeInsets.only(
-                              left: _gallery ? 12 : 8,
-                            ),
-                            child: Text(
-                              'Draw on image',
-                              style: TextStyle(
-                                color:
-                                    PrivetTheme.paper.withValues(alpha: 0.7),
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
+                            if (_annotateMode)
+                              Padding(
+                                padding: EdgeInsets.only(
+                                  left: _gallery ? 12 : 8,
+                                ),
+                                child: Text(
+                                  'Draw on image',
+                                  style: TextStyle(
+                                    color: PrivetTheme.paper.withValues(
+                                      alpha: 0.7,
+                                    ),
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
                               ),
+                            const Spacer(),
+                            _ChromeIconButton(
+                              tooltip: 'Close',
+                              icon: Icons.close_rounded,
+                              onPressed: _close,
                             ),
-                          ),
-                        const Spacer(),
-                        _ChromeIconButton(
-                          tooltip: 'Close',
-                          icon: Icons.close_rounded,
-                          onPressed: _close,
+                          ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ),
-            SafeArea(
-              child: Align(
-                alignment: Alignment.bottomCenter,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-                  child: MouseRegion(
-                    onEnter: (_) => setPrivetAnnotHover(false),
-                    child: _annotateMode
-                        ? _annotateToolbar()
-                        : _viewToolbar(canPrev: canPrev, canNext: canNext),
+                SafeArea(
+                  child: Align(
+                    alignment: Alignment.bottomCenter,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                      child: MouseRegion(
+                        onEnter: (_) => setPrivetAnnotHover(false),
+                        child: _annotateMode
+                            ? _annotateToolbar()
+                            : _viewToolbar(canPrev: canPrev, canNext: canNext),
+                      ),
+                    ),
                   ),
                 ),
-              ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -1179,10 +1206,7 @@ class _CursorOverlayPainter extends CustomPainter {
 }
 
 class _InkSwatchButton extends StatelessWidget {
-  const _InkSwatchButton({
-    required this.color,
-    required this.onPressed,
-  });
+  const _InkSwatchButton({required this.color, required this.onPressed});
 
   final Color color;
   final VoidCallback onPressed;

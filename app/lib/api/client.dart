@@ -236,6 +236,19 @@ class ApiClient {
         .toList();
   }
 
+  /// Every media item shared in the conversation's messages, newest first —
+  /// the complete history for the Shared Media browser (not just loaded pages).
+  Future<List<SharedMediaItem>> sharedMedia(String conversationId) async {
+    final res = await http.get(
+      _u('/conversations/$conversationId/media'),
+      headers: _authHeaders,
+    );
+    final data = _decode(res);
+    return (data['items'] as List)
+        .map((e) => SharedMediaItem.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
   Future<List<PrivetUser>> members(String conversationId) async {
     final res = await http.get(
       _u('/conversations/$conversationId/members'),

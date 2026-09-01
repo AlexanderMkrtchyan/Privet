@@ -15,9 +15,14 @@ import '../util/clipboard_files.dart';
 import '../util/image_context_menu.dart';
 import '../util/perf.dart';
 import '../util/privet_sheet.dart';
+import '../util/rich_text_markup.dart';
 import 'avatar.dart';
+import 'cached_media_image.dart';
+import 'composer_autocorrect_controller.dart';
+import 'message_font_picker.dart';
 import 'payment_spending_insights.dart';
 import 'privet_date_picker.dart';
+import 'selectable_markup_text.dart';
 import 'web_attach_button.dart';
 
 /// Shared outer height for chat header chips (tasks, reminders, media, calls).
@@ -141,15 +146,22 @@ class _UnassignSentinel {
   const _UnassignSentinel();
 }
 
-/// One row of a task's change log.
+/// One row of a task's change log. When [viewedTaskId] is the id of the task
+/// whose details are open, rows that actually belong to a subtask are labeled
+/// with that subtask's text so a parent's merged feed stays readable.
 class _TaskActivityRow extends StatelessWidget {
-  const _TaskActivityRow({required this.activity});
+  const _TaskActivityRow({required this.activity, this.viewedTaskId});
 
   final TaskActivity activity;
+  final String? viewedTaskId;
 
   @override
   Widget build(BuildContext context) {
     final (icon, color, text) = _describe();
+    final childLabel =
+        viewedTaskId != null && activity.taskId != viewedTaskId
+            ? _taskLabel(activity.taskBody)
+            : null;
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Row(
@@ -170,6 +182,14 @@ class _TaskActivityRow extends StatelessWidget {
                     style: const TextStyle(fontWeight: FontWeight.w600),
                   ),
                   TextSpan(text: ' $text'),
+                  if (childLabel != null)
+                    TextSpan(
+                      text: ' · $childLabel',
+                      style: TextStyle(
+                        color: PrivetTheme.mist,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -185,6 +205,14 @@ class _TaskActivityRow extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// Short plain-text label for the task an activity row belongs to.
+  String? _taskLabel(String? body) {
+    if (body == null) return null;
+    final plain = markupToPlain(body).trim();
+    if (plain.isEmpty) return null;
+    return plain.length <= 48 ? plain : '${plain.substring(0, 48).trimRight()}…';
   }
 
   (IconData, Color, String) _describe() {
@@ -487,7 +515,7 @@ class TaskHeaderChip extends StatelessWidget {
         ? PrivetTheme.signal.withValues(alpha: 0.22)
         : PrivetTheme.signalDim.withValues(alpha: 0.18);
     final name = (pinned?.body.trim().isNotEmpty == true)
-        ? pinned!.body.trim()
+        ? markupToPlain(pinned!.body).trim()
         : 'Task';
     final progressLabel = done ? 'done' : '${prog.done}/${prog.total}';
     final label = '$name · $progressLabel';
@@ -845,7 +873,10 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     final priority = _filterPriority;
     final assignee = _filterAssignee;
     return items.where((t) {
-      if (q.isNotEmpty && !t.body.toLowerCase().contains(q)) return false;
+      if (q.isNotEmpty &&
+          !markupToPlain(t.body).toLowerCase().contains(q)) {
+        return false;
+      }
       if (status != null && t.status != status) return false;
       if (priority != null && t.priority != priority) return false;
       if (assignee != null) {
@@ -1108,7 +1139,9 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
   /// Restore a done (archived) task back onto the open board, letting the user
   /// pick which status it returns in.
   Future<void> _restoreTask(TaskItem item) async {
-    final label = item.body.trim().isNotEmpty ? item.body.trim() : 'this task';
+    final label = markupToPlain(item.body).trim().isNotEmpty
+        ? markupToPlain(item.body).trim()
+        : 'this task';
     final status = await showPrivetSheet<String>(
       context: context,
       backgroundColor: PrivetTheme.panel,
@@ -1211,12 +1244,21 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                 child: ListView(
                   padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
                   children: [
-                    Text(
-                      item.body,
-                      style: GoogleFonts.ibmPlexSans(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: PrivetTheme.paper,
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: LayoutBuilder(
+                        builder: (context, constraints) =>
+                            SelectableMarkupText(
+                          text: item.body,
+                          baseStyle: GoogleFonts.ibmPlexSans(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: PrivetTheme.paper,
+                          ),
+                          maxWidth: constraints.maxWidth,
+                          onFormat: (sel, f) =>
+                              _applyTaskBodyFormat(item, sel, f),
+                        ),
                       ),
                     ),
                     const SizedBox(height: 10),
@@ -1263,7 +1305,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                         ),
                       ),
                       const SizedBox(height: 6),
-                      for (final a in activity) _TaskActivityRow(activity: a),
+                      for (final a in activity) _TaskActivityRow(activity: a, viewedTaskId: item.id),
                     ],
                   ],
                 ),
@@ -1490,6 +1532,13 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     );
   }
 
+  /// Applies a redaction (bold / italic / highlight / font) to a selected range
+  /// of a task's text and persists the re-serialized markup.
+  void _applyTaskBodyFormat(TaskItem item, TextSelection sel, TextFormat f) {
+    _applyBodyFormatToItem(item, sel, f,
+        (body) => widget.state.updateTaskBody(item, body));
+  }
+
   /// Wires a task into a [_TaskRow] with all edit handlers (shared by the
   /// list view, history section, and kanban cards).
   Widget _buildTaskRow({
@@ -1519,6 +1568,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         onSaveBody: history
             ? null
             : (body) => widget.state.updateTaskBody(item, body),
+        onFormatBody: history ? null : (sel, f) => _applyTaskBodyFormat(item, sel, f),
         onDelete: history ? null : () => _confirmDeleteTask(item),
         onRemoveAttachment: history
             ? null
@@ -1875,7 +1925,22 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     final paymentHistory = historyAll.where((r) => r.isPayment).toList();
     final reminderHistory = historyAll.where((r) => !r.isPayment).toList();
 
-    return Stack(
+    // Any pointer-up that was not claimed by selectable task text clears the
+    // floating selection bar (mirrors the chat list's empty-space behavior).
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerUp: (_) {
+        if (MarkupTextSelectionScope.dragging) return;
+        if (MarkupTextSelectionScope.bodyClaimedPointer) {
+          MarkupTextSelectionScope.bodyClaimedPointer = false;
+          return;
+        }
+        MarkupTextSelectionScope.clearSelection();
+      },
+      onPointerCancel: (_) {
+        MarkupTextSelectionScope.bodyClaimedPointer = false;
+      },
+      child: Stack(
       children: [
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2188,6 +2253,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         ),
       ),
       ],
+      ),
     );
   }
 }
@@ -2999,49 +3065,320 @@ class _TaskProgressBar extends StatelessWidget {
   }
 }
 
-/// Explicit edit dialog for a task's text (Save on the button or Enter).
-Future<void> _promptEditTaskText(
+/// Opens the task text editor. The body may carry markup, so the dialog is a
+/// small rich-text editor with the same formatting tools as chat messages
+/// (bold / italic / highlight / font) plus a clear-format action. Resolves
+/// with the re-serialized markup, or null when dismissed / left empty.
+Future<String?> _promptEditTaskText(
   BuildContext context, {
   required String title,
   required String initial,
-  required ValueChanged<String> onSave,
 }) async {
-  final ctrl = TextEditingController(text: initial);
-  final saved = await showDialog<bool>(
+  return showDialog<String>(
     context: context,
-    builder: (ctx) => AlertDialog(
+    builder: (ctx) => _TaskEditDialog(title: title, initialMarkup: initial),
+  );
+}
+
+class _TaskEditDialog extends StatefulWidget {
+  const _TaskEditDialog({
+    required this.title,
+    required this.initialMarkup,
+  });
+
+  final String title;
+  final String initialMarkup;
+
+  @override
+  State<_TaskEditDialog> createState() => _TaskEditDialogState();
+}
+
+class _TaskEditDialogState extends State<_TaskEditDialog> {
+  late final ComposerAutocorrectController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = ComposerAutocorrectController();
+    // Spell underline / autocorrect belong to the composer; the task editor
+    // only reuses the controller for its format-run tracking + markup load.
+    _ctrl.spellCheckEnabled = false;
+    _ctrl.loadMarkup(widget.initialMarkup);
+    _ctrl.addListener(_onChanged);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.removeListener(_onChanged);
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _onChanged() {
+    if (mounted) setState(() {});
+  }
+
+  TextFormat _selectionFormat() {
+    final sel = _ctrl.selection;
+    if (!sel.isValid || sel.isCollapsed) return TextFormat.empty;
+    final text = _ctrl.text;
+    final start = sel.start.clamp(0, text.length);
+    final end = sel.end.clamp(0, text.length);
+    if (end <= start) return TextFormat.empty;
+    return selectionFormat(_ctrl.formatRuns, start, end);
+  }
+
+  void _applyFormat({
+    bool? bold,
+    bool? italic,
+    Color? background,
+    String? fontFamily,
+  }) {
+    final sel = _ctrl.selection;
+    if (!sel.isValid || sel.isCollapsed) return;
+    final text = _ctrl.text;
+    final start = sel.start.clamp(0, text.length);
+    final end = sel.end.clamp(0, text.length);
+    if (end <= start) return;
+    final desired = toggledFormatOverSelection(
+      _ctrl.formatRuns,
+      start,
+      end,
+      bold: bold,
+      italic: italic,
+      background: background,
+      fontFamily: fontFamily,
+    );
+    _ctrl.setFormatRuns(
+      applyFormatToSelection(_ctrl.formatRuns, start, end, desired),
+    );
+  }
+
+  void _clearFormat() {
+    final sel = _ctrl.selection;
+    if (!sel.isValid || sel.isCollapsed) return;
+    final text = _ctrl.text;
+    final start = sel.start.clamp(0, text.length);
+    final end = sel.end.clamp(0, text.length);
+    if (end <= start) return;
+    _ctrl.setFormatRuns(
+      applyFormatToSelection(_ctrl.formatRuns, start, end, TextFormat.empty),
+    );
+  }
+
+  Future<void> _pickHighlight(BuildContext barContext) async {
+    final box = barContext.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final color = await showMessageHighlightPicker(
+      barContext,
+      anchor: box.localToGlobal(Offset.zero) & box.size,
+    );
+    if (color == null || !mounted) return;
+    _applyFormat(background: color);
+  }
+
+  Future<void> _pickFont(BuildContext barContext) async {
+    final box = barContext.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final selFont = _selectionFormat().fontFamily;
+    final value = await showMessageFontPicker(
+      barContext,
+      anchor: box.localToGlobal(Offset.zero) & box.size,
+      current: (selFont != null && selFont.isNotEmpty) ? selFont : '',
+    );
+    if (value == null || !mounted) return;
+    _applyFormat(fontFamily: value);
+  }
+
+  Widget _toolbarButton({
+    required Widget child,
+    required String tooltip,
+    required VoidCallback onTap,
+    required bool enabled,
+    bool active = false,
+  }) {
+    final on = enabled ? onTap : () {};
+    final bg = active
+        ? PrivetTheme.signal.withValues(alpha: 0.22)
+        : Colors.transparent;
+    return Tooltip(
+      message: enabled ? tooltip : 'Select text first',
+      waitDuration: const Duration(milliseconds: 400),
+      child: Opacity(
+        opacity: enabled ? 1.0 : 0.4,
+        child: Material(
+          color: bg,
+          borderRadius: BorderRadius.circular(8),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(8),
+            mouseCursor: enabled
+                ? SystemMouseCursors.click
+                : SystemMouseCursors.basic,
+            onTap: on,
+            child: SizedBox(
+              width: 34,
+              height: 34,
+              child: Center(child: child),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasSelection =
+        _ctrl.selection.isValid && !_ctrl.selection.isCollapsed;
+    final cur = _selectionFormat();
+    return AlertDialog(
       backgroundColor: PrivetTheme.panelElevated,
       title: Text(
-        title,
+        widget.title,
         style: GoogleFonts.syne(
           color: PrivetTheme.mist,
           fontWeight: FontWeight.w700,
         ),
       ),
       content: SizedBox(
-        width: 340,
-        child: TextField(
-          controller: ctrl,
-          autofocus: true,
-          maxLines: 3,
-          style: GoogleFonts.ibmPlexSans(
-            color: PrivetTheme.paper,
-            fontSize: 14,
-          ),
-          cursorColor: PrivetTheme.signal,
-          decoration: const InputDecoration(
-            hintText: 'Task text',
-            isDense: true,
-            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          ),
-          onSubmitted: (_) => Navigator.of(ctx).pop(true),
+        width: 440,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: _ctrl,
+              autofocus: true,
+              minLines: 1,
+              maxLines: 4,
+              style: GoogleFonts.ibmPlexSans(
+                color: PrivetTheme.paper,
+                fontSize: 14,
+                height: 1.35,
+              ),
+              cursorColor: PrivetTheme.signal,
+              decoration: const InputDecoration(
+                hintText: 'Task text',
+                isDense: true,
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+              ),
+              onSubmitted: (_) => Navigator.of(context).pop(_savedMarkup()),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              decoration: BoxDecoration(
+                color: PrivetTheme.ink.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: PrivetTheme.line),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _toolbarButton(
+                    tooltip: 'Bold',
+                    enabled: hasSelection,
+                    active: cur.bold,
+                    onTap: () => _applyFormat(bold: true),
+                    child: Text(
+                      'B',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: cur.bold
+                            ? PrivetTheme.signal
+                            : PrivetTheme.paper,
+                      ),
+                    ),
+                  ),
+                  _toolbarButton(
+                    tooltip: 'Italic',
+                    enabled: hasSelection,
+                    active: cur.italic,
+                    onTap: () => _applyFormat(italic: true),
+                    child: Text(
+                      'I',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontStyle: FontStyle.italic,
+                        fontWeight: FontWeight.w700,
+                        color: cur.italic
+                            ? PrivetTheme.signal
+                            : PrivetTheme.paper,
+                      ),
+                    ),
+                  ),
+                  _toolbarButton(
+                    tooltip: 'Highlight',
+                    enabled: hasSelection,
+                    onTap: () => _pickHighlight(context),
+                    child: Icon(
+                      Icons.border_color_rounded,
+                      size: 18,
+                      color: PrivetTheme.signal,
+                    ),
+                  ),
+                  _toolbarButton(
+                    tooltip: 'Font family',
+                    enabled: hasSelection,
+                    onTap: () => _pickFont(context),
+                    child: Text(
+                      'Aa',
+                      style: messageFontStyle(
+                        cur.fontFamily?.isNotEmpty == true
+                            ? cur.fontFamily!
+                            : 'monospace',
+                        GoogleFonts.ibmPlexSans(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ).copyWith(
+                        color: cur.fontFamily != null
+                            ? PrivetTheme.signal
+                            : PrivetTheme.paper,
+                      ),
+                    ),
+                  ),
+                  Container(
+                    width: 1,
+                    height: 22,
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    color: PrivetTheme.line,
+                  ),
+                  _toolbarButton(
+                    tooltip: 'Remove formatting',
+                    enabled: hasSelection && !cur.isEmpty,
+                    onTap: _clearFormat,
+                    child: Icon(
+                      Icons.format_clear_rounded,
+                      size: 18,
+                      color: PrivetTheme.paper,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    hasSelection
+                        ? 'Formatting applies to the selection'
+                        : 'Select text to format',
+                    style: GoogleFonts.ibmPlexSans(
+                      fontSize: 11,
+                      color: PrivetTheme.mist.withValues(alpha: 0.7),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
       actions: [
         MouseRegion(
           cursor: SystemMouseCursors.click,
           child: TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
+            onPressed: () => Navigator.of(context).pop(),
             child: Text(
               'Cancel',
               style: TextStyle(color: PrivetTheme.mist),
@@ -3052,7 +3389,7 @@ Future<void> _promptEditTaskText(
           cursor: SystemMouseCursors.click,
           child: FilledButton(
             style: FilledButton.styleFrom(backgroundColor: PrivetTheme.signal),
-            onPressed: () => Navigator.of(ctx).pop(true),
+            onPressed: () => Navigator.of(context).pop(_savedMarkup()),
             child: Text(
               'Save',
               style: TextStyle(color: PrivetTheme.onAccent),
@@ -3060,11 +3397,14 @@ Future<void> _promptEditTaskText(
           ),
         ),
       ],
-    ),
-  );
-  final value = ctrl.text.trim();
-  ctrl.dispose();
-  if (saved == true && value.isNotEmpty) onSave(value);
+    );
+  }
+
+  /// The serialized markup (trimmed) or null when the field is empty.
+  String? _savedMarkup() {
+    final value = _ctrl.markupText.trim();
+    return value.isEmpty ? null : value;
+  }
 }
 
 class _TaskRow extends StatefulWidget {
@@ -3097,6 +3437,7 @@ class _TaskRow extends StatefulWidget {
     required this.onDeleteSubtask,
     required this.onAttachSubtask,
     required this.onRemoveSubtaskAttachment,
+    this.onFormatBody,
   });
 
   final int number;
@@ -3131,49 +3472,31 @@ class _TaskRow extends StatefulWidget {
   final ValueChanged<TaskItem>? onAttachSubtask;
   final void Function(TaskItem item, String url)? onRemoveSubtaskAttachment;
 
+  /// Applies bold/italic/highlight/font to a selected range of this task's
+  /// text (plain-text selection; the parent re-serializes the markup).
+  final void Function(TextSelection selection, TextFormat format)?
+      onFormatBody;
+
   @override
   State<_TaskRow> createState() => _TaskRowState();
 }
 
 class _TaskRowState extends State<_TaskRow> {
-  late final TextEditingController _ctrl;
-  late final FocusNode _focus;
   final _subCtrl = TextEditingController();
   final _subFocus = FocusNode();
   bool _addingSub = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = TextEditingController(text: widget.item.body);
-    _focus = FocusNode();
-    _focus.addListener(_onFocus);
-  }
+  /// Whether nested content (subtasks + attachments) is shown. Defaults to
+  /// expanded so existing layout is preserved; toggled by the leading chevron.
+  bool _expanded = true;
 
-  @override
-  void didUpdateWidget(covariant _TaskRow oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.item.body != widget.item.body && !_focus.hasFocus) {
-      _ctrl.text = widget.item.body;
-    }
-  }
-
-  void _onFocus() {
-    if (!_focus.hasFocus && widget.onSaveBody != null) {
-      final next = _ctrl.text.trim();
-      if (next.isNotEmpty && next != widget.item.body) {
-        widget.onSaveBody!(next);
-      } else if (next.isEmpty) {
-        _ctrl.text = widget.item.body;
-      }
-    }
-  }
+  bool get _hasNested =>
+      widget.onAddSubtask != null ||
+      widget.subtasks.isNotEmpty ||
+      widget.item.mediaItems.isNotEmpty;
 
   @override
   void dispose() {
-    _focus.removeListener(_onFocus);
-    _ctrl.dispose();
-    _focus.dispose();
     _subCtrl.dispose();
     _subFocus.dispose();
     super.dispose();
@@ -3208,7 +3531,7 @@ class _TaskRowState extends State<_TaskRow> {
             url: url,
             filename: att.fileName ?? 'image',
             child: InteractiveViewer(
-              child: Image.network(url, fit: BoxFit.contain),
+              child: CachedMediaImage(url: url, fit: BoxFit.contain),
             ),
           ),
           Positioned(
@@ -3241,12 +3564,14 @@ class _TaskRowState extends State<_TaskRow> {
     _promptEditTaskText(
       context,
       title: 'Edit task',
-      initial: _ctrl.text,
-      onSave: (next) {
-        widget.onSaveBody?.call(next);
-        _ctrl.text = next;
-      },
-    );
+      initial: widget.item.body,
+    ).then((next) {
+      // Editing keeps the markup — only save when it actually changed, so an
+      // untouched Save never strips the existing formatting.
+      if (next == null || next.isEmpty || next == widget.item.body) return;
+      if (!mounted) return;
+      widget.onSaveBody?.call(next);
+    });
   }
 
   @override
@@ -3278,6 +3603,31 @@ class _TaskRowState extends State<_TaskRow> {
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (_hasNested)
+                    MouseRegion(
+                      cursor: SystemMouseCursors.click,
+                      child: Tooltip(
+                        message: _expanded ? 'Collapse' : 'Expand',
+                        child: GestureDetector(
+                          onTap: () =>
+                              setState(() => _expanded = !_expanded),
+                          child: Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: AnimatedRotation(
+                              turns: _expanded ? 0.25 : 0,
+                              duration: const Duration(milliseconds: 160),
+                              child: Icon(
+                                Icons.chevron_right_rounded,
+                                size: 22,
+                                color: PrivetTheme.mist,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    )
+                  else
+                    const SizedBox(width: 22),
                   _NumberBadge(number: widget.number),
                   const SizedBox(width: 8),
                   if (widget.onToggle != null)
@@ -3319,32 +3669,21 @@ class _TaskRowState extends State<_TaskRow> {
                         Row(
                           children: [
                             Expanded(
-                              child: widget.onSaveBody != null
-                                  ? TextField(
-                                      controller: _ctrl,
-                                      focusNode: _focus,
-                                      maxLines: null,
-                                      style: GoogleFonts.ibmPlexSans(
-                                        fontSize: widget.taskFontSize,
-                                        color: PrivetTheme.paper,
-                                      ),
-                                      decoration: const InputDecoration(
-                                        isDense: true,
-                                        border: InputBorder.none,
-                                        enabledBorder: InputBorder.none,
-                                        focusedBorder: InputBorder.none,
-                                        filled: false,
-                                        contentPadding:
-                                            EdgeInsets.symmetric(vertical: 4),
-                                      ),
-                                    )
-                                  : Text(
-                                      item.body,
-                                      style: GoogleFonts.ibmPlexSans(
-                                        fontSize: widget.taskFontSize,
-                                        color: PrivetTheme.paper,
-                                      ),
+                              child: Align(
+                                alignment: Alignment.centerLeft,
+                                child: LayoutBuilder(
+                                  builder: (context, constraints) =>
+                                      SelectableMarkupText(
+                                    text: item.body,
+                                    baseStyle: GoogleFonts.ibmPlexSans(
+                                      fontSize: widget.taskFontSize,
+                                      color: PrivetTheme.paper,
                                     ),
+                                    maxWidth: constraints.maxWidth,
+                                    onFormat: widget.onFormatBody,
+                                  ),
+                                ),
+                              ),
                             ),
                             if (widget.progressLabel != null)
                               Padding(
@@ -3465,7 +3804,7 @@ class _TaskRowState extends State<_TaskRow> {
                   ),
                 ],
               ),
-              if (media.isNotEmpty)
+              if (_expanded && media.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(left: 38, top: 8),
                   child: SizedBox(
@@ -3490,21 +3829,16 @@ class _TaskRowState extends State<_TaskRow> {
                                   child: ClipRRect(
                                     borderRadius: BorderRadius.circular(8),
                                     child: _isImageAtt(att)
-                                        ? Image.network(
-                                            url,
+                                        ? CachedMediaImage(
+                                            url: url,
                                             width: 52,
                                             height: 52,
                                             fit: BoxFit.cover,
-                                            cacheWidth: ImageDecodeCaps.cacheWidth(
+                                            cacheWidth:
+                                                ImageDecodeCaps.cacheWidth(
                                               52,
-                                              dpr: MediaQuery.devicePixelRatioOf(
-                                                  context),
-                                            ),
-                                            cacheHeight:
-                                                ImageDecodeCaps.cacheHeight(
-                                              52,
-                                              dpr: MediaQuery.devicePixelRatioOf(
-                                                  context),
+                                              dpr: MediaQuery
+                                                  .devicePixelRatioOf(context),
                                             ),
                                             errorBuilder: (_, __, ___) =>
                                                 _fileThumb(att.fileName),
@@ -3544,8 +3878,9 @@ class _TaskRowState extends State<_TaskRow> {
                   ),
                 ),
               // Subtasks
-              if (widget.subtasks.isNotEmpty ||
-                  (!isHistory && widget.onAddSubtask != null))
+              if (_expanded &&
+                  (widget.subtasks.isNotEmpty ||
+                      (!isHistory && widget.onAddSubtask != null)))
                 Padding(
                   padding: const EdgeInsets.only(left: 30, top: 8),
                   child: Column(
@@ -3586,6 +3921,15 @@ class _TaskRowState extends State<_TaskRow> {
                               ? null
                               : (url) =>
                                   widget.onRemoveSubtaskAttachment!(sub, url),
+                          onFormatBody: !isHistory
+                              ? (sel, f) => _applyBodyFormatToItem(
+                                    sub,
+                                    sel,
+                                    f,
+                                    (body) =>
+                                        widget.onSaveSubtaskBody?.call(sub, body),
+                                  )
+                              : null,
                         ),
                       if (!isHistory && widget.onAddSubtask != null)
                         _addingSub
@@ -3836,6 +4180,7 @@ class _SubtaskRow extends StatefulWidget {
     required this.onAttach,
     required this.onRemoveAttachment,
     this.onPreview,
+    this.onFormatBody,
   });
 
   final TaskItem item;
@@ -3853,48 +4198,16 @@ class _SubtaskRow extends StatefulWidget {
   final ValueChanged<String>? onRemoveAttachment;
   final void Function(MediaAttachment att)? onPreview;
 
+  /// Applies bold/italic/highlight/font to a selected range of this subtask's
+  /// text (plain-text selection; the parent re-serializes the markup).
+  final void Function(TextSelection selection, TextFormat format)?
+      onFormatBody;
+
   @override
   State<_SubtaskRow> createState() => _SubtaskRowState();
 }
 
 class _SubtaskRowState extends State<_SubtaskRow> {
-  late final TextEditingController _ctrl;
-  late final FocusNode _focus;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = TextEditingController(text: widget.item.body);
-    _focus = FocusNode()..addListener(_onFocus);
-  }
-
-  @override
-  void didUpdateWidget(covariant _SubtaskRow oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.item.body != widget.item.body && !_focus.hasFocus) {
-      _ctrl.text = widget.item.body;
-    }
-  }
-
-  void _onFocus() {
-    if (!_focus.hasFocus && widget.onSaveBody != null) {
-      final next = _ctrl.text.trim();
-      if (next.isNotEmpty && next != widget.item.body) {
-        widget.onSaveBody!(next);
-      } else if (next.isEmpty) {
-        _ctrl.text = widget.item.body;
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    _focus.removeListener(_onFocus);
-    _ctrl.dispose();
-    _focus.dispose();
-    super.dispose();
-  }
-
   String _abs(String? path) {
     if (path == null || path.isEmpty) return '';
     if (path.startsWith('http://') || path.startsWith('https://')) return path;
@@ -3915,12 +4228,14 @@ class _SubtaskRowState extends State<_SubtaskRow> {
     _promptEditTaskText(
       context,
       title: 'Edit subtask',
-      initial: _ctrl.text,
-      onSave: (next) {
-        widget.onSaveBody?.call(next);
-        _ctrl.text = next;
-      },
-    );
+      initial: widget.item.body,
+    ).then((next) {
+      // Editing keeps the markup — only save when it actually changed, so an
+      // untouched Save never strips the existing formatting.
+      if (next == null || next.isEmpty || next == widget.item.body) return;
+      if (!mounted) return;
+      widget.onSaveBody?.call(next);
+    });
   }
 
   @override
@@ -3978,31 +4293,21 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                 ),
               const SizedBox(width: 6),
               Expanded(
-                child: widget.editable && widget.onSaveBody != null
-                    ? TextField(
-                        controller: _ctrl,
-                        focusNode: _focus,
-                        maxLines: null,
-                        style: GoogleFonts.ibmPlexSans(
-                          fontSize: subFontSize,
-                          color: PrivetTheme.paper,
-                        ),
-                        decoration: const InputDecoration(
-                          isDense: true,
-                          border: InputBorder.none,
-                          enabledBorder: InputBorder.none,
-                          focusedBorder: InputBorder.none,
-                          filled: false,
-                          contentPadding: EdgeInsets.symmetric(vertical: 2),
-                        ),
-                      )
-                    : Text(
-                        item.body,
-                        style: GoogleFonts.ibmPlexSans(
-                          fontSize: subFontSize,
-                          color: PrivetTheme.paper,
-                        ),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: LayoutBuilder(
+                    builder: (context, constraints) =>
+                        SelectableMarkupText(
+                      text: item.body,
+                      baseStyle: GoogleFonts.ibmPlexSans(
+                        fontSize: subFontSize,
+                        color: PrivetTheme.paper,
                       ),
+                      maxWidth: constraints.maxWidth,
+                      onFormat: widget.onFormatBody,
+                    ),
+                  ),
+                ),
               ),
               _SubtaskActions(
                 editable: widget.editable,
@@ -4062,12 +4367,13 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                               child: ClipRRect(
                                 borderRadius: BorderRadius.circular(6),
                                 child: _isImageAtt(att)
-                                    ? Image.network(
-                                        url,
+                                    ? CachedMediaImage(
+                                        url: url,
                                         width: 44,
                                         height: 44,
                                         fit: BoxFit.cover,
-                                        errorBuilder: (_, __, ___) => _fileThumb(att.fileName),
+                                        errorBuilder: (_, __, ___) =>
+                                            _fileThumb(att.fileName),
                                       )
                                     : _fileThumb(att.fileName),
                               ),
@@ -4263,7 +4569,7 @@ class _TaskBoardCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    item.body,
+                    markupToPlain(item.body),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: GoogleFonts.ibmPlexSans(
@@ -5134,4 +5440,22 @@ class _TaskImageCopyMenu extends StatelessWidget {
       child: child,
     );
   }
+}
+
+/// Applies a redaction (bold / italic / highlight / font) to a selected range
+/// of [item]'s text and saves the re-serialized markup through [save].
+void _applyBodyFormatToItem(
+  TaskItem item,
+  TextSelection sel,
+  TextFormat f,
+  ValueChanged<String>? save,
+) {
+  final parsed = parseMarkup(item.body);
+  final start = sel.start.clamp(0, parsed.plainText.length);
+  final end = sel.end.clamp(0, parsed.plainText.length);
+  if (end <= start) return;
+  final runs = applyFormatToSelection(parsed.runs, start, end, f);
+  final next = serializeMarkup(parsed.plainText, runs);
+  if (next == item.body) return;
+  save?.call(next);
 }

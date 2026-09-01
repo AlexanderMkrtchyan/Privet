@@ -448,6 +448,7 @@ class TaskActivity {
     required this.action,
     this.user,
     this.userId,
+    this.taskBody,
     this.fromValue,
     this.toValue,
     required this.createdAt,
@@ -458,6 +459,7 @@ class TaskActivity {
   final String? userId;
   final PrivetUser? user;
   final String action;
+  final String? taskBody;
   final String? fromValue;
   final String? toValue;
   final DateTime createdAt;
@@ -470,6 +472,7 @@ class TaskActivity {
             ? PrivetUser.fromJson(json['user'] as Map<String, dynamic>)
             : null,
         action: (json['action'] as String?) ?? '',
+        taskBody: json['taskBody'] as String?,
         fromValue: json['fromValue'] as String?,
         toValue: json['toValue'] as String?,
         createdAt: parseServerUtc(json['createdAt']) ?? DateTime.now(),
@@ -791,6 +794,46 @@ class MediaAttachment {
         if (fileName != null) 'fileName': fileName,
         if (fileSize != null) 'fileSize': fileSize,
       };
+}
+
+/// One media item shown in the chat's Shared Media browser (Photos / Files).
+/// Comes from either a chat message ('message') or a task attachment ('task').
+class SharedMediaItem {
+  const SharedMediaItem({
+    required this.attachment,
+    required this.createdAt,
+    required this.senderName,
+    this.source = 'message',
+    this.messageId,
+  });
+
+  final MediaAttachment attachment;
+  final DateTime createdAt;
+  final String senderName;
+  final String source;
+  final String? messageId;
+
+  factory SharedMediaItem.fromJson(Map<String, dynamic> json) =>
+      SharedMediaItem(
+        attachment: MediaAttachment(
+          mediaUrl: json['mediaUrl'] as String,
+          kind: (json['kind'] as String?) ?? 'file',
+          mimeType: json['mimeType'] as String?,
+          fileName: json['fileName'] as String?,
+          fileSize: (json['fileSize'] as num?)?.toInt(),
+        ),
+        createdAt: parseServerUtc(json['createdAt']) ?? DateTime.now(),
+        senderName: (json['senderName'] as String?) ?? '',
+        source: (json['source'] as String?) ?? 'message',
+        messageId: json['messageId'] as String?,
+      );
+
+  /// Same file shared again counts as a distinct share (different message), so
+  /// dedupe on the message the item came from rather than just the URL. Task
+  /// items have no message id, so they fall back to source + time + URL.
+  String get dedupeKey => messageId != null && messageId!.isNotEmpty
+      ? '$source|$messageId|${attachment.mediaUrl}'
+      : '$source|$createdAt|${attachment.mediaUrl}';
 }
 
 /// Teams-style link unfurl (Open Graph / Twitter card).

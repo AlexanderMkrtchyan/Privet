@@ -410,13 +410,38 @@ export function updateTaskItem(id, userId, patch) {
   }
 
   // Marking a parent done cascades to its subtasks (matches the old
-  // group-archive behavior: the whole board group closes together).
+  // group-archive behavior: the whole board group closes together). The
+  // cascade also logs each child's status change so the parent's activity feed
+  // (which now surfaces subtask activity) tells the full story.
   if (status === 'done' && !existing.parent_id) {
-    db.prepare(
-      `UPDATE task_items
-       SET done = 1, done_confirmed = 1, status = 'done', pinned = 0, updated_at = ?
-       WHERE parent_id = ? AND status != 'done'`,
-    ).run(new Date().toISOString(), id);
+    const children = db
+      .prepare('SELECT * FROM task_items WHERE parent_id = ? AND status != ?')
+      .all(id, 'done');
+    if (children.length > 0) {
+      db.prepare(
+        `UPDATE task_items
+         SET done = 1, done_confirmed = 1, status = 'done', pinned = 0, updated_at = ?
+         WHERE parent_id = ? AND status != 'done'`,
+      ).run(new Date().toISOString(), id);
+      for (const child of children) {
+        const childStatus =
+          child.status && child.status !== 'todo'
+            ? child.status
+            : child.done_confirmed
+              ? 'done'
+              : child.done
+                ? 'review'
+                : 'todo';
+        logActivity({
+          taskId: child.id,
+          conversationId: existing.conversation_id,
+          userId,
+          action: 'status',
+          fromValue: childStatus,
+          toValue: 'done',
+        });
+      }
+    }
   }
 
   if (patch.attachments !== undefined) {
@@ -554,20 +579,33 @@ export function clearDoneTaskItems(conversationId, userId) {
   return listTaskItems(conversationId);
 }
 
-/** Change log for one task (newest first). */
+/** Change log for one task (newest first). For a parent task the feed also
+ * includes its subtasks' activity (children can't nest, so one level is
+ * enough): opening a board group's log shows every check/uncheck and edit made
+ * under it. Entries carry the owning task's body so the client can label rows
+ * that belong to a subtask rather than the task being viewed. */
 export function listTaskActivity(taskId, { limit = 50 } = {}) {
   const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const childIds = db
+    .prepare('SELECT id FROM task_items WHERE parent_id = ?')
+    .all(taskId)
+    .map((r) => r.id);
+  const taskIds = [taskId, ...childIds];
+  const placeholders = taskIds.map(() => '?').join(',');
   const rows = db
     .prepare(
-      `SELECT * FROM task_activity
-       WHERE task_id = ?
-       ORDER BY created_at DESC
+      `SELECT a.*, t.body AS task_body
+       FROM task_activity a
+       JOIN task_items t ON t.id = a.task_id
+       WHERE a.task_id IN (${placeholders})
+       ORDER BY a.created_at DESC
        LIMIT ?`,
     )
-    .all(taskId, lim);
+    .all(...taskIds, lim);
   return rows.map((row) => ({
     id: row.id,
     taskId: row.task_id,
+    taskBody: row.task_body || null,
     userId: row.user_id || null,
     user: row.user_id ? publicUser(getUserById(row.user_id)) : null,
     action: row.action,

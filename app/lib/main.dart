@@ -15,6 +15,7 @@ import 'theme.dart';
 import 'util/desktop_single_instance.dart';
 import 'util/desktop_tray.dart';
 import 'util/low_resource.dart';
+import 'util/media_cache.dart';
 import 'util/mobile_app_lifecycle.dart';
 import 'util/mobile_push_background.dart';
 import 'util/mobile_push_config.dart';
@@ -64,6 +65,10 @@ Future<void> main() async {
   // runtime fetch there so Text paint does not throw unhandled exceptions.
   GoogleFonts.config.allowRuntimeFetching = !await _hasApiNamedFontAssets();
   bootstrapWebPlatform();
+  // Load the on-device media cache (last 20 files) so already-seen images and
+  // files open instantly without hitting the server. Best-effort and
+  // non-blocking — the UI starts regardless.
+  unawaited(initMediaCache());
   // Flutter web enables the browser menu by default (Inspect / Copy / etc.).
   // Must stay disabled or SelectableText right-click opens Chrome's menu.
   if (kIsWeb) {

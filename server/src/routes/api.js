@@ -35,6 +35,7 @@ import {
   listConversationsForUser,
   listMembers,
   listMessages,
+  listSharedMedia,
   markConversationRead,
   memberIds,
   removeGroupMember,
@@ -782,6 +783,16 @@ export async function registerRoutes(app) {
     };
   });
 
+  app.get('/conversations/:id/media', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params;
+    if (!userInConversation(id, user.id)) {
+      return reply.code(403).send({ error: 'forbidden' });
+    }
+    return { items: listSharedMedia(id) };
+  });
+
   app.post('/conversations/:id/messages', async (request, reply) => {
     const user = await requireUser(request, reply);
     if (!user) return;
@@ -966,7 +977,14 @@ export async function registerRoutes(app) {
         const title = assigneeName
           ? `${actorName} assigned you a task`
           : 'You were assigned a task';
-        const bodyText = (item.body || '').slice(0, 120);
+        // Task bodies may carry markup ([b]/[i]/[bg]/[font=…]) — notifications
+        // show the plain text.
+        const bodyText = String(item.body || '')
+          .replace(/\[(?:\/?)(?:b|i|bg|font)(?:=[^\]]*)?\]/gi, '')
+          .replace(/\\\[/g, '[')
+          .replace(/\\\\/g, '\\')
+          .trim()
+          .slice(0, 120);
         broadcastToUsers([newAssignee], {
           type: 'notify',
           conversationId: item.conversationId,

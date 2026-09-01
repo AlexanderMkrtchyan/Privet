@@ -2,63 +2,83 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 
+import '../api/client.dart';
 import '../models.dart';
 import '../theme.dart';
-import '../util/media_download.dart';
+import '../util/media_cache.dart';
 import '../util/perf.dart';
+import 'cached_media_image.dart';
 import 'image_lightbox.dart';
 import 'inline_video_player.dart';
 
 enum ChatMediaFolderKind { photos, files }
 
-class SharedMediaEntry {
-  const SharedMediaEntry({
-    required this.attachment,
-    required this.createdAt,
-    required this.senderName,
-  });
-
-  final MediaAttachment attachment;
-  final DateTime createdAt;
-  final String senderName;
-}
-
-/// Collect shared media from chat messages (and task attachments) newest
-/// first (Teams-style).
-List<SharedMediaEntry> collectSharedMedia(
+/// Collect shared media from the currently loaded chat messages (and task
+/// attachments) newest first (Teams-style). This is the instant/local view;
+/// [ChatMediaFolderPane] layers the full server media history on top.
+List<SharedMediaItem> collectSharedMedia(
   List<ChatMessage> messages, {
   required ChatMediaFolderKind folder,
   List<TaskItem>? tasks,
 }) {
-  final out = <SharedMediaEntry>[];
-  void add(MediaAttachment item, DateTime createdAt, String senderName) {
-    final isPhoto = item.kind == 'image';
-    final isFile = item.kind == 'file' ||
-        item.kind == 'video' ||
-        item.kind == 'audio' ||
-        item.kind == 'voice';
-    if (folder == ChatMediaFolderKind.photos && !isPhoto) return;
-    if (folder == ChatMediaFolderKind.files && !isFile) return;
+  final out = <SharedMediaItem>[];
+  void add(MediaAttachment item, DateTime createdAt, String senderName,
+      {String source = 'message', String? messageId}) {
+    if (!_matchesFolder(item, folder)) return;
     out.add(
-      SharedMediaEntry(
+      SharedMediaItem(
         attachment: item,
         createdAt: createdAt,
         senderName: senderName,
+        source: source,
+        messageId: messageId,
       ),
     );
   }
 
   for (final m in messages) {
     for (final item in m.mediaItems) {
-      add(item, m.createdAt, m.sender.displayName);
+      add(item, m.createdAt, m.sender.displayName, messageId: m.id);
     }
   }
   // Images/files attached to tasks show up in shared media too, so nothing
   // shared in a task is hidden from the chat's Photos / Files browser.
   for (final t in tasks ?? const <TaskItem>[]) {
     for (final item in t.mediaItems) {
-      add(item, t.createdAt, t.createdBy?.displayName ?? 'Task');
+      add(item, t.createdAt, t.createdBy?.displayName ?? 'Task',
+          source: 'task');
     }
+  }
+  out.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+  return out;
+}
+
+bool _matchesFolder(MediaAttachment item, ChatMediaFolderKind folder) {
+  final isPhoto = item.kind == 'image';
+  final isFile = item.kind == 'file' ||
+      item.kind == 'video' ||
+      item.kind == 'audio' ||
+      item.kind == 'voice';
+  if (folder == ChatMediaFolderKind.photos && !isPhoto) return false;
+  if (folder == ChatMediaFolderKind.files && !isFile) return false;
+  return true;
+}
+
+List<SharedMediaItem> filterSharedMedia(
+  List<SharedMediaItem> items,
+  ChatMediaFolderKind folder,
+) =>
+    [for (final e in items) if (_matchesFolder(e.attachment, folder)) e];
+
+/// Merge server-side history with locally known items, deduped per share.
+List<SharedMediaItem> mergeSharedMedia(
+  List<SharedMediaItem> server,
+  List<SharedMediaItem> local,
+) {
+  final seen = <String>{};
+  final out = <SharedMediaItem>[];
+  for (final item in [...server, ...local]) {
+    if (seen.add(item.dedupeKey)) out.add(item);
   }
   out.sort((a, b) => b.createdAt.compareTo(a.createdAt));
   return out;
@@ -86,8 +106,27 @@ String _formatSize(int? bytes) {
   return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
 }
 
-/// Teams-style Photos / Files browser. Close (X) returns to chat.
-class ChatMediaFolderPane extends StatelessWidget {
+/// Saves [url] locally, serving cached bytes when available so the save is
+/// instant instead of a fresh server download. On native platforms the saved
+/// path is shown via a snackbar.
+Future<void> saveMediaFromCache(
+  BuildContext context,
+  String url, {
+  required String filename,
+}) async {
+  final saved = await downloadMediaFromCache(url, filename: filename);
+  if (!context.mounted) return;
+  if (saved != null) {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    messenger?.showSnackBar(
+      SnackBar(content: Text('Saved to $saved')),
+    );
+  }
+}
+
+/// Teams-style Photos / Files browser over the conversation's full shared
+/// media history (chat messages + task attachments). Close (X) returns to chat.
+class ChatMediaFolderPane extends StatefulWidget {
   const ChatMediaFolderPane({
     super.key,
     required this.folder,
@@ -95,6 +134,8 @@ class ChatMediaFolderPane extends StatelessWidget {
     required this.mediaBase,
     required this.onClose,
     required this.onSelectFolder,
+    required this.conversationId,
+    required this.api,
     this.tasks,
   });
 
@@ -103,18 +144,70 @@ class ChatMediaFolderPane extends StatelessWidget {
   final String mediaBase;
   final VoidCallback onClose;
   final ValueChanged<ChatMediaFolderKind> onSelectFolder;
+  final String conversationId;
+  final ApiClient api;
 
   /// Task attachments (active + history) shown alongside message media.
   final List<TaskItem>? tasks;
 
   @override
+  State<ChatMediaFolderPane> createState() => _ChatMediaFolderPaneState();
+}
+
+class _ChatMediaFolderPaneState extends State<ChatMediaFolderPane> {
+  List<SharedMediaItem> _serverMedia = const [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(ChatMediaFolderPane oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.conversationId != widget.conversationId) {
+      _serverMedia = const [];
+      _loading = true;
+      _load();
+    }
+  }
+
+  Future<void> _load() async {
+    final conversationId = widget.conversationId;
+    if (conversationId.isEmpty) {
+      setState(() => _loading = false);
+      return;
+    }
+    _loadedConversationId = conversationId;
+    try {
+      final items = await widget.api.sharedMedia(conversationId);
+      if (!mounted || _loadedConversationId != conversationId) return;
+      setState(() {
+        _serverMedia = items;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted || _loadedConversationId != conversationId) return;
+      // Non-fatal: fall back to whatever is locally loaded in the thread.
+      setState(() => _loading = false);
+    }
+  }
+
+  String? _loadedConversationId;
+
+  @override
   Widget build(BuildContext context) {
-    final items = collectSharedMedia(
-      messages,
-      folder: folder,
-      tasks: tasks,
+    final items = mergeSharedMedia(
+      filterSharedMedia(_serverMedia, widget.folder),
+      collectSharedMedia(
+        widget.messages,
+        folder: widget.folder,
+        tasks: widget.tasks,
+      ),
     );
-    final emptyLabel = folder == ChatMediaFolderKind.photos
+    final emptyLabel = widget.folder == ChatMediaFolderKind.photos
         ? 'No photos shared yet'
         : 'No files shared yet';
 
@@ -122,25 +215,39 @@ class ChatMediaFolderPane extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _FolderTabBar(
-          folder: folder,
-          onClose: onClose,
-          onSelectFolder: onSelectFolder,
+          folder: widget.folder,
+          onClose: widget.onClose,
+          onSelectFolder: widget.onSelectFolder,
         ),
         Expanded(
-          child: items.isEmpty
-              ? Center(
-                  child: Text(
-                    emptyLabel,
-                    style: GoogleFonts.syne(
-                      color: PrivetTheme.mist,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
+          child: _loading && items.isEmpty
+              ? const Center(
+                  child: SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2),
                   ),
                 )
-              : folder == ChatMediaFolderKind.photos
-                  ? _PhotosGrid(items: items, mediaBase: mediaBase)
-                  : _FilesList(items: items, mediaBase: mediaBase),
+              : items.isEmpty
+                  ? Center(
+                      child: Text(
+                        emptyLabel,
+                        style: GoogleFonts.syne(
+                          color: PrivetTheme.mist,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    )
+                  : widget.folder == ChatMediaFolderKind.photos
+                      ? _PhotosGrid(
+                          items: items,
+                          mediaBase: widget.mediaBase,
+                        )
+                      : _FilesList(
+                          items: items,
+                          mediaBase: widget.mediaBase,
+                        ),
         ),
       ],
     );
@@ -243,7 +350,7 @@ class _FolderTab extends StatelessWidget {
 class _PhotosGrid extends StatelessWidget {
   const _PhotosGrid({required this.items, required this.mediaBase});
 
-  final List<SharedMediaEntry> items;
+  final List<SharedMediaItem> items;
   final String mediaBase;
 
   @override
@@ -284,14 +391,13 @@ class _PhotosGrid extends StatelessWidget {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                Image.network(
-                  url,
+                // Decode width-only so the square cover crops instead of
+                // squashing: passing cacheHeight too makes the engine decode
+                // the bitmap stretched to a square before cover even runs.
+                CachedMediaImage(
+                  url: url,
                   fit: BoxFit.cover,
                   cacheWidth: ImageDecodeCaps.cacheWidth(
-                    180,
-                    dpr: MediaQuery.devicePixelRatioOf(context),
-                  ),
-                  cacheHeight: ImageDecodeCaps.cacheHeight(
                     180,
                     dpr: MediaQuery.devicePixelRatioOf(context),
                   ),
@@ -343,7 +449,7 @@ class _PhotosGrid extends StatelessWidget {
 class _FilesList extends StatelessWidget {
   const _FilesList({required this.items, required this.mediaBase});
 
-  final List<SharedMediaEntry> items;
+  final List<SharedMediaItem> items;
   final String mediaBase;
 
   @override
@@ -404,12 +510,16 @@ class _FilesList extends StatelessWidget {
           trailing: IconButton(
             tooltip: 'Download',
             onPressed: () =>
-                downloadMedia(url, filename: _downloadName(item)),
+                saveMediaFromCache(context, url, filename: _downloadName(item)),
             icon: Icon(Icons.download_rounded, color: PrivetTheme.signal),
           ),
           onTap: item.kind == 'video'
               ? () => _openVideo(context, url, name)
-              : () => downloadMedia(url, filename: _downloadName(item)),
+              : () => saveMediaFromCache(
+                    context,
+                    url,
+                    filename: _downloadName(item),
+                  ),
         );
       },
     );

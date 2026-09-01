@@ -41,7 +41,9 @@ import 'util/desktop_launcher_badge.dart';
 import 'util/desktop_tray.dart';
 import 'util/android_realtime_service.dart';
 import 'util/composer_media_attach.dart';
+import 'util/copy_image.dart';
 import 'util/incoming_call_android.dart';
+import 'util/media_cache.dart';
 import 'util/mobile_app_lifecycle.dart';
 import 'util/shared_intent.dart';
 import 'util/web_notifications.dart';
@@ -3780,6 +3782,7 @@ class PrivetState extends ChangeNotifier {
     conversations = await _api.conversations();
     directory = await _api.users();
     notifyInbox();
+    warmRecentMedia();
   }
 
   /// Coalesce structural inbox refreshes so rapid messages don't hammer HTTP.
@@ -3788,6 +3791,103 @@ class PrivetState extends ChangeNotifier {
     _inboxReconcileTimer = Timer(const Duration(seconds: 3), () {
       unawaited(refreshInbox().catchError((_) {}));
     });
+  }
+
+  bool _warmPassPending = false;
+  bool _warmPassRunning = false;
+  final Set<String> _mediaWarming = {};
+
+  /// Best-effort background pre-warm: downloads the newest unique image
+  /// attachments into the on-device media cache so the last ~20 media open
+  /// instantly even on a cold start. Idempotent — already-cached URLs resolve
+  /// from disk/IndexedDB with no network round-trip, and bursts from chat
+  /// scrolling / WS delivery collapse into a single pass.
+  void warmRecentMedia() {
+    _warmPassPending = true;
+    Future.microtask(() {
+      if (!_warmPassPending) return;
+      _warmPassPending = false;
+      unawaited(_runMediaWarmPass());
+    });
+  }
+
+  Future<void> _runMediaWarmPass() async {
+    if (_warmPassRunning) return;
+    _warmPassRunning = true;
+    try {
+      final seen = <String>{};
+      final queue = <String>[];
+
+      void collect(ChatMessage message) {
+        for (final attachment in message.mediaItems) {
+          if (attachment.kind != 'image') continue;
+          final url = _api.absoluteMediaUrl(attachment.mediaUrl);
+          if (url.isEmpty || !seen.add(url)) continue;
+          queue.add(url);
+        }
+      }
+
+      // Newest first: the conversation list is already ordered by recency and
+      // each chat's messages are ascending, so walk them backwards.
+      for (final c in conversations) {
+        final last = c.lastMessage;
+        if (last == null) continue;
+        collect(last);
+        if (queue.length >= kMediaCacheMaxEntries) break;
+      }
+      if (queue.length < kMediaCacheMaxEntries) {
+        // The open chat first — its media is what's on screen right now, so
+        // warm it before everything else.
+        final activeId = activeConversationId;
+        final activeList = activeId != null ? messagesByChat[activeId] : null;
+        final lists = <List<ChatMessage>>[
+          ?activeList,
+          for (final e in messagesByChat.entries)
+            if (e.key != activeId) e.value,
+        ];
+        outer:
+        for (final list in lists) {
+          for (var i = list.length - 1; i >= 0; i--) {
+            collect(list[i]);
+            if (queue.length >= kMediaCacheMaxEntries) break outer;
+          }
+        }
+      }
+      if (queue.isEmpty) return;
+
+      // Pin the queue so downloads during this pass never evict another
+      // still-current entry — the same pass would then re-download it, and the
+      // cache would churn on every boot instead of reaching a stable set.
+      mediaCachePin(queue);
+
+      var index = 0;
+      Future<void> worker() async {
+        while (true) {
+          final i = index++;
+          if (i >= queue.length) return;
+          final url = queue[i];
+          if (!_mediaWarming.add(url)) continue;
+          try {
+            await prefetchImageForCopy(url);
+          } catch (_) {
+            // Best-effort warming — a failed URL must not break the pass.
+          } finally {
+            _mediaWarming.remove(url);
+          }
+        }
+      }
+
+      await Future.wait([worker(), worker(), worker()]);
+    } catch (_) {
+      // Cache warming is best-effort; never let it break the app.
+    } finally {
+      mediaCacheUnpin();
+      _warmPassRunning = false;
+      if (_warmPassPending) {
+        _warmPassPending = false;
+        unawaited(_runMediaWarmPass());
+      }
+    }
   }
 
   String _sqlTimestamp(DateTime dt) =>
@@ -3836,6 +3936,7 @@ class PrivetState extends ChangeNotifier {
       historyLoaded.add(id);
       _applyPendingMessages(id);
       notifyListeners();
+      warmRecentMedia();
       // #region agent log
       agentDebugLog(
         hypothesisId: 'H6',
@@ -5211,6 +5312,17 @@ Examples:
             fileSize: up.fileSize,
           ),
         );
+        // The bytes are already on this device — seed the on-device cache
+        // before the bubble swaps to the real URL. Both the chat bubble and
+        // the shared-media folder render from the same cache key, so the just-
+        // sent image appears instantly instead of re-downloading what we just
+        // uploaded.
+        if (up.kind == 'image') {
+          await mediaCacheWarmBytes(
+            _api.absoluteMediaUrl(up.mediaUrl),
+            Uint8List.fromList(file.bytes),
+          );
+        }
       }
 
       final kind = uploaded.length > 1 ? 'album' : uploaded.first.kind;
@@ -5886,6 +5998,7 @@ Examples:
       conversations.insert(0, updated);
     }
     notifyChatAndInbox();
+    warmRecentMedia();
     if (viewingHere && _userRecentlyPresent && !fromSelf) {
       _scheduleFocusedRead();
     }

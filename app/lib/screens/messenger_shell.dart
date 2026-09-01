@@ -1020,7 +1020,7 @@ class InboxPane extends StatelessWidget {
                               children: [
                                 if (c.lastMessage != null)
                                   Text(
-                                    DateFormat.Hm().format(
+                                    DateFormat.jm().format(
                                       c.lastMessage!.createdAt.toLocal(),
                                     ),
                                     style: TextStyle(
@@ -5187,6 +5187,8 @@ class _ConversationPaneState extends State<ConversationPane>
                 folder: _mediaFolder!,
                 messages: messages,
                 mediaBase: mediaBase,
+                conversationId: state.activeConversationId ?? '',
+                api: state.api,
                 tasks: [
                   ...state.tasksFor(state.activeConversationId),
                   ...state.taskHistoryFor(state.activeConversationId),

@@ -578,6 +578,54 @@ export function listMessages(conversationId, { limit = 80, before } = {}) {
   return rows.reverse().map(hydrateMessage);
 }
 
+/// Every media item shared in a conversation's messages (files, images,
+/// videos, audio…), newest first, so the Shared Media browser can show the
+/// full history instead of only whatever page of messages is loaded.
+export function listSharedMedia(conversationId, { limit = 500 } = {}) {
+  const lim = Math.min(Math.max(Number(limit) || 500, 1), 2000);
+  const rows = db
+    .prepare(
+      `
+      SELECT m.*, u.display_name AS sender_name, u.handle AS sender_handle
+      FROM messages m
+      JOIN users u ON u.id = m.sender_id
+      WHERE m.conversation_id = ?
+        AND m.deleted_at IS NULL
+        AND (m.media_url IS NOT NULL OR m.attachments IS NOT NULL)
+      ORDER BY m.created_at DESC
+      LIMIT ?
+    `,
+    )
+    .all(conversationId, lim);
+
+  const items = [];
+  for (const row of rows) {
+    const atts = parseAttachments(row.attachments, {
+      mediaUrl: row.media_url || null,
+      mimeType: row.mime_type || null,
+      fileName: row.file_name || null,
+      fileSize: row.file_size ?? null,
+      kind: row.kind,
+    });
+    for (const a of atts) {
+      if (!a.mediaUrl) continue;
+      items.push({
+        mediaUrl: a.mediaUrl,
+        kind: a.kind,
+        mimeType: a.mimeType,
+        fileName: a.fileName,
+        fileSize: a.fileSize,
+        createdAt: row.created_at,
+        senderId: row.sender_id,
+        senderName: row.sender_name,
+        source: 'message',
+        messageId: row.id,
+      });
+    }
+  }
+  return items;
+}
+
 export function getMessage(messageId) {
   const row = db
     .prepare(
