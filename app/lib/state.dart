@@ -2472,6 +2472,26 @@ class PrivetState extends ChangeNotifier {
   /// [chatFontSize]. Ctrl+scroll over the Tasks pane adjusts it; prefs persist it.
   double taskFontSize = 14.0;
 
+  /// Task rows the user has expanded (subtasks/attachments visible).
+  /// Device-local; persisted across restarts so expand/collapse positions
+  /// survive closing the app. Default is collapsed.
+  final Set<String> _expandedTaskIds = {};
+
+  bool isTaskExpanded(String taskId) => _expandedTaskIds.contains(taskId);
+
+  /// Persists a task row's expand/collapse state (remembered across restarts).
+  Future<void> setTaskExpanded(String taskId, bool expanded) async {
+    final changed = expanded
+        ? _expandedTaskIds.add(taskId)
+        : _expandedTaskIds.remove(taskId);
+    if (!changed) return;
+    final prefs = await _prefs();
+    await prefs.setString(
+      'privet_task_expanded',
+      jsonEncode(_expandedTaskIds.toList()..sort()),
+    );
+  }
+
   /// Default font family for message body text (device-local, '' = Default).
   /// A [kMessageFonts] key picked in the "Aa" picker; every chat renders
   /// message text in it unless the message carries an explicit `[font=…]` run.
@@ -2837,6 +2857,15 @@ class PrivetState extends ChangeNotifier {
       taskFontSize = storedTaskFontSize.clamp(11.0, 24.0).toDouble();
     }
     chatFontFamily = prefs.getString('privet_chat_font_family') ?? '';
+    final storedExpanded = prefs.getString('privet_task_expanded');
+    if (storedExpanded != null && storedExpanded.isNotEmpty) {
+      try {
+        final raw = (jsonDecode(storedExpanded) as List).cast<String>();
+        _expandedTaskIds.addAll(raw);
+      } catch (_) {
+        // Corrupt/unreadable: ignore and default to collapsed.
+      }
+    }
     // Manual Profile preference wins. Otherwise one GPU check: capable (RTX)
     // keeps full animated Privet; software GL / weak boxes get cheap mode.
     await prefs.remove('privet_low_resource');
@@ -5970,7 +5999,8 @@ Examples:
       // multi-browser logins for the same user only ding once.
       if (isNew &&
           event['playSound'] != false &&
-          message.kind != 'call') {
+          message.kind != 'call' &&
+          message.kind != 'task_event') {
         var muted = false;
         for (final c in conversations) {
           if (c.id == chatId) {

@@ -101,6 +101,145 @@ function broadcastTasks(conversationId) {
   });
 }
 
+const TASK_STATUS_LABELS = {
+  todo: 'To do',
+  in_progress: 'In progress',
+  review: 'Review',
+  done: 'Done',
+};
+const TASK_PRIORITY_LABELS = {
+  lowest: 'Lowest',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  highest: 'Highest',
+};
+
+/** Strip task-body markup ([b]/[i]/[bg]/[font=…]) to readable plain text. */
+function plainTaskText(text) {
+  return String(text || '')
+    .replace(/\[(?:\/?)(?:b|i|bg|font)(?:=[^\]]*)?\]/gi, '')
+    .replace(/\\\[/g, '[')
+    .replace(/\\\\/g, '\\')
+    .trim();
+}
+
+/** Short display label for a task row (mapItem shape or task_items row). */
+function taskRowLabel(row) {
+  if (!row) return 'Task';
+  const body = plainTaskText(row.body || row.text);
+  if (body) return body.length > 80 ? `${body.slice(0, 80).trim()}…` : body;
+  const name = row.fileName || row.file_name;
+  if (name) return name;
+  if (Array.isArray(row.attachments)) {
+    const n = row.attachments.length;
+    if (n > 0) return `${n} attachment${n === 1 ? '' : 's'}`;
+  }
+  return 'Task';
+}
+
+function taskStatusLabel(value) {
+  if (!value) return null;
+  return TASK_STATUS_LABELS[value] || value;
+}
+
+function taskPriorityLabel(value) {
+  if (!value) return null;
+  return TASK_PRIORITY_LABELS[value] || value;
+}
+
+/** Find a task's parent label (both mapItem shapes and raw rows). */
+function parentLabelFor(row) {
+  const parentId = row.parentId || row.parent_id;
+  if (!parentId) return null;
+  const parent = db.prepare('SELECT * FROM task_items WHERE id = ?').get(parentId);
+  return parent ? taskRowLabel(parent) : null;
+}
+
+function resolveUserName(id) {
+  if (!id) return null;
+  const u = getUserById(id);
+  return u ? u.display_name || u.handle || null : null;
+}
+
+/**
+ * Post one task-change message into the chat feed (kind 'task_event').
+ * Big events (create, status, priority, assign, delete) appear in chat so
+ * everyone sees them; the message body carries structured fields the client
+ * uses to open the task when clicked. Broadcasts silently (no ping sound).
+ */
+function emitTaskEventMessage({ conversationId, actorId, payload }) {
+  const body = JSON.stringify(payload);
+  const message = createMessage({
+    conversationId,
+    senderId: actorId,
+    body,
+    kind: 'task_event',
+  });
+  broadcastToUsers(memberIds(conversationId), { type: 'message', message });
+  noteConversationMessage(conversationId);
+}
+
+function buildTaskEventSummary(actorName, data) {
+  const q = (s) => (s ? `“${s}”` : '');
+  switch (data.action) {
+    case 'created':
+      return `${actorName} added task ${q(data.task)}`;
+    case 'subtask':
+      return data.parent
+        ? `${actorName} added subtask ${q(data.task)} to ${q(data.parent)}`
+        : `${actorName} added subtask ${q(data.task)}`;
+    case 'status':
+      if (data.from && data.from !== data.to) {
+        return `${actorName} changed status of ${q(data.task)} from ${data.from} to ${data.to}`;
+      }
+      return `${actorName} set status of ${q(data.task)} to ${data.to}`;
+    case 'priority':
+      if (data.from && data.from !== data.to) {
+        return `${actorName} changed priority of ${q(data.task)} from ${data.from} to ${data.to}`;
+      }
+      return `${actorName} set priority of ${q(data.task)} to ${data.to}`;
+    case 'assigned':
+      if (data.to) {
+        return data.from && data.from !== data.to
+          ? `${actorName} reassigned ${q(data.task)} from ${data.from} to ${data.to}`
+          : `${actorName} assigned ${q(data.task)} to ${data.to}`;
+      }
+      return data.from
+        ? `${actorName} removed ${data.from} from ${q(data.task)}`
+        : `${actorName} cleared the assignee of ${q(data.task)}`;
+    case 'deleted':
+      return data.parent
+        ? `${actorName} deleted subtask ${q(data.task)} of ${q(data.parent)}`
+        : `${actorName} deleted task ${q(data.task)}`;
+    default:
+      return `${actorName} updated ${q(data.task)}`;
+  }
+}
+
+/** Fire a task_event chat message for one structured change row. */
+function emitTaskChangeMessage({ actorId, conversationId, task, action, from, to }) {
+  const actor = resolveUserName(actorId) || 'Someone';
+  const parentLabel = parentLabelFor(task);
+  const payload = {
+    action,
+    taskId: task.id,
+    parentId: task.parentId || null,
+    task: taskRowLabel(task),
+    parent: parentLabel,
+    from,
+    to,
+  };
+  payload.summary = buildTaskEventSummary(actor, {
+    action,
+    task: payload.task,
+    parent: payload.parent,
+    from,
+    to,
+  });
+  emitTaskEventMessage({ conversationId, actorId, payload });
+}
+
 const MEDIA_KINDS = new Set(['image', 'video', 'audio', 'voice', 'file', 'album']);
 const MAX_UPLOAD_BYTES = 80 * 1024 * 1024; // 80MB
 
@@ -927,6 +1066,13 @@ export async function registerRoutes(app) {
         priority: request.body?.priority ? String(request.body.priority) : 'medium',
       });
       broadcastTasks(id);
+      // Mirror "task added" into the chat feed (clickable, opens the task).
+      emitTaskChangeMessage({
+        actorId: user.id,
+        conversationId: id,
+        task: item,
+        action: item.parentId ? 'subtask' : 'created',
+      });
       return { item, items: listTaskItems(id) };
     } catch (err) {
       const message = err.message || 'could not create task';
@@ -941,7 +1087,7 @@ export async function registerRoutes(app) {
     const { id } = request.params;
     const before = db.prepare('SELECT * FROM task_items WHERE id = ?').get(id);
     try {
-      const item = updateTaskItem(id, user.id, {
+      const result = updateTaskItem(id, user.id, {
         body: request.body?.body,
         done: request.body?.done,
         doneConfirmed: request.body?.doneConfirmed,
@@ -959,7 +1105,40 @@ export async function registerRoutes(app) {
             : undefined,
         clearMedia: request.body?.clearMedia === true,
       });
+      const item = result.item;
+      const changes = result.changes || [];
       broadcastTasks(item.conversationId);
+
+      // Mirror big changes (status / priority / assignment) into the chat feed.
+      // Everything else — body edits, attachments, pinning — stays in the task's
+      // activity log so the chat never spams on tiny tweaks.
+      for (const ch of changes) {
+        const action = ch.action;
+        if (action !== 'status' && action !== 'priority' && action !== 'assigned') {
+          continue;
+        }
+        let from = ch.fromValue ?? null;
+        let to = ch.toValue ?? null;
+        if (action === 'status') {
+          from = taskStatusLabel(from);
+          to = taskStatusLabel(to);
+        } else if (action === 'priority') {
+          from = taskPriorityLabel(from);
+          to = taskPriorityLabel(to);
+        } else {
+          // 'assigned' rows carry user ids — surface display names.
+          from = resolveUserName(from);
+          to = resolveUserName(to);
+        }
+        emitTaskChangeMessage({
+          actorId: user.id,
+          conversationId: item.conversationId,
+          task: item,
+          action,
+          from,
+          to,
+        });
+      }
 
       // Notify a newly assigned member (not the actor themselves).
       const newAssignee = request.body?.assignedTo
@@ -1020,8 +1199,22 @@ export async function registerRoutes(app) {
     if (!user) return;
     const { id } = request.params;
     try {
+      const existing = db.prepare('SELECT * FROM task_items WHERE id = ?').get(id);
+      if (!existing) throw new Error('not found');
       const result = deleteTaskItem(id, user.id);
       broadcastTasks(result.conversationId);
+      emitTaskChangeMessage({
+        actorId: user.id,
+        conversationId: result.conversationId,
+        task: {
+          id: existing.id,
+          parentId: existing.parent_id || null,
+          body: existing.body,
+          attachments: null,
+          fileName: existing.file_name || null,
+        },
+        action: 'deleted',
+      });
       return { ok: true, items: listTaskItems(result.conversationId) };
     } catch (err) {
       const message = err.message || 'could not delete task';

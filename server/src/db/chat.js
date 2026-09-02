@@ -250,6 +250,17 @@ function previewBody(kind, body, attachmentCount = 0) {
       return body || `📎 ${attachmentCount || 2} attachments`;
     case 'call':
       return callHistoryLabel(body);
+    case 'task_event': {
+      try {
+        const parsed = JSON.parse(body || '');
+        if (parsed && typeof parsed === 'object' && parsed.summary) {
+          return `📋 ${String(parsed.summary).slice(0, 160)}`;
+        }
+      } catch {
+        /* plain body */
+      }
+      return body ? `📋 ${body}` : '📋 Task update';
+    }
     case 'ai': {
       try {
         const parsed = JSON.parse(body || '');

@@ -372,6 +372,11 @@ export function updateTaskItem(id, userId, patch) {
   let priority = normalizePriority(existing.priority);
 
   let attachList = normalizeAttachments(attachmentsJson, { mediaUrl, mimeType, fileName });
+  // Snapshot attachment names before any patch so attachment changes (added /
+  // removed / replaced files) can be logged in the activity feed.
+  const prevAttachmentNames = attachList
+    .map((a) => a.fileName || a.mediaUrl)
+    .filter(Boolean);
 
   const activity = [];
 
@@ -481,6 +486,22 @@ export function updateTaskItem(id, userId, patch) {
     attachList = [];
   }
 
+  // Attachment set changed → log it. fromValue/toValue carry the file names
+  // (or media urls when unnamed) so the feed can show exactly what was added,
+  // removed, or swapped.
+  const nextAttachmentNames = attachList
+    .map((a) => a.fileName || a.mediaUrl)
+    .filter(Boolean);
+  const prevJoin = prevAttachmentNames.join(', ');
+  const nextJoin = nextAttachmentNames.join(', ');
+  if (prevJoin !== nextJoin) {
+    activity.push({
+      action: 'attachment',
+      fromValue: prevJoin || null,
+      toValue: nextJoin || null,
+    });
+  }
+
   if (patch.assignedTo !== undefined) {
     const nextAssignee = patch.assignedTo || null;
     if (nextAssignee !== assignedTo) {
@@ -490,6 +511,7 @@ export function updateTaskItem(id, userId, patch) {
   }
   if (patch.pinned !== undefined) {
     if (existing.parent_id) throw new Error('cannot pin subtask');
+    const wasPinned = !!pinned;
     pinned = patch.pinned ? 1 : 0;
     // Pinning a task puts the Tasks chip in the header — only one board pin needed.
     if (pinned) {
@@ -497,6 +519,13 @@ export function updateTaskItem(id, userId, patch) {
         `UPDATE task_items SET pinned = 0
          WHERE conversation_id = ? AND id != ? AND status != 'done'`,
       ).run(existing.conversation_id, id);
+    }
+    if (wasPinned !== !!pinned) {
+      activity.push({
+        action: 'pinned',
+        fromValue: wasPinned ? 'pinned' : null,
+        toValue: pinned ? 'pinned' : null,
+      });
     }
   }
 
@@ -540,7 +569,10 @@ export function updateTaskItem(id, userId, patch) {
     });
   }
 
-  return getTaskItem(id);
+  // Callers (task routes) use `changes` to mirror big task events into the
+  // chat feed as messages — status / priority / assignment etc. The activity
+  // array above is the single source of truth for "what actually changed".
+  return { item: getTaskItem(id), changes: activity };
 }
 
 /** Unpin every task in a conversation (removes Tasks chip from header). */
@@ -602,15 +634,27 @@ export function listTaskActivity(taskId, { limit = 50 } = {}) {
        LIMIT ?`,
     )
     .all(...taskIds, lim);
-  return rows.map((row) => ({
-    id: row.id,
-    taskId: row.task_id,
-    taskBody: row.task_body || null,
-    userId: row.user_id || null,
-    user: row.user_id ? publicUser(getUserById(row.user_id)) : null,
-    action: row.action,
-    fromValue: row.from_value,
-    toValue: row.to_value,
-    createdAt: row.created_at,
-  }));
+  return rows.map((row) => {
+    let fromValue = row.from_value;
+    let toValue = row.to_value;
+    // 'assigned' rows store user ids; surface them as display names so the
+    // feed can read "Alex assigned to Maria" / "Maria → John".
+    if (row.action === 'assigned') {
+      const fromUser = row.from_value ? getUserById(row.from_value) : null;
+      const toUser = row.to_value ? getUserById(row.to_value) : null;
+      fromValue = fromUser ? fromUser.display_name : row.from_value;
+      toValue = toUser ? toUser.display_name : row.to_value;
+    }
+    return {
+      id: row.id,
+      taskId: row.task_id,
+      taskBody: row.task_body || null,
+      userId: row.user_id || null,
+      user: row.user_id ? publicUser(getUserById(row.user_id)) : null,
+      action: row.action,
+      fromValue,
+      toValue,
+      createdAt: row.created_at,
+    };
+  });
 }

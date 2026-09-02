@@ -19,6 +19,7 @@ import '../util/low_resource.dart';
 import '../util/media_download.dart';
 import '../util/perf.dart';
 import '../util/rich_text_markup.dart';
+import '../util/task_event_payload.dart';
 import '../util/web_select_cursor.dart';
 import 'compact_emoji_picker.dart';
 import 'cached_media_image.dart';
@@ -108,6 +109,7 @@ class MessageBubble extends StatelessWidget {
     this.fontScale = 1.0,
     this.defaultFontFamily = '',
     this.onSetDefaultFont,
+    this.onTaskEventTap,
   });
 
   final ChatMessage message;
@@ -158,6 +160,9 @@ class MessageBubble extends StatelessWidget {
   final void Function(TextSelection selection, TextFormat format)?
       onFormatMessage;
 
+  /// Tapped a task-change row (kind 'task_event') — open the task in Tasks.
+  final VoidCallback? onTaskEventTap;
+
   @override
   Widget build(BuildContext context) {
     final bubble = _buildBubble(context);
@@ -203,6 +208,13 @@ class MessageBubble extends StatelessWidget {
 
     if (message.isCallHistory) {
       return _CallHistoryChip(message: message);
+    }
+
+    if (message.isTaskEvent) {
+      return _TaskEventChip(
+        message: message,
+        onTap: onTaskEventTap,
+      );
     }
 
     if (message.aiLocal || message.kind == 'ai') {
@@ -1246,6 +1258,111 @@ class _CallHistoryChip extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Centered clickable pill for server-authored task changes (kind
+/// 'task_event'): "Alex added subtask “Chapter 1” to “Book”". Tapping it opens
+/// the Tasks pane and reveals the affected task.
+class _TaskEventChip extends StatelessWidget {
+  const _TaskEventChip({required this.message, this.onTap});
+
+  final ChatMessage message;
+  final VoidCallback? onTap;
+
+  (IconData, Color) _look(TaskEventPayload p) {
+    switch (p.action) {
+      case 'created':
+      case 'subtask':
+        return (Icons.add_circle_outline_rounded, PrivetTheme.signal);
+      case 'status':
+        return (
+          p.to == 'Done'
+              ? Icons.check_circle_outline_rounded
+              : Icons.swap_horiz_rounded,
+          p.to == 'Done'
+              ? PrivetTheme.signal
+              : PrivetTheme.mist,
+        );
+      case 'priority':
+        return (
+          Icons.flag_outlined,
+          p.to == 'High' || p.to == 'Highest'
+              ? PrivetTheme.danger
+              : PrivetTheme.mist,
+        );
+      case 'assigned':
+        return (Icons.person_add_alt_1_rounded, PrivetTheme.signal);
+      case 'deleted':
+        return (Icons.delete_outline_rounded, PrivetTheme.danger);
+      default:
+        return (Icons.history_rounded, PrivetTheme.mist);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final payload = TaskEventPayload.tryParse(message.body);
+    final label = payload?.label ?? TaskEventPayload.preview(message.body);
+    final (icon, color) = payload == null
+        ? (Icons.history_rounded, PrivetTheme.mist)
+        : _look(payload);
+    final pill = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 8),
+      decoration: BoxDecoration(
+        color: PrivetTheme.panelElevated,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 15, color: color),
+          const SizedBox(width: 7),
+          Flexible(
+            child: Text(
+              label,
+              style: GoogleFonts.ibmPlexSans(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w500,
+                color: PrivetTheme.paper,
+                height: 1.25,
+              ),
+              maxLines: 4,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (onTap != null) ...[
+            const SizedBox(width: 6),
+            Icon(
+              Icons.open_in_new_rounded,
+              size: 12,
+              color: PrivetTheme.mist.withValues(alpha: 0.7),
+            ),
+          ],
+        ],
+      ),
+    );
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Center(
+        child: onTap == null
+            ? pill
+            : MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: Tooltip(
+                  message: 'Open in Tasks',
+                  waitDuration: const Duration(milliseconds: 400),
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: onTap,
+                    child: pill,
+                  ),
+                ),
+              ),
       ),
     );
   }

@@ -149,62 +149,101 @@ class _UnassignSentinel {
 /// One row of a task's change log. When [viewedTaskId] is the id of the task
 /// whose details are open, rows that actually belong to a subtask are labeled
 /// with that subtask's text so a parent's merged feed stays readable.
+///
+/// Every row names the actor and spells out exactly what changed ("from → to").
+/// Description edits additionally render a word-level diff ([_ActivityBodyDiff])
+/// so a rename or a small wording tweak is visible at a glance.
+/// Text scales with [fontSize] — the shared Tasks font size, so the pane's
+/// Ctrl+scroll zoom (and the "Aa" stepper) rescales the whole feed.
 class _TaskActivityRow extends StatelessWidget {
-  const _TaskActivityRow({required this.activity, this.viewedTaskId});
+  const _TaskActivityRow({
+    required this.activity,
+    this.viewedTaskId,
+    this.currentUserId,
+    this.fontSize = 12,
+  });
 
   final TaskActivity activity;
   final String? viewedTaskId;
 
+  /// Current user's id — matched against the actor so rows read "You changed…".
+  final String? currentUserId;
+
+  final double fontSize;
+
   @override
   Widget build(BuildContext context) {
-    final (icon, color, text) = _describe();
+    final (icon, color, spans, diff) = _describe();
     final childLabel =
         viewedTaskId != null && activity.taskId != viewedTaskId
             ? _taskLabel(activity.taskBody)
             : null;
+    final baseStyle = GoogleFonts.ibmPlexSans(
+      fontSize: fontSize,
+      color: PrivetTheme.paper,
+    );
     return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Row(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 16, color: color),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text.rich(
-              TextSpan(
-                style: GoogleFonts.ibmPlexSans(
-                  fontSize: 12,
-                  color: PrivetTheme.paper,
-                ),
-                children: [
-                  TextSpan(
-                    text: activity.user?.displayName ?? 'Someone',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  TextSpan(text: ' $text'),
-                  if (childLabel != null)
-                    TextSpan(
-                      text: ' · $childLabel',
-                      style: TextStyle(
-                        color: PrivetTheme.mist,
-                        fontStyle: FontStyle.italic,
-                      ),
-                    ),
-                ],
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 1.5),
+                child: Icon(icon, size: 15, color: color),
               ),
-            ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text.rich(
+                  TextSpan(
+                    style: baseStyle,
+                    children: [
+                      TextSpan(
+                        text: _actorName(),
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      ...spans,
+                      if (childLabel != null)
+                        TextSpan(
+                          text: ' · $childLabel',
+                          style: TextStyle(
+                            color: PrivetTheme.mist,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                _fmtTaskDate(activity.createdAt),
+                style: GoogleFonts.ibmPlexSans(
+                  fontSize: math.max(9.0, fontSize - 2.5),
+                  color: PrivetTheme.mist.withValues(alpha: 0.5),
+                ),
+              ),
+            ],
           ),
-          const SizedBox(width: 8),
-          Text(
-            _fmtTaskDate(activity.createdAt),
-            style: GoogleFonts.ibmPlexSans(
-              fontSize: 10,
-              color: PrivetTheme.mist.withValues(alpha: 0.5),
+          if (diff != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 23, top: 5),
+              child: diff,
             ),
-          ),
         ],
       ),
     );
+  }
+
+  /// "You" when the current user made the change, else their display name.
+  String _actorName() {
+    final me = activity.user;
+    if (me == null) return 'Someone';
+    return currentUserId != null && me.id == currentUserId
+        ? 'You'
+        : me.displayName;
   }
 
   /// Short plain-text label for the task an activity row belongs to.
@@ -215,51 +254,369 @@ class _TaskActivityRow extends StatelessWidget {
     return plain.length <= 48 ? plain : '${plain.substring(0, 48).trimRight()}…';
   }
 
-  (IconData, Color, String) _describe() {
+  /// Icon + accent + verb phrase + optional diff widget for this entry.
+  (IconData, Color, List<TextSpan>, Widget?) _describe() {
+    const arrow = ' → ';
+    final from = activity.fromValue;
+    final to = activity.toValue;
+
     switch (activity.action) {
       case 'created':
         return (
           Icons.add_circle_outline_rounded,
           PrivetTheme.signal,
-          'created the task',
+          const [TextSpan(text: ' created the task')],
+          null,
         );
       case 'status':
-        final to = activity.toValue;
-        return (
-          Icons.swap_horiz_rounded,
-          to == null ? PrivetTheme.mist : _taskStatusColor(to),
-          to == null
-              ? 'updated status'
-              : 'moved to ${_taskStatusLabel(to)}',
-        );
+        final color = to == null ? PrivetTheme.mist : _taskStatusColor(to);
+        final spans = <TextSpan>[
+          if (to == null)
+            const TextSpan(text: ' updated status')
+          else if (from == null || from == to) ...[
+            const TextSpan(text: ' set status to '),
+            TextSpan(
+              text: _taskStatusLabel(to),
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ] else ...[
+            const TextSpan(text: ' changed status: '),
+            TextSpan(
+              text: _taskStatusLabel(from),
+              style: TextStyle(
+                color: _taskStatusColor(from),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const TextSpan(text: arrow),
+            TextSpan(
+              text: _taskStatusLabel(to),
+              style: TextStyle(color: color, fontWeight: FontWeight.w700),
+            ),
+          ],
+        ];
+        return (Icons.swap_horiz_rounded, color, spans, null);
       case 'priority':
-        final to = activity.toValue;
+        final color = to == null ? PrivetTheme.mist : _taskPriorityColor(to);
+        final spans = <TextSpan>[
+          if (to == null)
+            const TextSpan(text: ' updated priority')
+          else if (from == null || from == to) ...[
+            const TextSpan(text: ' set priority to '),
+            TextSpan(
+              text: _taskPriorityLabel(to),
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ] else ...[
+            const TextSpan(text: ' changed priority: '),
+            TextSpan(
+              text: _taskPriorityLabel(from),
+              style: TextStyle(
+                color: _taskPriorityColor(from),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const TextSpan(text: arrow),
+            TextSpan(
+              text: _taskPriorityLabel(to),
+              style: TextStyle(color: color, fontWeight: FontWeight.w700),
+            ),
+          ],
+        ];
         return (
-          _taskPriorityIcon(to ?? 'medium'),
-          to == null ? PrivetTheme.mist : _taskPriorityColor(to),
-          to == null
-              ? 'updated priority'
-              : 'set priority to ${_taskPriorityLabel(to)}',
+          _taskPriorityIcon(to ?? from ?? 'medium'),
+          color,
+          spans,
+          null,
         );
       case 'assigned':
+        final spans = <TextSpan>[
+          if (to == null)
+            TextSpan(
+              text: from == null || from.isEmpty
+                  ? ' changed the assignee'
+                  : ' removed the assignee ($from)',
+            )
+          else if (from == null || from.isEmpty || from == to) ...[
+            const TextSpan(text: ' assigned to '),
+            TextSpan(
+              text: to,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ] else ...[
+            const TextSpan(text: ' changed the assignee: '),
+            TextSpan(text: from, style: const TextStyle(fontWeight: FontWeight.w600)),
+            const TextSpan(text: arrow),
+            TextSpan(
+              text: to,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ],
+        ];
         return (
-          Icons.person_add_alt_1_rounded,
+          to == null ? Icons.person_remove_rounded : Icons.person_add_alt_1_rounded,
           PrivetTheme.mist,
-          'changed the assignee',
+          spans,
+          null,
         );
       case 'body':
         return (
           Icons.edit_outlined,
           PrivetTheme.mist,
-          'edited the description',
+          const [TextSpan(text: ' edited the description')],
+          _ActivityBodyDiff(
+            from: activity.fromValue,
+            to: activity.toValue,
+            fontSize: fontSize,
+          ),
+        );
+      case 'attachment':
+        final spans = <TextSpan>[
+          if (to == null || to.isEmpty)
+            TextSpan(
+              text: from == null || from.isEmpty
+                  ? ' updated attachments'
+                  : ' removed $from',
+            )
+          else if (from == null || from.isEmpty || from == to) ...[
+            const TextSpan(text: ' attached '),
+            TextSpan(
+              text: to,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ] else ...[
+            const TextSpan(text: ' changed attachments: '),
+            TextSpan(text: from, style: const TextStyle(fontWeight: FontWeight.w600)),
+            const TextSpan(text: arrow),
+            TextSpan(
+              text: to,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ],
+        ];
+        return (
+          Icons.attach_file_rounded,
+          PrivetTheme.mist,
+          spans,
+          null,
         );
       default:
         return (
           Icons.history_rounded,
           PrivetTheme.mist,
-          'updated the task',
+          const [TextSpan(text: ' updated the task')],
+          null,
         );
     }
+  }
+}
+
+enum _DiffKind { same, add, del }
+
+class _DiffToken {
+  const _DiffToken(this.text, this.kind);
+
+  final String text;
+  final _DiffKind kind;
+}
+
+/// Splits [s] into plain words (whitespace is discarded; the diff re-joins
+/// tokens with single spaces on render).
+List<String> _diffWordsOf(String s) {
+  final t = s.trim();
+  return t.isEmpty ? const [] : t.split(RegExp(r'\s+'));
+}
+
+/// Word-level LCS diff. Removed words are dropped from the old side, added
+/// words come from the new side; identical runs stay "same" so a small edit
+/// ("Call Alex" → "Call Mike") reads as `~~Call~~ Alex` instead of a full
+/// rewrite.
+///
+/// Common prefix/suffix words are locked in first (both ends of the strings
+/// rarely change at once), so appending "…to the log test" to "…log" shows
+/// only the added words — never the old tail struck out and re-added.
+/// Pathological inputs (hundreds of words) fall back to showing the whole
+/// before/after so the pane never hangs on a giant paste.
+List<_DiffToken> _diffWords(String a, String b) {
+  final wa = _diffWordsOf(a);
+  final wb = _diffWordsOf(b);
+  final n = wa.length, m = wb.length;
+  if (n + m == 0) return const [];
+
+  // Lock identical leading runs.
+  var prefix = 0;
+  while (prefix < n && prefix < m && wa[prefix] == wb[prefix]) prefix++;
+  // Lock identical trailing runs (guard against overlapping the prefix).
+  var suffix = 0;
+  while (suffix < n - prefix &&
+      suffix < m - prefix &&
+      wa[n - 1 - suffix] == wb[m - 1 - suffix]) {
+    suffix++;
+  }
+  final midOld = wa.sublist(prefix, n - suffix);
+  final midNew = wb.sublist(prefix, m - suffix);
+
+  final out = <_DiffToken>[
+    for (var i = 0; i < prefix; i++) _DiffToken(wa[i], _DiffKind.same),
+  ];
+
+  final x = midOld.length, y = midNew.length;
+  if (x + y == 0) {
+    // No middle differences — pure prefix/suffix overlap (identical text).
+    return out;
+  }
+  if (x > 400 || y > 400) {
+    if (midOld.isNotEmpty) {
+      out.add(_DiffToken(midOld.join(' '), _DiffKind.del));
+    }
+    if (midNew.isNotEmpty) {
+      out.add(_DiffToken(midNew.join(' '), _DiffKind.add));
+    }
+  } else {
+    final lcs = List.generate(
+      x + 1,
+      (_) => List<int>.filled(y + 1, 0),
+      growable: false,
+    );
+    for (var i = x - 1; i >= 0; i--) {
+      for (var j = y - 1; j >= 0; j--) {
+        lcs[i][j] = midOld[i] == midNew[j]
+            ? lcs[i + 1][j + 1] + 1
+            : math.max(lcs[i + 1][j], lcs[i][j + 1]);
+      }
+    }
+    var i = 0, j = 0;
+    while (i < x && j < y) {
+      if (midOld[i] == midNew[j]) {
+        out.add(_DiffToken(midOld[i], _DiffKind.same));
+        i++;
+        j++;
+      } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+        out.add(_DiffToken(midOld[i], _DiffKind.del));
+        i++;
+      } else {
+        out.add(_DiffToken(midNew[j], _DiffKind.add));
+        j++;
+      }
+    }
+    while (i < x) {
+      out.add(_DiffToken(midOld[i++], _DiffKind.del));
+    }
+    while (j < y) {
+      out.add(_DiffToken(midNew[j++], _DiffKind.add));
+    }
+  }
+
+  // Re-append the identical trailing run in order.
+  for (var i = m - suffix; i < m; i++) {
+    out.add(_DiffToken(wb[i], _DiffKind.same));
+  }
+  return out;
+}
+
+/// Word-level "before → after" of a description edit. Removed words render
+/// struck-through in danger red, added words in signal green. Long diffs
+/// collapse to a preview with a "Show more" toggle.
+class _ActivityBodyDiff extends StatefulWidget {
+  const _ActivityBodyDiff({
+    required this.from,
+    required this.to,
+    required this.fontSize,
+  });
+
+  final String? from;
+  final String? to;
+  final double fontSize;
+
+  @override
+  State<_ActivityBodyDiff> createState() => _ActivityBodyDiffState();
+}
+
+class _ActivityBodyDiffState extends State<_ActivityBodyDiff> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final from = widget.from == null ? '' : markupToPlain(widget.from!).trim();
+    final to = widget.to == null ? '' : markupToPlain(widget.to!).trim();
+    final tokens = _diffWords(from, to);
+    final changed = tokens.where((t) => t.kind != _DiffKind.same).length;
+    if (changed == 0) return const SizedBox.shrink();
+
+    const previewTokens = 44;
+    final long = tokens.length > previewTokens;
+    final shown = long && !_expanded
+        ? tokens.take(previewTokens).toList()
+        : tokens;
+
+    final base = GoogleFonts.ibmPlexSans(
+      fontSize: widget.fontSize,
+      height: 1.35,
+      color: PrivetTheme.paper,
+    );
+    final diff = Text.rich(
+      TextSpan(
+        style: base,
+        children: [
+          for (final t in shown) ...[
+            TextSpan(
+              text: t.text,
+              style: switch (t.kind) {
+                _DiffKind.add => TextStyle(
+                    color: PrivetTheme.signal,
+                    fontWeight: FontWeight.w600,
+                  ),
+                _DiffKind.del => TextStyle(
+                    color: PrivetTheme.danger,
+                    decoration: TextDecoration.lineThrough,
+                    decorationColor: PrivetTheme.danger,
+                  ),
+                _DiffKind.same => const TextStyle(),
+              },
+            ),
+            const TextSpan(text: ' '),
+          ],
+          if (long && !_expanded) const TextSpan(text: '…'),
+        ],
+      ),
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+          decoration: BoxDecoration(
+            color: PrivetTheme.panelElevated,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: PrivetTheme.line),
+          ),
+          child: diff,
+        ),
+        if (long)
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Text(
+                _expanded ? 'Show less' : 'Show more',
+                style: GoogleFonts.ibmPlexSans(
+                  fontSize: math.max(9.5, widget.fontSize - 2),
+                  fontWeight: FontWeight.w600,
+                  color: PrivetTheme.signal,
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
   }
 }
 
@@ -649,6 +1006,8 @@ class ChatTaskPane extends StatefulWidget {
     required this.mediaBase,
     required this.onClose,
     this.initialTab = 0,
+    this.revealTaskId,
+    this.onRevealDone,
   });
 
   final PrivetState state;
@@ -656,6 +1015,13 @@ class ChatTaskPane extends StatefulWidget {
   final String mediaBase;
   final VoidCallback onClose;
   final int initialTab;
+
+  /// When set (tapped a task-change message in chat), the pane opens the Tasks
+  /// tab, clears filters, scrolls to this task row (its parent for subtasks),
+  /// expands it and flashes it. Cleared via [onRevealDone] after the flash.
+  final String? revealTaskId;
+
+  final VoidCallback? onRevealDone;
 
   @override
   State<ChatTaskPane> createState() => _ChatTaskPaneState();
@@ -680,6 +1046,12 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
   String? _filterAssignee; // null = all, '' = unassigned, else user id
   bool _boardView = false;
 
+  // Reveal state (tap a task-change message → open + highlight the task).
+  /// Root-row id currently being scrolled/flashed ('' cleared).
+  String? _revealRootId;
+  GlobalKey? _revealRowKey;
+  Timer? _revealTimer;
+
   @override
   void initState() {
     super.initState();
@@ -693,10 +1065,25 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
       widget.state.refreshReminderHistory(widget.conversationId);
       widget.state.refreshTaskHistory(widget.conversationId);
     });
+    if (widget.revealTaskId != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _scheduleReveal(widget.revealTaskId!);
+      });
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant ChatTaskPane oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final next = widget.revealTaskId;
+    if (next != null && next != oldWidget.revealTaskId) {
+      _scheduleReveal(next);
+    }
   }
 
   @override
   void dispose() {
+    _revealTimer?.cancel();
     _tab.dispose();
     _taskScrollCtrl.removeListener(_onTaskScroll);
     _taskScrollCtrl.dispose();
@@ -707,6 +1094,148 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
       c.dispose();
     }
     super.dispose();
+  }
+
+  /// Maps any task id (root or subtask, active or history) to the root row id
+  /// that contains it — the row we must expand/scroll/flash.
+  String? _revealRootFor(String id) {
+    final board = widget.state.taskBoardFor(widget.conversationId);
+    for (final root in board.activeItems) {
+      if (root.id == id) return root.id;
+    }
+    for (final item in board.items) {
+      if (item.id == id) return item.parentId;
+    }
+    final history = widget.state.taskHistoryBoardFor(widget.conversationId);
+    for (final root in history.rootItems) {
+      if (root.id == id) return root.id;
+    }
+    for (final item in history.items) {
+      if (item.id == id) return item.parentId;
+    }
+    return null;
+  }
+
+  /// Reveal flow: force Tasks tab + list view, clear filters, wait until the
+  /// task data exists (fetch may still be in flight when the pane is freshly
+  /// opened from an event chip; page older history too), then scroll to the
+  /// task's row, expand it and flash it.
+  Future<void> _scheduleReveal(String id) async {
+    if (!mounted) return;
+    if (_tab.index != 0) {
+      _tab.animateTo(0);
+      // Let the TabBarView actually build the Tasks page first.
+      await Future<void>.delayed(const Duration(milliseconds: 320));
+    }
+    if (!mounted) return;
+    setState(() {
+      _boardView = false;
+      _taskSearch = '';
+      _taskSearchCtrl.clear();
+      _filterStatus = null;
+      _filterPriority = null;
+      _filterAssignee = null;
+    });
+
+    // The task list (active or history) may not have arrived yet — retry for a
+    // few seconds while the conversation's tasks load, paging history too.
+    String? rootId;
+    for (var attempt = 0; attempt < 30 && mounted; attempt++) {
+      rootId = _revealRootFor(id);
+      if (rootId != null) break;
+      if (widget.state.taskHistoryHasMore(widget.conversationId)) {
+        await widget.state.loadOlderTaskHistory(widget.conversationId);
+        if (mounted) setState(() {});
+      }
+      if (mounted && rootId == null) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+    }
+    if (!mounted) return;
+    if (rootId == null) {
+      // Gone (e.g. already deleted) — still show the Tasks tab, no flash.
+      setState(() => _revealRootId = null);
+      widget.onRevealDone?.call();
+      return;
+    }
+    await _performReveal(rootId);
+  }
+
+  Future<void> _performReveal(String rootId) async {
+    // Persist expanded so a subtask target is actually visible inside the row.
+    widget.state.setTaskExpanded(rootId, true);
+    _revealTimer?.cancel();
+    setState(() {
+      _revealRootId = rootId;
+      _revealRowKey = GlobalKey();
+    });
+    await _bringRowIntoView(rootId);
+    if (!mounted) return;
+    _revealTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted) return;
+      setState(() {
+        _revealRootId = null;
+        _revealRowKey = null;
+      });
+      widget.onRevealDone?.call();
+    });
+  }
+
+  /// Brings the revealed row into view. The task list builds rows lazily, so a
+  /// row far down (or past unloaded history pages) isn't mounted yet and a
+  /// plain [Scrollable.ensureVisible] would silently do nothing — scroll in
+  /// viewport-sized steps (paging more history at the bottom) until the row
+  /// mounts, then fine-scroll it to the top area and let the flash show it.
+  Future<void> _bringRowIntoView(String rootId) async {
+    // Give the list a beat to attach the vertical controller after the
+    // list/board switch.
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    for (var step = 0; step < 40 && mounted; step++) {
+      final ctx = _revealRowKey?.currentContext;
+      if (ctx != null) {
+        await Scrollable.ensureVisible(
+          ctx,
+          duration: const Duration(milliseconds: 260),
+          curve: Curves.easeOutCubic,
+          alignment: 0.12,
+        );
+        return;
+      }
+      if (!_taskScrollCtrl.hasClients) {
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        continue;
+      }
+      final pos = _taskScrollCtrl.position;
+      if (pos.pixels >= pos.maxScrollExtent - 8) {
+        if (widget.state.taskHistoryHasMore(widget.conversationId)) {
+          await widget.state.loadOlderTaskHistory(widget.conversationId);
+          if (mounted) setState(() {});
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+        } else {
+          // Row never mounted and there is nothing more to load — stop.
+          return;
+        }
+      } else {
+        final target = math.min(
+          pos.pixels + pos.viewportDimension * 0.85,
+          pos.maxScrollExtent,
+        );
+        await pos.animateTo(
+          target,
+          duration: const Duration(milliseconds: 130),
+          curve: Curves.linear,
+        );
+      }
+      // Let the list build the newly visible rows.
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+    }
+  }
+
+  /// Row key for the reveal target (only that row gets a GlobalKey, so
+  /// ordinary rebuilds never accumulate keys).
+  GlobalKey? _revealKeyFor(String rootId) {
+    if (_revealRootId != rootId) return null;
+    return _revealRowKey ??= GlobalKey();
   }
 
   void _onTaskScroll() {
@@ -1211,109 +1740,16 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
       context: context,
       isScrollControlled: true,
       backgroundColor: PrivetTheme.panel,
-      showDragHandle: true,
-      builder: (sheetContext) {
-        return SizedBox(
-          height: MediaQuery.sizeOf(context).height * 0.62,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        'Task details',
-                        style: GoogleFonts.syne(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: 'Close',
-                      onPressed: () => Navigator.pop(sheetContext),
-                      icon: const Icon(Icons.close_rounded),
-                      visualDensity: VisualDensity.compact,
-                    ),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
-                  children: [
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: LayoutBuilder(
-                        builder: (context, constraints) =>
-                            SelectableMarkupText(
-                          text: item.body,
-                          baseStyle: GoogleFonts.ibmPlexSans(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                            color: PrivetTheme.paper,
-                          ),
-                          maxWidth: constraints.maxWidth,
-                          onFormat: (sel, f) =>
-                              _applyTaskBodyFormat(item, sel, f),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
-                      children: [
-                        _TaskMetaChip(
-                          label: _taskStatusLabel(item.status),
-                          color: _taskStatusColor(item.status),
-                          onTap: () {},
-                        ),
-                        _TaskMetaChip(
-                          label: _taskPriorityLabel(item.priority),
-                          color: _taskPriorityColor(item.priority),
-                          icon: _taskPriorityIcon(item.priority),
-                          onTap: () {},
-                        ),
-                        if (item.assignedTo != null)
-                          _TaskMetaChip(
-                            label: item.assignedTo!.displayName,
-                            color: PrivetTheme.mist,
-                            icon: Icons.person_outline_rounded,
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      'Created ${_fmtTaskDate(item.createdAt)}'
-                      '${item.createdBy != null ? ' by ${item.createdBy!.displayName}' : ''}',
-                      style: GoogleFonts.ibmPlexSans(
-                        fontSize: 11,
-                        color: PrivetTheme.mist.withValues(alpha: 0.55),
-                      ),
-                    ),
-                    if (activity.isNotEmpty) ...[
-                      const SizedBox(height: 16),
-                      Text(
-                        'Activity',
-                        style: GoogleFonts.syne(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: PrivetTheme.paper,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      for (final a in activity) _TaskActivityRow(activity: a, viewedTaskId: item.id),
-                    ],
-                  ],
-                ),
-              ),
-            ],
-          ),
-        );
-      },
+      // No built-in drag-handle: the sheet has its own resize grip so dragging
+      // resizes instead of dismissing, and the X / barrier close it.
+      showDragHandle: false,
+      desktopMaxWidth: 620,
+      desktopMaxHeightFraction: 0.97,
+      builder: (sheetContext) => _TaskDetailsSheet(
+        state: widget.state,
+        item: item,
+        activity: activity,
+      ),
     );
   }
 
@@ -1600,6 +2036,9 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         onRemoveSubtaskAttachment: history
             ? null
             : (sub, url) => widget.state.removeTaskAttachment(sub, url),
+        initiallyExpanded: widget.state.isTaskExpanded(item.id),
+        onExpandedChanged: (expanded) =>
+            widget.state.setTaskExpanded(item.id, expanded),
       ),
     );
   }
@@ -1700,19 +2139,22 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
             const SizedBox(height: 6),
             ...filtered.asMap().entries.map((e) {
               final prog = board.progressFor(e.value);
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _buildTaskRow(
-                    item: e.value,
-                    number: e.key + 1,
-                    board: board,
-                    progressLabel: (e.value.subtaskTotal ?? 0) > 0
-                        ? '${prog.done}/${prog.total}'
-                        : null,
-                  ),
-                  if (e.key < filtered.length - 1) const _TaskDivider(),
-                ],
+              return _revealWrap(
+                rootId: e.value.id,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _buildTaskRow(
+                      item: e.value,
+                      number: e.key + 1,
+                      board: board,
+                      progressLabel: (e.value.subtaskTotal ?? 0) > 0
+                          ? '${prog.done}/${prog.total}'
+                          : null,
+                    ),
+                    if (e.key < filtered.length - 1) const _TaskDivider(),
+                  ],
+                ),
               );
             }),
           ] else if (board.activeItems.isNotEmpty) ...[
@@ -1731,18 +2173,21 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                   : 'History — ${historyRoots.length}',
             ),
             const SizedBox(height: 6),
-            ...historyRoots.asMap().entries.map((e) => Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _buildTaskRow(
-                      item: e.value,
-                      number: e.key + 1,
-                      board: historyBoard,
-                      history: true,
-                    ),
-                    if (e.key < historyRoots.length - 1)
-                      const _TaskDivider(),
-                  ],
+            ...historyRoots.asMap().entries.map((e) => _revealWrap(
+                  rootId: e.value.id,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _buildTaskRow(
+                        item: e.value,
+                        number: e.key + 1,
+                        board: historyBoard,
+                        history: true,
+                      ),
+                      if (e.key < historyRoots.length - 1)
+                        const _TaskDivider(),
+                    ],
+                  ),
                 )),
             if (historyLoading || _loadingTaskHistory)
               const Padding(
@@ -1771,6 +2216,32 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
           ],
         ],
       ],
+    );
+  }
+
+  /// Wraps a root row with a reveal key + highlight while a task-change
+  /// message reveal is active (scroll target / flash backdrop).
+  Widget _revealWrap({required String rootId, required Widget child}) {
+    final key = _revealKeyFor(rootId);
+    final highlighted = _revealRootId == rootId;
+    if (key == null && !highlighted) return child;
+    return AnimatedContainer(
+      key: key,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOut,
+      decoration: BoxDecoration(
+        color: highlighted
+            ? PrivetTheme.signal.withValues(alpha: 0.13)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(12),
+        border: highlighted
+            ? Border.all(
+                color: PrivetTheme.signal.withValues(alpha: 0.6),
+                width: 1.4,
+              )
+            : null,
+      ),
+      child: child,
     );
   }
 
@@ -3438,6 +3909,8 @@ class _TaskRow extends StatefulWidget {
     required this.onAttachSubtask,
     required this.onRemoveSubtaskAttachment,
     this.onFormatBody,
+    this.initiallyExpanded = false,
+    this.onExpandedChanged,
   });
 
   final int number;
@@ -3477,6 +3950,12 @@ class _TaskRow extends StatefulWidget {
   final void Function(TextSelection selection, TextFormat format)?
       onFormatBody;
 
+  /// Restored expand state (persisted in [PrivetState]); defaults collapsed.
+  final bool initiallyExpanded;
+
+  /// Persists a toggle of the chevron back into [PrivetState].
+  final ValueChanged<bool>? onExpandedChanged;
+
   @override
   State<_TaskRow> createState() => _TaskRowState();
 }
@@ -3486,14 +3965,29 @@ class _TaskRowState extends State<_TaskRow> {
   final _subFocus = FocusNode();
   bool _addingSub = false;
 
-  /// Whether nested content (subtasks + attachments) is shown. Defaults to
-  /// expanded so existing layout is preserved; toggled by the leading chevron.
-  bool _expanded = true;
+  /// Whether nested content (subtasks + attachments) is shown. Restored from
+  /// [PrivetState] (default collapsed) and persisted on every toggle.
+  late bool _expanded = widget.initiallyExpanded;
 
   bool get _hasNested =>
       widget.onAddSubtask != null ||
       widget.subtasks.isNotEmpty ||
       widget.item.mediaItems.isNotEmpty;
+
+  void _toggleExpanded() {
+    setState(() => _expanded = !_expanded);
+    widget.onExpandedChanged?.call(_expanded);
+  }
+
+  @override
+  void didUpdateWidget(covariant _TaskRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Reveal-from-message auto-expands the row by persisting state and
+    // rebuilding; pick that up so a subtask target actually shows its row.
+    if (widget.initiallyExpanded != oldWidget.initiallyExpanded) {
+      _expanded = widget.initiallyExpanded;
+    }
+  }
 
   @override
   void dispose() {
@@ -3609,8 +4103,7 @@ class _TaskRowState extends State<_TaskRow> {
                       child: Tooltip(
                         message: _expanded ? 'Collapse' : 'Expand',
                         child: GestureDetector(
-                          onTap: () =>
-                              setState(() => _expanded = !_expanded),
+                          onTap: _toggleExpanded,
                           child: Padding(
                             padding: const EdgeInsets.only(top: 4),
                             child: AnimatedRotation(
@@ -5459,3 +5952,299 @@ void _applyBodyFormatToItem(
   if (next == item.body) return;
   save?.call(next);
 }
+  /// Compact "Aa" stepper for the Task details sheet — − / value / + / reset.
+  /// Writes to the shared [PrivetState.taskFontSize], so it stays in sync with
+  /// the Ctrl+scroll zoom over the Tasks pane and persists across restarts.
+  class _TaskDetailsFontStepper extends StatelessWidget {
+  const _TaskDetailsFontStepper({
+    required this.state,
+    required this.fontSize,
+  });
+
+  final PrivetState state;
+  final double fontSize;
+
+  Widget _btn(
+    BuildContext context,
+    IconData icon,
+    String tooltip,
+    VoidCallback onTap,
+  ) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: Tooltip(
+        message: tooltip,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(6),
+          child: Container(
+            width: 24,
+            height: 24,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(6),
+              color: PrivetTheme.panelElevated,
+              border: Border.all(color: PrivetTheme.line),
+            ),
+            child: Icon(icon, size: 14, color: PrivetTheme.paper),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fs = fontSize;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _btn(
+          context,
+          Icons.text_decrease_rounded,
+          'Smaller text',
+          () => unawaited(state.setTaskFontSize(fs - 0.5)),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          child: Text(
+            fs % 1 == 0 ? fs.toStringAsFixed(0) : fs.toStringAsFixed(1),
+            style: GoogleFonts.ibmPlexSans(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: PrivetTheme.mist,
+            ),
+          ),
+        ),
+        _btn(
+          context,
+          Icons.text_increase_rounded,
+          'Larger text',
+          () => unawaited(state.setTaskFontSize(fs + 0.5)),
+        ),
+        const SizedBox(width: 2),
+        _btn(
+          context,
+          Icons.restart_alt_rounded,
+          'Reset to default (14)',
+          () => unawaited(state.setTaskFontSize(14)),
+        ),
+      ],
+    );
+  }
+}
+
+/// Thin draggable bar at the top of the task details sheet. Drag up to make
+/// the sheet taller, down to shrink it (clamped).
+class _DetailsResizeGrip extends StatelessWidget {
+  const _DetailsResizeGrip({required this.onDrag});
+
+  final ValueChanged<double> onDrag;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeUpDown,
+      child: Tooltip(
+        message: 'Drag to resize',
+        waitDuration: const Duration(milliseconds: 500),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onVerticalDragUpdate: (d) => onDrag(d.delta.dy),
+          child: SizedBox(
+            height: 24,
+            width: double.infinity,
+            child: Center(
+              child: Container(
+                width: 48,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: PrivetTheme.line,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Task details: metadata chips + the super-detailed activity log. The sheet
+/// is larger than before by default and resizable by dragging the grip;
+/// Ctrl+scroll zooms the task/activity text via the shared task font size.
+class _TaskDetailsSheet extends StatefulWidget {
+  const _TaskDetailsSheet({
+    required this.state,
+    required this.item,
+    required this.activity,
+  });
+
+  final PrivetState state;
+  final TaskItem item;
+  final List<TaskActivity> activity;
+
+  @override
+  State<_TaskDetailsSheet> createState() => _TaskDetailsSheetState();
+}
+
+class _TaskDetailsSheetState extends State<_TaskDetailsSheet> {
+  /// Sheet height as a screen fraction. Bigger default than the old fixed
+  /// 0.66, resizable 0.5–0.94 via the grip.
+  double _heightFrac = 0.86;
+  static const double _minFrac = 0.5;
+  static const double _maxFrac = 0.94;
+
+  void _resize(double dy) {
+    final h = MediaQuery.sizeOf(context).height;
+    if (h <= 0) return;
+    setState(
+      () => _heightFrac = (_heightFrac - dy / h).clamp(_minFrac, _maxFrac),
+    );
+  }
+
+  /// Ctrl+scroll anywhere in the sheet zooms the task/activity text (same
+  /// handler as the Tasks pane, shared [taskFontSize] pref).
+  void _onPointerSignal(PointerSignalEvent e) {
+    if (!HardwareKeyboard.instance.isControlPressed) return;
+    final double dy;
+    if (e is PointerScrollEvent) {
+      dy = e.scrollDelta.dy;
+    } else if (e is PointerScaleEvent) {
+      dy = -200 * math.log(e.scale);
+    } else {
+      return;
+    }
+    if (dy == 0) return;
+    final step = dy < 0 ? 0.5 : -0.5;
+    GestureBinding.instance.pointerSignalResolver.register(
+      e,
+      (_) => unawaited(
+        widget.state.setTaskFontSize(widget.state.taskFontSize + step),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final screenH = MediaQuery.sizeOf(context).height;
+    final item = widget.item;
+    return SizedBox(
+      height: screenH * _heightFrac,
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerSignal: _onPointerSignal,
+        child: ListenableBuilder(
+          listenable: widget.state,
+          builder: (context, _) {
+            final fs = widget.state.taskFontSize;
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _DetailsResizeGrip(onDrag: _resize),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Task details',
+                          style: GoogleFonts.syne(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      _TaskDetailsFontStepper(state: widget.state, fontSize: fs),
+                      IconButton(
+                        tooltip: 'Close',
+                        onPressed: () => Navigator.pop(context),
+                        icon: const Icon(Icons.close_rounded),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+                    children: [
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: LayoutBuilder(
+                          builder: (context, constraints) =>
+                              SelectableMarkupText(
+                            text: item.body,
+                            baseStyle: GoogleFonts.ibmPlexSans(
+                              fontSize: fs,
+                              fontWeight: FontWeight.w600,
+                              color: PrivetTheme.paper,
+                            ),
+                            maxWidth: constraints.maxWidth,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          _TaskMetaChip(
+                            label: _taskStatusLabel(item.status),
+                            color: _taskStatusColor(item.status),
+                            onTap: () {},
+                          ),
+                          _TaskMetaChip(
+                            label: _taskPriorityLabel(item.priority),
+                            color: _taskPriorityColor(item.priority),
+                            icon: _taskPriorityIcon(item.priority),
+                            onTap: () {},
+                          ),
+                          if (item.assignedTo != null)
+                            _TaskMetaChip(
+                              label: item.assignedTo!.displayName,
+                              color: PrivetTheme.mist,
+                              icon: Icons.person_outline_rounded,
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Created ${_fmtTaskDate(item.createdAt)}'
+                        '${item.createdBy != null ? ' by ${item.createdBy!.displayName}' : ''}',
+                        style: GoogleFonts.ibmPlexSans(
+                          fontSize: math.max(9.5, fs - 3.5),
+                          color: PrivetTheme.mist.withValues(alpha: 0.55),
+                        ),
+                      ),
+                      if (widget.activity.isNotEmpty) ...[
+                        const SizedBox(height: 16),
+                        Text(
+                          'Activity',
+                          style: GoogleFonts.syne(
+                            fontSize: math.max(12, fs - 1.5),
+                            fontWeight: FontWeight.w700,
+                            color: PrivetTheme.paper,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        for (final a in widget.activity)
+                          _TaskActivityRow(
+                            activity: a,
+                            viewedTaskId: item.id,
+                            currentUserId: widget.state.user?.id,
+                            fontSize: fs,
+                          ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+

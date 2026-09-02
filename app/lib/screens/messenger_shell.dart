@@ -35,6 +35,7 @@ import '../util/composer_autocorrect.dart';
 import '../util/composer_media_attach.dart';
 import '../util/desktop_tray.dart';
 import '../util/media_permissions.dart';
+import '../util/task_event_payload.dart';
 import '../util/media_ui_wake.dart';
 import '../util/mobile_push_notifications.dart';
 import '../util/people_search.dart';
@@ -847,11 +848,13 @@ class InboxPane extends StatelessWidget {
                   final last = c.lastMessage;
                   final lastPreview = last == null
                       ? null
-                      : last.kind == 'call'
-                          ? CallHistoryPayload.preview(last.body)
-                          : last.body.contains('[')
-                              ? markupToPlain(last.body)
-                              : last.body;
+                      : last.kind == 'task_event'
+                          ? TaskEventPayload.preview(last.body)
+                          : last.kind == 'call'
+                              ? CallHistoryPayload.preview(last.body)
+                              : last.body.contains('[')
+                                  ? markupToPlain(last.body)
+                                  : last.body;
                   return Material(
                     color: selected
                         ? PrivetTheme.panelElevated
@@ -3109,6 +3112,9 @@ class _ConversationPaneState extends State<ConversationPane>
   ChatMediaFolderKind? _mediaFolder;
   bool _showTasks = false;
   int _tasksInitialTab = 0;
+  /// Task to scroll to + highlight inside the Tasks pane (from tapping a
+  /// task-change message). Cleared by ChatTaskPane once the reveal is done.
+  String? _revealTaskId;
   String? _folderConversationId;
   String? _draftConversationId;
   int? _composerMediaAttachId;
@@ -3970,6 +3976,22 @@ class _ConversationPaneState extends State<ConversationPane>
         _tasksInitialTab = tab;
         _showTasks = true;
       }
+    });
+  }
+
+  /// Tapping a task-change row in the chat opens the Tasks pane and reveals
+  /// the affected task (scrolls to it, expands it, flashes it).
+  void _openTaskFromEvent(ChatMessage m) {
+    final payload = TaskEventPayload.tryParse(m.body);
+    // Subtask events reveal the parent row so the subtask is in view once the
+    // row expands.
+    final target = payload?.parentId ?? payload?.taskId;
+    if (target == null) return;
+    setState(() {
+      _mediaFolder = null;
+      _tasksInitialTab = 0;
+      _showTasks = true;
+      _revealTaskId = target;
     });
   }
 
@@ -5209,6 +5231,10 @@ class _ConversationPaneState extends State<ConversationPane>
                 mediaBase: mediaBase,
                 initialTab: _tasksInitialTab,
                 onClose: () => setState(() => _showTasks = false),
+                revealTaskId: _revealTaskId,
+                onRevealDone: () {
+                  if (mounted) setState(() => _revealTaskId = null);
+                },
               ),
             )
           else ...[
@@ -5282,6 +5308,9 @@ class _ConversationPaneState extends State<ConversationPane>
                               messages[actualIndex - 1].createdAt,
                               m.createdAt,
                             );
+                        // Task-change rows are system notes: no reply/forward/
+                        // react/edit — same treatment as call-history chips.
+                        final isSystemNote = m.isCallHistory || m.isTaskEvent;
                         final bubble = MessageBubble(
                           message: m,
                           mine: mine,
@@ -5303,7 +5332,10 @@ class _ConversationPaneState extends State<ConversationPane>
                               ? _seenByShort(chat!, m, state)
                               : null,
                           addedToTask: taskMessageIds.contains(m.id),
-                          onReply: m.isCallHistory
+                          onTaskEventTap: m.isTaskEvent
+                              ? () => _openTaskFromEvent(m)
+                              : null,
+                          onReply: isSystemNote
                               ? null
                               : (msg, {selectedText}) {
                                   final snippet =
@@ -5328,18 +5360,18 @@ class _ConversationPaneState extends State<ConversationPane>
                                     }
                                   });
                                 },
-                          onForward: m.isCallHistory
+                          onForward: isSystemNote
                               ? null
                               : (msg, {selectedText}) =>
                                   _forwardMessage(context, msg),
                           onSeenBy: chat?.isGroup == true
                               ? (msg) => _showSeenBy(context, chat!, msg)
                               : null,
-                          onReact: m.isCallHistory
+                          onReact: isSystemNote
                               ? null
                               : (msg, emoji) =>
                                   state.toggleReaction(msg.id, emoji),
-                          onAddToTask: m.isCallHistory
+                          onAddToTask: isSystemNote
                               ? null
                               : (msg) async {
                                   await state.addMessageToTask(msg);
@@ -5354,14 +5386,14 @@ class _ConversationPaneState extends State<ConversationPane>
                             _showTasks = true;
                           }),
                           aiActive: state.aiActive,
-                          onAskAi: m.isCallHistory
+                          onAskAi: isSystemNote
                               ? null
                               : (msg) => _askAiAboutMessage(context, msg),
-                          onEdit: mine && !m.isCallHistory
+                          onEdit: mine && !isSystemNote
                               ? (msg) => _editMessage(msg)
                               : null,
                           onFormatMessage:
-                              mine && !m.isCallHistory
+                              mine && !isSystemNote
                               ? (sel, fmt) => _applyMessageFormat(m, sel, fmt)
                               : null,
                           onDelete: mine ? (msg) => _deleteMessage(msg) : null,

@@ -919,6 +919,10 @@ class ChatMessage {
 
   bool get isCallHistory => kind == 'call';
 
+  /// Server-authored task-change row (see [TaskEventPayload]) — shown as a
+  /// clickable system pill that opens the task in the Tasks pane.
+  bool get isTaskEvent => kind == 'task_event';
+
   bool get hasAccentWrap =>
       !isDeleted &&
       (replyTo != null ||
