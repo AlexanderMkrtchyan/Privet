@@ -1,7 +1,7 @@
 name: privet
 description: Privet messenger — Android, Web, Windows, Linux
 publish_to: 'none'
-version: 0.1.21+5
+version: 0.1.22+6
 
 environment:
   sdk: ^3.12.2
