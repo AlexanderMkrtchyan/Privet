@@ -138,6 +138,8 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
   String? _cachedSpanText;
   bool _cachedWithRecognizers = false;
   double? _cachedSpanScale;
+  /// Explicit [baseStyle.fontSize] (tasks zoom via this; chat uses [fontScale]).
+  double? _cachedBaseFontSize;
   String _cachedSpanFont = '';
 
   /// Visible text with markup stripped — selection offsets live in this space.
@@ -148,6 +150,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
   TextPainter? _webPainter;
   double _webMaxWidth = 0;
   double _webPainterScale = 1.0;
+  double? _webPainterBaseFontSize;
   String _webPainterFont = '';
   final _WebSelRepaint _webSelRepaint = _WebSelRepaint();
 
@@ -377,6 +380,9 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     return messageFontStyle(widget.defaultFont, s);
   }
 
+  /// Cache key for explicit [baseStyle] size (tasks). Chat zoom uses [fontScale].
+  double? get _baseFontSizeKey => widget.baseStyle?.fontSize;
+
   TextSpan _spanFor(
     String text, {
     required bool withRecognizers,
@@ -386,6 +392,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     if (!hovering &&
         _cachedSpanText == text &&
         _cachedSpanScale == widget.fontScale &&
+        _cachedBaseFontSize == _baseFontSizeKey &&
         _cachedSpanFont == widget.defaultFont &&
         _cachedSpan != null &&
         _cachedWithRecognizers == withRecognizers) {
@@ -451,6 +458,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     if (!hovering) {
       _cachedSpanText = text;
       _cachedSpanScale = widget.fontScale;
+      _cachedBaseFontSize = _baseFontSizeKey;
       _cachedSpanFont = widget.defaultFont;
       _cachedWithRecognizers = withRecognizers;
       _cachedSpan = span;
@@ -495,8 +503,10 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
         _webMaxWidth == maxWidth &&
         _cachedSpanText == widget.text &&
         _cachedSpanScale == widget.fontScale &&
+        _cachedBaseFontSize == _baseFontSizeKey &&
         _cachedSpanFont == widget.defaultFont &&
         _webPainterScale == widget.fontScale &&
+        _webPainterBaseFontSize == _baseFontSizeKey &&
         _webPainterFont == widget.defaultFont &&
         !_cachedWithRecognizers &&
         _webPainterHover == hovering) {
@@ -506,6 +516,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     _webMaxWidth = maxWidth;
     _webPainterHover = hovering;
     _webPainterScale = widget.fontScale;
+    _webPainterBaseFontSize = _baseFontSizeKey;
     _webPainterFont = widget.defaultFont;
     _webPainter = TextPainter(
       text: _spanFor(widget.text, withRecognizers: false, hovering: hovering),

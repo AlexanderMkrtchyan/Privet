@@ -170,12 +170,7 @@ export function listTaskItems(conversationId) {
        WHERE t.conversation_id = ?
          AND t.parent_id IS NULL
          AND t.status != 'done'
-       ORDER BY t.pinned DESC,
-         CASE t.priority
-           WHEN 'highest' THEN 4 WHEN 'high' THEN 3
-           WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0
-         END DESC,
-         t.sort_order ASC, t.created_at ASC`,
+       ORDER BY t.pinned DESC, t.sort_order ASC, t.created_at ASC`,
     )
     .all(conversationId);
 
@@ -581,6 +576,63 @@ export function unpinAllTasks(conversationId, userId) {
   db.prepare(
     'UPDATE task_items SET pinned = 0 WHERE conversation_id = ? AND pinned = 1',
   ).run(conversationId);
+  return listTaskItems(conversationId);
+}
+
+/**
+ * Rewrite sort_order for siblings under [parentId] (null = top-level roots).
+ * [orderedIds] must be a permutation of every non-done sibling in that group
+ * (done roots live in history and are not reordered here). Subtasks have no
+ * status filter — all children of the parent are reordered.
+ */
+export function reorderTaskItems(conversationId, userId, { parentId = null, orderedIds }) {
+  if (!userInConversation(conversationId, userId)) throw new Error('forbidden');
+  if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+    throw new Error('invalid order');
+  }
+  const ids = orderedIds.map((id) => String(id));
+  if (new Set(ids).size !== ids.length) throw new Error('duplicate ids');
+
+  let siblings;
+  if (parentId) {
+    const parent = db
+      .prepare('SELECT id, conversation_id FROM task_items WHERE id = ?')
+      .get(parentId);
+    if (!parent || parent.conversation_id !== conversationId) {
+      throw new Error('not found');
+    }
+    siblings = db
+      .prepare(
+        `SELECT id FROM task_items
+         WHERE conversation_id = ? AND parent_id = ?
+         ORDER BY sort_order ASC, created_at ASC`,
+      )
+      .all(conversationId, parentId)
+      .map((r) => r.id);
+  } else {
+    siblings = db
+      .prepare(
+        `SELECT id FROM task_items
+         WHERE conversation_id = ? AND parent_id IS NULL AND status != 'done'
+         ORDER BY sort_order ASC, created_at ASC`,
+      )
+      .all(conversationId)
+      .map((r) => r.id);
+  }
+
+  if (siblings.length !== ids.length) throw new Error('order mismatch');
+  const siblingSet = new Set(siblings);
+  for (const id of ids) {
+    if (!siblingSet.has(id)) throw new Error('order mismatch');
+  }
+
+  const upd = db.prepare('UPDATE task_items SET sort_order = ? WHERE id = ?');
+  const tx = db.transaction((ordered) => {
+    ordered.forEach((id, index) => {
+      upd.run(index, id);
+    });
+  });
+  tx(ids);
   return listTaskItems(conversationId);
 }
 

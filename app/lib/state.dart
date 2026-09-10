@@ -2480,11 +2480,14 @@ class PrivetState extends ChangeNotifier {
   bool isTaskExpanded(String taskId) => _expandedTaskIds.contains(taskId);
 
   /// Persists a task row's expand/collapse state (remembered across restarts).
+  /// Notifies so the Tasks pane updates immediately (same tick as chat zoom).
   Future<void> setTaskExpanded(String taskId, bool expanded) async {
     final changed = expanded
         ? _expandedTaskIds.add(taskId)
         : _expandedTaskIds.remove(taskId);
     if (!changed) return;
+    _bump(chatTick);
+    super.notifyListeners();
     final prefs = await _prefs();
     await prefs.setString(
       'privet_task_expanded',
@@ -4534,11 +4537,14 @@ class PrivetState extends ChangeNotifier {
 
   ConversationTasks taskBoardFor(String? conversationId) {
     final items = List<TaskItem>.from(tasksFor(conversationId));
-    // Oldest first (creation date); a pinned task stays on top so the header
-    // chip's pinned task leads the board. Subtasks keep their parent grouping
-    // via rootItems / subtasksOf, so a flat date sort is safe here.
+    // Pinned always lead (header chip + list). Within each group, custom
+    // order via sortOrder; new tasks get the next sort_order on create so
+    // the default matches creation/date order. Subtasks keep parent grouping
+    // via rootItems / subtasksOf.
     items.sort((a, b) {
       if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
+      final byOrder = a.sortOrder.compareTo(b.sortOrder);
+      if (byOrder != 0) return byOrder;
       return a.createdAt.compareTo(b.createdAt);
     });
     return ConversationTasks(items: items);
@@ -4682,6 +4688,45 @@ class PrivetState extends ChangeNotifier {
   Future<void> setTaskPriority(TaskItem item, String priority) async {
     final items = await _api.updateTask(taskId: item.id, priority: priority);
     _setTasks(item.conversationId, items);
+  }
+
+  /// Persist a new sibling order after drag-and-drop. [orderedIds] must list
+  /// every active root (or every subtask of [parentId]) in the desired order.
+  Future<void> reorderTasks({
+    required String conversationId,
+    required List<String> orderedIds,
+    String? parentId,
+  }) async {
+    if (orderedIds.length < 2) return;
+    // Optimistic: rewrite local sortOrder so the list stays put while the
+    // request is in flight (and so numbers update immediately).
+    final current = List<TaskItem>.from(tasksByChat[conversationId] ?? const []);
+    if (current.isNotEmpty) {
+      final orderIndex = <String, int>{
+        for (var i = 0; i < orderedIds.length; i++) orderedIds[i]: i,
+      };
+      final next = current.map((t) {
+        final idx = orderIndex[t.id];
+        if (idx == null) return t;
+        return t.copyWith(sortOrder: idx);
+      }).toList();
+      _setTasks(conversationId, next);
+    }
+    try {
+      final items = await _api.reorderTasks(
+        conversationId: conversationId,
+        orderedIds: orderedIds,
+        parentId: parentId,
+      );
+      _setTasks(conversationId, items);
+    } catch (e) {
+      // Reload so a failed reorder doesn't leave a stale optimistic order.
+      try {
+        final items = await _api.tasks(conversationId);
+        _setTasks(conversationId, items);
+      } catch (_) {}
+      rethrow;
+    }
   }
 
   /// Assign (or unassign, when [assigneeId] is null) a task to a member.

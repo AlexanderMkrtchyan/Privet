@@ -498,6 +498,25 @@ class ApiClient {
     return (item: item, items: items);
   }
 
+  Future<List<TaskItem>> reorderTasks({
+    required String conversationId,
+    required List<String> orderedIds,
+    String? parentId,
+  }) async {
+    final res = await http.post(
+      _u('/conversations/$conversationId/tasks/reorder'),
+      headers: _headers,
+      body: jsonEncode({
+        'orderedIds': orderedIds,
+        if (parentId != null) 'parentId': parentId,
+      }),
+    );
+    final data = _decode(res);
+    return (data['items'] as List)
+        .map((e) => TaskItem.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
   Future<List<TaskItem>> updateTask({
     required String taskId,
     String? body,

@@ -19,6 +19,7 @@ import '../util/rich_text_markup.dart';
 import 'avatar.dart';
 import 'cached_media_image.dart';
 import 'composer_autocorrect_controller.dart';
+import 'image_lightbox.dart';
 import 'message_font_picker.dart';
 import 'payment_spending_insights.dart';
 import 'privet_date_picker.dart';
@@ -1983,10 +1984,12 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     required ConversationTasks board,
     bool history = false,
     String? progressLabel,
+    int? reorderIndex,
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: _TaskRow(
+        key: ValueKey(item.id),
         number: number,
         item: item,
         taskFontSize: widget.state.taskFontSize,
@@ -1994,6 +1997,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         myUserId: widget.state.user?.id,
         subtasks: board.subtasksOf(item.id),
         progressLabel: progressLabel,
+        reorderIndex: reorderIndex,
         onToggle: history ? null : () => widget.state.toggleTaskDone(item),
         onSetStatus:
             history ? null : (s) => widget.state.setTaskStatus(item, s),
@@ -2111,6 +2115,46 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     }
   }
 
+  Future<void> _onReorderActiveTasks(
+    List<TaskItem> visible,
+    int oldIndex,
+    int newIndex,
+  ) async {
+    // [newIndex] is already adjusted by SliverReorderableList.onReorderItem
+    // (no need to subtract 1 when moving down).
+    if (oldIndex < 0 ||
+        oldIndex >= visible.length ||
+        newIndex < 0 ||
+        newIndex >= visible.length ||
+        oldIndex == newIndex) {
+      return;
+    }
+    // Pinned rows always stay above unpinned — only reorder within the same
+    // pin group so a drag can't park an unpinned task above a pin.
+    final pinnedCount = visible.where((t) => t.pinned).length;
+    if (oldIndex < pinnedCount) {
+      newIndex = newIndex.clamp(0, pinnedCount - 1);
+    } else {
+      newIndex = newIndex.clamp(pinnedCount, visible.length - 1);
+    }
+    if (oldIndex == newIndex) return;
+
+    final orderedIds = visible.map((t) => t.id).toList();
+    final moved = orderedIds.removeAt(oldIndex);
+    orderedIds.insert(newIndex, moved);
+    try {
+      await widget.state.reorderTasks(
+        conversationId: widget.conversationId,
+        orderedIds: orderedIds,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not reorder: $e')),
+      );
+    }
+  }
+
   /// Classic vertical list: active board + history section.
   Widget _buildTaskList({
     required List<TaskItem> historyRoots,
@@ -2120,101 +2164,160 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
   }) {
     final board = widget.state.taskBoardFor(widget.conversationId);
     final filtered = _applyTaskFilters(board.activeItems);
+    final hasFilters = _taskSearch.trim().isNotEmpty ||
+        _filterStatus != null ||
+        _filterPriority != null ||
+        _filterAssignee != null;
+    // Reorder only when the full active set is visible — filters scramble
+    // indices and would leave unseen siblings out of the order payload.
+    final canReorder = !hasFilters && filtered.length > 1;
     final emptyAll = board.activeItems.isEmpty && historyRoots.isEmpty;
-    return ListView(
+
+    Widget activeRow(TaskItem item, int index) {
+      final prog = board.progressFor(item);
+      return _revealWrap(
+        rootId: item.id,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildTaskRow(
+              item: item,
+              number: index + 1,
+              board: board,
+              progressLabel: (item.subtaskTotal ?? 0) > 0
+                  ? '${prog.done}/${prog.total}'
+                  : null,
+              reorderIndex: canReorder ? index : null,
+            ),
+            if (index < filtered.length - 1) const _TaskDivider(),
+          ],
+        ),
+      );
+    }
+
+    return CustomScrollView(
       controller: _taskScrollCtrl,
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-      children: [
-        if (emptyAll)
-          _EmptyState(
-            icon: Icons.task_alt_rounded,
-            color: PrivetTheme.signal,
-            title: 'No open tasks',
-            subtitle:
-                'Add a task with subtasks below, or right-click any message → Add to task',
-          )
-        else ...[
-          if (filtered.isNotEmpty) ...[
-            _SectionLabel('To do — ${filtered.length}'),
-            const SizedBox(height: 6),
-            ...filtered.asMap().entries.map((e) {
-              final prog = board.progressFor(e.value);
-              return _revealWrap(
-                rootId: e.value.id,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _buildTaskRow(
-                      item: e.value,
-                      number: e.key + 1,
-                      board: board,
-                      progressLabel: (e.value.subtaskTotal ?? 0) > 0
-                          ? '${prog.done}/${prog.total}'
-                          : null,
-                    ),
-                    if (e.key < filtered.length - 1) const _TaskDivider(),
-                  ],
+      slivers: [
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+          sliver: SliverList(
+            delegate: SliverChildListDelegate([
+              if (emptyAll)
+                _EmptyState(
+                  icon: Icons.task_alt_rounded,
+                  color: PrivetTheme.signal,
+                  title: 'No open tasks',
+                  subtitle:
+                      'Add a task with subtasks below, or right-click any message → Add to task',
+                )
+              else if (filtered.isNotEmpty) ...[
+                _SectionLabel('To do — ${filtered.length}'),
+                const SizedBox(height: 6),
+              ] else if (board.activeItems.isNotEmpty)
+                _EmptyState(
+                  icon: Icons.filter_alt_off_outlined,
+                  color: PrivetTheme.mist,
+                  title: 'No tasks match',
+                  subtitle: 'Clear the search or filters above',
                 ),
-              );
-            }),
-          ] else if (board.activeItems.isNotEmpty) ...[
-            _EmptyState(
-              icon: Icons.filter_alt_off_outlined,
-              color: PrivetTheme.mist,
-              title: 'No tasks match',
-              subtitle: 'Clear the search or filters above',
-            ),
-          ],
-          if (historyRoots.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            _SectionLabel(
-              historyHasMore
-                  ? 'History — ${historyRoots.length}+'
-                  : 'History — ${historyRoots.length}',
-            ),
-            const SizedBox(height: 6),
-            ...historyRoots.asMap().entries.map((e) => _revealWrap(
-                  rootId: e.value.id,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _buildTaskRow(
-                        item: e.value,
-                        number: e.key + 1,
-                        board: historyBoard,
-                        history: true,
+            ]),
+          ),
+        ),
+        if (!emptyAll && filtered.isNotEmpty)
+          SliverPadding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            sliver: canReorder
+                ? SliverReorderableList(
+                    itemCount: filtered.length,
+                    onReorderItem: (oldIndex, newIndex) {
+                      _onReorderActiveTasks(filtered, oldIndex, newIndex);
+                    },
+                    proxyDecorator: (child, index, animation) {
+                      return AnimatedBuilder(
+                        animation: animation,
+                        builder: (context, _) {
+                          final t = Curves.easeOut.transform(animation.value);
+                          return Material(
+                            elevation: 2 + 4 * t,
+                            color: Colors.transparent,
+                            shadowColor: Colors.black.withValues(alpha: 0.35),
+                            borderRadius: BorderRadius.circular(14),
+                            child: child,
+                          );
+                        },
+                      );
+                    },
+                    itemBuilder: (context, index) {
+                      final item = filtered[index];
+                      return KeyedSubtree(
+                        key: ValueKey(item.id),
+                        child: activeRow(item, index),
+                      );
+                    },
+                  )
+                : SliverList(
+                    delegate: SliverChildBuilderDelegate(
+                      (context, index) => activeRow(filtered[index], index),
+                      childCount: filtered.length,
+                    ),
+                  ),
+          ),
+        if (!emptyAll && historyRoots.isNotEmpty)
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
+            sliver: SliverList(
+              delegate: SliverChildListDelegate([
+                _SectionLabel(
+                  historyHasMore
+                      ? 'History — ${historyRoots.length}+'
+                      : 'History — ${historyRoots.length}',
+                ),
+                const SizedBox(height: 6),
+                ...historyRoots.asMap().entries.map((e) => _revealWrap(
+                      rootId: e.value.id,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _buildTaskRow(
+                            item: e.value,
+                            number: e.key + 1,
+                            board: historyBoard,
+                            history: true,
+                          ),
+                          if (e.key < historyRoots.length - 1)
+                            const _TaskDivider(),
+                        ],
                       ),
-                      if (e.key < historyRoots.length - 1)
-                        const _TaskDivider(),
-                    ],
-                  ),
-                )),
-            if (historyLoading || _loadingTaskHistory)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 12),
-                child: Center(
-                  child: SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                ),
-              )
-            else if (historyHasMore)
-              Padding(
-                padding: const EdgeInsets.only(top: 4, bottom: 8),
-                child: Center(
-                  child: Text(
-                    'Scroll for more…',
-                    style: GoogleFonts.ibmPlexSans(
-                      fontSize: 11,
-                      color: PrivetTheme.mist.withValues(alpha: 0.55),
+                    )),
+                if (historyLoading || _loadingTaskHistory)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12),
+                    child: Center(
+                      child: SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ),
+                  )
+                else if (historyHasMore)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4, bottom: 8),
+                    child: Center(
+                      child: Text(
+                        'Scroll for more…',
+                        style: GoogleFonts.ibmPlexSans(
+                          fontSize: 11,
+                          color: PrivetTheme.mist.withValues(alpha: 0.55),
+                        ),
+                      ),
                     ),
                   ),
-                ),
-              ),
-          ],
-        ],
+              ]),
+            ),
+          )
+        else
+          const SliverToBoxAdapter(child: SizedBox(height: 16)),
       ],
     );
   }
@@ -3880,6 +3983,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
 
 class _TaskRow extends StatefulWidget {
   const _TaskRow({
+    super.key,
     required this.number,
     required this.item,
     required this.taskFontSize,
@@ -3908,6 +4012,7 @@ class _TaskRow extends StatefulWidget {
     required this.onDeleteSubtask,
     required this.onAttachSubtask,
     required this.onRemoveSubtaskAttachment,
+    this.reorderIndex,
     this.onFormatBody,
     this.initiallyExpanded = false,
     this.onExpandedChanged,
@@ -3923,6 +4028,8 @@ class _TaskRow extends StatefulWidget {
   final String? myUserId;
   final List<TaskItem> subtasks;
   final String? progressLabel;
+  /// When set, shows a drag handle that starts [SliverReorderableList] drag.
+  final int? reorderIndex;
   final VoidCallback? onToggle;
   final ValueChanged<String>? onSetStatus;
   final VoidCallback? onRestore;
@@ -3950,7 +4057,8 @@ class _TaskRow extends StatefulWidget {
   final void Function(TextSelection selection, TextFormat format)?
       onFormatBody;
 
-  /// Restored expand state (persisted in [PrivetState]); defaults collapsed.
+  /// Expand state from [PrivetState.isTaskExpanded] (default collapsed).
+  /// The row paints this directly — toggles notify so the pane rebuilds live.
   final bool initiallyExpanded;
 
   /// Persists a toggle of the chevron back into [PrivetState].
@@ -3965,9 +4073,10 @@ class _TaskRowState extends State<_TaskRow> {
   final _subFocus = FocusNode();
   bool _addingSub = false;
 
-  /// Whether nested content (subtasks + attachments) is shown. Restored from
-  /// [PrivetState] (default collapsed) and persisted on every toggle.
-  late bool _expanded = widget.initiallyExpanded;
+  /// Nested content visibility — driven by [PrivetState] via
+  /// [widget.initiallyExpanded] so Ctrl+scroll rebuilds and chevron taps
+  /// both paint immediately (leave/reopen is no longer required).
+  bool get _expanded => widget.initiallyExpanded;
 
   bool get _hasNested =>
       widget.onAddSubtask != null ||
@@ -3975,18 +4084,7 @@ class _TaskRowState extends State<_TaskRow> {
       widget.item.mediaItems.isNotEmpty;
 
   void _toggleExpanded() {
-    setState(() => _expanded = !_expanded);
-    widget.onExpandedChanged?.call(_expanded);
-  }
-
-  @override
-  void didUpdateWidget(covariant _TaskRow oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    // Reveal-from-message auto-expands the row by persisting state and
-    // rebuilding; pick that up so a subtask target actually shows its row.
-    if (widget.initiallyExpanded != oldWidget.initiallyExpanded) {
-      _expanded = widget.initiallyExpanded;
-    }
+    widget.onExpandedChanged?.call(!_expanded);
   }
 
   @override
@@ -4012,36 +4110,33 @@ class _TaskRowState extends State<_TaskRow> {
         name.endsWith('.webp');
   }
 
-  void _openPreview(MediaAttachment att) {
-    final url = _abs(att.mediaUrl);
-    if (url.isEmpty || !_isImageAtt(att)) return;
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => Dialog(
-        backgroundColor: PrivetTheme.ink,
-        insetPadding: const EdgeInsets.all(24),
-        child: Stack(children: [
-          _TaskImageCopyMenu(
-            url: url,
-            filename: att.fileName ?? 'image',
-            child: InteractiveViewer(
-              child: CachedMediaImage(url: url, fit: BoxFit.contain),
-            ),
-          ),
-          Positioned(
-            top: 8,
-            right: 8,
-            child: MouseRegion(
-              cursor: SystemMouseCursors.click,
-              child: IconButton(
-                onPressed: () => Navigator.pop(ctx),
-                icon: const Icon(Icons.close_rounded),
-              ),
-            ),
-          ),
-          Positioned(top: 12, left: 12, child: _NumberBadge(number: widget.number, large: true)),
-        ]),
-      ),
+  /// Opens the shared image lightbox over [from] (defaults to this task's
+  /// attachments). Uses gallery prev/next + "n / total" instead of the old
+  /// single-image dialog that always showed the task row number as "1".
+  void _openPreview(
+    MediaAttachment att, {
+    List<MediaAttachment>? from,
+  }) {
+    if (!_isImageAtt(att)) return;
+    final images = (from ?? widget.item.mediaItems).where(_isImageAtt).toList();
+    final urls = <String>[];
+    final names = <String?>[];
+    var initialIndex = 0;
+    for (var i = 0; i < images.length; i++) {
+      final url = _abs(images[i].mediaUrl);
+      if (url.isEmpty) continue;
+      if (identical(images[i], att) || images[i].mediaUrl == att.mediaUrl) {
+        initialIndex = urls.length;
+      }
+      urls.add(url);
+      names.add(images[i].fileName);
+    }
+    if (urls.isEmpty) return;
+    showImageLightbox(
+      context,
+      urls: urls,
+      initialIndex: initialIndex,
+      filenames: names,
     );
   }
 
@@ -4097,6 +4192,24 @@ class _TaskRowState extends State<_TaskRow> {
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (widget.reorderIndex != null)
+                    ReorderableDragStartListener(
+                      index: widget.reorderIndex!,
+                      child: MouseRegion(
+                        cursor: SystemMouseCursors.grab,
+                        child: Tooltip(
+                          message: 'Drag to reorder',
+                          child: Padding(
+                            padding: const EdgeInsets.only(top: 4, right: 2),
+                            child: Icon(
+                              Icons.drag_indicator_rounded,
+                              size: 20,
+                              color: PrivetTheme.mist.withValues(alpha: 0.7),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   if (_hasNested)
                     MouseRegion(
                       cursor: SystemMouseCursors.click,
@@ -4385,7 +4498,8 @@ class _TaskRowState extends State<_TaskRow> {
                           taskFontSize: widget.taskFontSize,
                           mediaBase: widget.mediaBase,
                           editable: !isHistory,
-                          onPreview: _openPreview,
+                          onPreview: (att) =>
+                              _openPreview(att, from: sub.mediaItems),
                           onToggle: widget.onToggleSubtask == null
                               ? null
                               : () => widget.onToggleSubtask!(sub),
@@ -5368,23 +5482,35 @@ class _AddReminderBtn extends StatelessWidget {
 }
 
 class _NumberBadge extends StatelessWidget {
-  const _NumberBadge({required this.number, this.large = false, this.tiny = false});
+  const _NumberBadge({required this.number});
   final int number;
-  final bool large;
-  final bool tiny;
   @override
   Widget build(BuildContext context) {
-    final size = large ? 28.0 : (tiny ? 16.0 : 22.0);
-    final font = large ? 14.0 : (tiny ? 9.0 : 12.0);
+    const size = 22.0;
+    const font = 12.0;
     return Container(
       width: size, height: size,
       alignment: Alignment.center,
       decoration: BoxDecoration(
         color: PrivetTheme.signal,
         borderRadius: BorderRadius.circular(size / 3),
-        boxShadow: tiny ? null : [BoxShadow(color: Colors.black.withValues(alpha: 0.25), blurRadius: 4, offset: const Offset(0, 1))],
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.25),
+            blurRadius: 4,
+            offset: const Offset(0, 1),
+          ),
+        ],
       ),
-      child: Text('$number', style: GoogleFonts.syne(fontWeight: FontWeight.w800, fontSize: font, color: PrivetTheme.ink, height: 1)),
+      child: Text(
+        '$number',
+        style: GoogleFonts.syne(
+          fontWeight: FontWeight.w800,
+          fontSize: font,
+          color: PrivetTheme.ink,
+          height: 1,
+        ),
+      ),
     );
   }
 }

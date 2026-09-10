@@ -62,6 +62,7 @@ import {
   listDoneTaskItems,
   listTaskActivity,
   listTaskItems,
+  reorderTaskItems,
   unpinAllTasks,
   updateTaskItem,
 } from '../db/tasks.js';
@@ -1235,6 +1236,28 @@ export async function registerRoutes(app) {
     }
     const limit = request.query?.limit;
     return { items: listTaskActivity(id, { limit }) };
+  });
+
+  app.post('/conversations/:id/tasks/reorder', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params;
+    try {
+      const orderedIds = Array.isArray(request.body?.orderedIds)
+        ? request.body.orderedIds
+        : [];
+      const parentId = request.body?.parentId
+        ? String(request.body.parentId)
+        : null;
+      const items = reorderTaskItems(id, user.id, { parentId, orderedIds });
+      broadcastTasks(id);
+      return { items };
+    } catch (err) {
+      const message = err.message || 'could not reorder tasks';
+      const code =
+        message === 'forbidden' ? 403 : message === 'not found' ? 404 : 400;
+      return reply.code(code).send({ error: message });
+    }
   });
 
   app.post('/conversations/:id/tasks/clear-done', async (request, reply) => {

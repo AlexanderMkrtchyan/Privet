@@ -99,9 +99,11 @@ class _ComposerVoiceDraftBarState extends State<ComposerVoiceDraftBar> {
   Duration _duration = Duration.zero;
   Duration _position = Duration.zero;
   bool _playing = false;
+  bool _completed = false;
   bool _ready = false;
   StreamSubscription<Duration>? _positionSub;
   StreamSubscription<void>? _completeSub;
+  StreamSubscription<Duration>? _durationSub;
 
   @override
   void initState() {
@@ -128,12 +130,21 @@ class _ComposerVoiceDraftBarState extends State<ComposerVoiceDraftBar> {
       return;
     }
     _source = source;
+    // On web the duration is only reported once the media actually starts
+    // playing, so listen for it instead of relying only on getDuration().
+    _durationSub = _player.onDurationChanged.listen((duration) {
+      if (!mounted || duration <= Duration.zero) return;
+      setState(() => _duration = duration);
+    });
     await _player.setSource(source);
     final duration = await _player.getDuration();
     if (!mounted) return;
     setState(() {
-      _duration = duration ?? Duration.zero;
+      if (duration != null && duration > Duration.zero) {
+        _duration = duration;
+      }
       _position = Duration.zero;
+      _completed = false;
       _ready = true;
     });
   }
@@ -141,8 +152,10 @@ class _ComposerVoiceDraftBarState extends State<ComposerVoiceDraftBar> {
   Future<void> _stopPlayback() async {
     await _positionSub?.cancel();
     await _completeSub?.cancel();
+    await _durationSub?.cancel();
     _positionSub = null;
     _completeSub = null;
+    _durationSub = null;
     await _player.stop();
     disposeVoicePlaybackSource(_source);
     _source = null;
@@ -150,6 +163,7 @@ class _ComposerVoiceDraftBarState extends State<ComposerVoiceDraftBar> {
       setState(() {
         _playing = false;
         _position = Duration.zero;
+        _completed = false;
       });
     }
   }
@@ -161,11 +175,17 @@ class _ComposerVoiceDraftBarState extends State<ComposerVoiceDraftBar> {
       if (mounted) setState(() => _playing = false);
       return;
     }
-    if (_position >= _duration && _duration > Duration.zero) {
-      await _player.seek(Duration.zero);
+    // Once the clip has played to the end, audioplayers releases the source
+    // (ReleaseMode.release), so resume() is a silent no-op. Always restart a
+    // finished clip with a fresh play() call — same as the in-chat voice
+    // bubble, which replays reliably.
+    final atEnd =
+        _completed || (_duration > Duration.zero && _position >= _duration);
+    if (atEnd) {
+      _completed = false;
       if (mounted) setState(() => _position = Duration.zero);
-    }
-    if (_position > Duration.zero) {
+      await _player.play(_source!);
+    } else if (_position > Duration.zero) {
       await _player.resume();
     } else {
       await _player.play(_source!);
@@ -182,7 +202,12 @@ class _ComposerVoiceDraftBarState extends State<ComposerVoiceDraftBar> {
       if (!mounted) return;
       setState(() {
         _playing = false;
-        _position = _duration;
+        _completed = true;
+        // If the duration is still unknown, keep the last reported position
+        // instead of collapsing the progress bar to zero.
+        if (_duration > Duration.zero) {
+          _position = _duration;
+        }
       });
     });
   }
