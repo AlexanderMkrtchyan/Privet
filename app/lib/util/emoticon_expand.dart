@@ -11,15 +11,57 @@ class EmoticonLiveExpand {
   final String emoji;
 }
 
+/// User-defined shortcodes (longest-first). Set from [PrivetState] on load/save.
+List<(String, String)> _customShortcodes = const [];
+
+/// Replaces the in-memory custom shortcode table used by expand / live expand.
+void setCustomShortcodes(List<(String, String)> pairs) {
+  final next = List<(String, String)>.from(pairs);
+  next.sort((a, b) => b.$1.length.compareTo(a.$1.length));
+  _customShortcodes = List.unmodifiable(next);
+}
+
+List<(String, String)> get customShortcodePairs => _customShortcodes;
+
 /// Returns a live replacement when [cursor] sits right after a completed
 /// emoticon token (e.g. `:)` → 🙂 while typing).
 EmoticonLiveExpand? tryExpandEmoticonAtCursor(String text, int cursor) {
   if (cursor <= 0 || cursor > text.length) return null;
 
+  final custom = _tryExpandCustomAtCursor(text, cursor);
+  if (custom != null) return custom;
+
   final parenthetical = _tryExpandParentheticalAtCursor(text, cursor);
   if (parenthetical != null) return parenthetical;
 
   return _tryExpandWesternAtCursor(text, cursor);
+}
+
+EmoticonLiveExpand? _tryExpandCustomAtCursor(String text, int cursor) {
+  for (final entry in _customShortcodes) {
+    final token = entry.$1;
+    final len = token.length;
+    if (len == 0 || cursor < len) continue;
+    final start = cursor - len;
+    final slice = text.substring(start, cursor);
+    if (slice.toLowerCase() != token.toLowerCase()) continue;
+    // Parenthetical customs: require a completed `(…)` token.
+    if (token.startsWith('(') && token.endsWith(')')) {
+      return EmoticonLiveExpand(
+        replaceStart: start,
+        replaceEnd: cursor,
+        emoji: entry.$2,
+      );
+    }
+    // Western-style: same boundary rules as builtins.
+    if (!_westernLiveExpandOk(text, start, cursor, token)) continue;
+    return EmoticonLiveExpand(
+      replaceStart: start,
+      replaceEnd: cursor,
+      emoji: entry.$2,
+    );
+  }
+  return null;
 }
 
 EmoticonLiveExpand? _tryExpandParentheticalAtCursor(String text, int cursor) {
@@ -58,6 +100,9 @@ EmoticonLiveExpand? _tryExpandWesternAtCursor(String text, int cursor) {
     if (!_westernTokenMatches(slice, token)) continue;
     if (!_westernLiveExpandOk(text, start, cursor, token)) continue;
 
+    // Skip builtins overridden by an active custom with the same trigger.
+    if (_customOverrides(token)) continue;
+
     return EmoticonLiveExpand(
       replaceStart: start,
       replaceEnd: cursor,
@@ -67,16 +112,21 @@ EmoticonLiveExpand? _tryExpandWesternAtCursor(String text, int cursor) {
   return null;
 }
 
+bool _customOverrides(String token) {
+  final lower = token.toLowerCase();
+  for (final e in _customShortcodes) {
+    if (e.$1.toLowerCase() == lower) return true;
+  }
+  return false;
+}
+
 bool _westernTokenMatches(String slice, String token) {
   if (slice.length != token.length) return false;
   return slice.toLowerCase() == token.toLowerCase();
 }
 
 bool _westernLiveExpandOk(String text, int start, int cursor, String token) {
-  // `:/` is handled on send — live expansion fights http(s):// typing.
   if (token == ':/' || token == ':-/') return false;
-  // Never expand inside a time like `11:34` / `11:3` while typing — the
-  // colon is glued to digits on both sides, not a deliberate emoticon.
   if (start > 0 && _isDigitChar(text[start - 1])) return false;
   if (cursor < text.length && !_isEmoticonTailBoundary(text[cursor])) {
     return false;
@@ -109,16 +159,28 @@ bool _isShortcodeChar(String ch) {
 }
 
 /// Expands text emoticons / shortcodes into Unicode emoji on send.
-///
-/// Supports western faces (`:D`, `:)`, `:(`, …) and parenthetical codes
-/// (`(sob)`, `(smile)`, …) similar to classic Skype / Teams shortcuts.
 String expandEmoticons(String input) {
   if (input.isEmpty) return input;
 
   var out = input;
 
-  // Longer tokens first so `:-)` wins over `:)`, `(brokenheart)` over `(heart)`.
+  // Custom first so users can override builtins like `:)` / `(cry)`.
+  for (final entry in _customShortcodes) {
+    final token = entry.$1;
+    final emoji = entry.$2;
+    if (token.isEmpty || emoji.isEmpty) continue;
+    if (token == ':/') {
+      out = out.replaceAllMapped(RegExp(r':/(?!/)'), (_) => emoji);
+    } else {
+      out = out.replaceAllMapped(
+        RegExp(RegExp.escape(token), caseSensitive: false),
+        (m) => _westernSendMatchOk(out, m.start) ? emoji : m.group(0)!,
+      );
+    }
+  }
+
   for (final entry in emoticonParenthetical) {
+    if (_customOverrides(entry.$1)) continue;
     out = out.replaceAllMapped(
       RegExp(RegExp.escape(entry.$1), caseSensitive: false),
       (_) => entry.$2,
@@ -128,8 +190,8 @@ String expandEmoticons(String input) {
   for (final entry in emoticonWestern) {
     final token = entry.$1;
     final emoji = entry.$2;
+    if (_customOverrides(token)) continue;
     if (token == ':/') {
-      // Do not turn `http://` / `https://` into a confused face.
       out = out.replaceAllMapped(RegExp(r':/(?!/)'), (_) => emoji);
     } else {
       out = out.replaceAllMapped(
@@ -142,8 +204,6 @@ String expandEmoticons(String input) {
   return out;
 }
 
-/// Skip western emoticons glued to a digit before the colon — `11:34` is a
-/// time, not `:3`. `:D` / `:)` / `:3` typed deliberately still expand.
 bool _westernSendMatchOk(String text, int matchStart) {
   if (matchStart <= 0) return true;
   return !_isDigitChar(text[matchStart - 1]);
@@ -189,8 +249,9 @@ const emoticonParenthetical = <(String, String)>[
   ('(yawn)', '🥱'),
   ('(whew)', '😮‍💨'),
   ('(sob)', '😭'),
-  ('(cry)', '😢'),
-  ('(sad)', '😞'),
+  // Male crying Kolobok (`cray`). Distinct from `(sad)` → 🙁.
+  ('(cry)', '😭'),
+  ('(sad)', '🙁'),
   ('(angry)', '😠'),
   ('(swear)', '🤬'),
   ('(envy)', '😒'),
@@ -225,12 +286,12 @@ const emoticonParenthetical = <(String, String)>[
 
 /// Western text faces. Sorted longest-first.
 const emoticonWestern = <(String, String)>[
-  (":'-(", '😢'),
-  (":'(", '😢'),
+  (":'-(", '😭'),
+  (":'(", '😭'),
   ('</3', '💔'),
   (':-D', '😃'),
   (':-)', '🙂'),
-  (':-(', '😞'),
+  (':-(', '🙁'),
   (':-P', '😛'),
   (';-)', '😉'),
   (':-O', '😮'),
@@ -245,7 +306,7 @@ const emoticonWestern = <(String, String)>[
   ('<3', '❤️'),
   (':D', '😃'),
   (':)', '🙂'),
-  (':(', '😞'),
+  (':(', '🙁'),
   (':P', '😛'),
   (';)', '😉'),
   (':O', '😮'),

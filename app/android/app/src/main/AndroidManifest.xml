@@ -24,7 +24,6 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
-            android:taskAffinity=""
             android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:theme="@style/LaunchTheme"
@@ -42,6 +41,13 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- FCM notification taps use this action (server click_action).
+                 Without it, tapping a message toast steals focus (YouTube
+                 pauses) but never brings MainActivity to the front. -->
+            <intent-filter>
+                <action android:name="FLUTTER_NOTIFICATION_CLICK" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
             <!-- Share-sheet target: "Share" from any app (gallery, browser,
                  files, links) lists Privet as a destination. Files are copied

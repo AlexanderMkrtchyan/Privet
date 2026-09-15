@@ -1,7 +1,9 @@
 import 'package:animated_emoji/animated_emoji.dart';
 import 'package:flutter/material.dart';
 
+import '../util/kolobok_smileys.dart';
 import '../util/low_resource.dart';
+import 'kolobok_smiley.dart';
 
 export '../util/low_resource.dart' show privetLowResourceEmoji;
 
@@ -45,6 +47,17 @@ class PrivetEmoji extends StatelessWidget {
       style: TextStyle(fontSize: size, height: 1),
       textAlign: TextAlign.center,
     );
+
+    // Kolobok before the size threshold — small chips still need the pack art
+    // (settings shortcode preview is ~26–32px). Skip Lottie below the threshold.
+    final kolobok = kolobokFileForEmoji(trimmed);
+    if (kolobok != null) {
+      return KolobokSmiley(
+        kolobok,
+        size: size,
+        animate: animate && !privetLowResource && size >= staticGlyphThreshold,
+      );
+    }
 
     if (privetLowResource || size < staticGlyphThreshold) {
       return glyphFallback();

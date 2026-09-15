@@ -114,7 +114,9 @@ async function sendV1(sa, token, { title, body, data = {}, isCall }) {
               channel_id: channelId,
               icon: 'ic_stat_privet',
               sound: 'default',
-              click_action: 'FLUTTER_NOTIFICATION_CLICK',
+              // Omit click_action so Android opens the launcher MainActivity
+              // (FLUTTER_NOTIFICATION_CLICK without a matching filter used to
+              // steal focus / pause YouTube without bringing Privet forward).
               visibility: 'PUBLIC',
               notification_priority: 'PRIORITY_HIGH',
               ...(tag ? { tag } : {}),
@@ -187,7 +189,6 @@ async function sendLegacy(token, { title, body, data = {}, isCall }) {
               sound: 'default',
               icon: 'ic_stat_privet',
               android_channel_id: channelId,
-              click_action: 'FLUTTER_NOTIFICATION_CLICK',
               ...(tag ? { tag } : {}),
             },
           }),

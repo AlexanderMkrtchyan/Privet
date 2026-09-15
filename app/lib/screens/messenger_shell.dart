@@ -54,7 +54,10 @@ import '../widgets/compact_emoji_picker.dart';
 import '../widgets/composer_autocomplete_popup.dart';
 import '../widgets/composer_spell_layer.dart';
 import '../widgets/composer_autocorrect_controller.dart';
+import '../widgets/composer_kolobok_overlay.dart';
 import '../widgets/composer_voice_bar.dart';
+import '../widgets/custom_shortcodes_editor.dart';
+import '../widgets/idle_accent_caret.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/message_font_picker.dart';
 import '../widgets/screen_share_picker.dart';
@@ -306,10 +309,9 @@ class _MessengerShellState extends State<MessengerShell> {
                       SizedBox(
                         width: 360,
                         child: ListenableBuilder(
-                          listenable: Listenable.merge([
-                            state.inboxTick,
-                            state.typingTick,
-                          ]),
+                          // Typing lives inside InboxPane's own listener so
+                          // peer keystrokes don't rebuild the whole list.
+                          listenable: state.inboxTick,
                           builder: (context, _) => InboxPane(state: state),
                         ),
                       ),
@@ -317,10 +319,10 @@ class _MessengerShellState extends State<MessengerShell> {
                       Expanded(
                         child: hasChat
                             ? ListenableBuilder(
-                                listenable: Listenable.merge([
-                                  state.chatTick,
-                                  state.typingTick,
-                                ]),
+                                // Do not merge typingTick here — rebuilding the
+                                // full message ListView on every keystroke was
+                                // causing intermittent scroll jank on mobile.
+                                listenable: state.chatTick,
                                 builder: (context, _) => ConversationPane(
                                   key: ValueKey(state.activeConversationId),
                                   state: state,
@@ -347,10 +349,7 @@ class _MessengerShellState extends State<MessengerShell> {
                 child: Scaffold(
                   body: hasChat
                       ? ListenableBuilder(
-                          listenable: Listenable.merge([
-                            state.chatTick,
-                            state.typingTick,
-                          ]),
+                          listenable: state.chatTick,
                           builder: (context, _) => ConversationPane(
                             key: ValueKey(state.activeConversationId),
                             state: state,
@@ -358,10 +357,7 @@ class _MessengerShellState extends State<MessengerShell> {
                           ),
                         )
                       : ListenableBuilder(
-                          listenable: Listenable.merge([
-                            state.inboxTick,
-                            state.typingTick,
-                          ]),
+                          listenable: state.inboxTick,
                           builder: (context, _) => InboxPane(state: state),
                         ),
                 ),
@@ -836,7 +832,11 @@ class InboxPane extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             Expanded(
-              child: ListView.builder(
+              child: ListenableBuilder(
+                // Peer typing only needs to refresh preview subtitles — keep
+                // it off the parent shell so chat scroll isn't tied to it.
+                listenable: state.typingTick,
+                builder: (context, _) => ListView.builder(
                 itemCount: state.conversations.length,
                 itemBuilder: (context, i) {
                   final c = state.conversations[i];
@@ -1088,6 +1088,7 @@ class InboxPane extends StatelessWidget {
                     ),
                   );
                 },
+              ),
               ),
             ),
           ],
@@ -2309,6 +2310,55 @@ class InboxPane extends StatelessWidget {
                             setSheet(() {});
                           },
                         ),
+                        const SizedBox(height: 8),
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('Custom shortcodes'),
+                          subtitle: Text(
+                            'Map :) :D :( … to any emoji (10 slots)',
+                            style: TextStyle(
+                              color: PrivetTheme.mist,
+                              fontSize: 12,
+                            ),
+                          ),
+                          trailing: Icon(
+                            Icons.chevron_right_rounded,
+                            color: PrivetTheme.mist,
+                          ),
+                          onTap: () async {
+                            await showModalBottomSheet<void>(
+                              context: context,
+                              isScrollControlled: true,
+                              backgroundColor: PrivetTheme.panel,
+                              shape: const RoundedRectangleBorder(
+                                borderRadius: BorderRadius.vertical(
+                                  top: Radius.circular(16),
+                                ),
+                              ),
+                              builder: (ctx) {
+                                return Padding(
+                                  padding: EdgeInsets.fromLTRB(
+                                    16,
+                                    16,
+                                    16,
+                                    16 + MediaQuery.paddingOf(ctx).bottom,
+                                  ),
+                                  child: SingleChildScrollView(
+                                    child: CustomShortcodesEditor(
+                                      initial: state.customShortcodes,
+                                      onSave: (list) {
+                                        unawaited(
+                                          state.setCustomShortcodesList(list),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                );
+                              },
+                            );
+                            setSheet(() {});
+                          },
+                        ),
                         const SizedBox(height: 16),
                         Divider(color: PrivetTheme.line, height: 1),
                         const SizedBox(height: 12),
@@ -3175,9 +3225,18 @@ class _ConversationPaneState extends State<ConversationPane>
   }
 
   /// Ctrl/Cmd+C copies the message-body selection (web CustomPaint has no
-  /// native copy). Same result as the floating Copy button.
+  /// native copy). Escape closes tasks / photos / files back to chat (same as
+  /// the pane X / re-tapping the chat in the sidebar).
   bool _onGlobalKey(KeyEvent event) {
     if (event is! KeyDownEvent) return false;
+
+    if (event.logicalKey == LogicalKeyboardKey.escape) {
+      if (!_showTasks && _mediaFolder == null) return false;
+      // Let dialogs / sheets / popup menus / lightboxes take Escape first.
+      if (ModalRoute.of(context)?.isCurrent != true) return false;
+      _onReopenChat();
+      return true;
+    }
 
     // Mouse-drag select + mouseup outside often leaves an unfocused (inactive)
     // selection. Still honor Backspace/Delete against that range.
@@ -3849,38 +3908,16 @@ class _ConversationPaneState extends State<ConversationPane>
   }
 
   void _toggleEmoji() {
-    final compact = PrivetTheme.isCompact(context);
-    if (!compact) {
-      setState(() => _showEmoji = !_showEmoji);
-      return;
-    }
     if (_showEmoji) {
-      Navigator.of(context).maybePop();
       setState(() => _showEmoji = false);
+      // Restore the soft keyboard so the composer stays editable.
+      _composerFocus.requestFocus();
       return;
     }
+    // Keep the composer bar visible above the panel (WhatsApp-style). A modal
+    // sheet used to cover the TextField so you couldn't see inserted emoji.
+    _composerFocus.unfocus();
     setState(() => _showEmoji = true);
-    showPrivetSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: PrivetTheme.panel,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) {
-        final h = MediaQuery.sizeOf(ctx).height * 0.42;
-        return Padding(
-          padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(ctx).bottom),
-          child: CompactEmojiPicker(
-            height: h,
-            textEditingController: _controller,
-            onSelected: (_) => widget.state.notifyTyping(),
-          ),
-        );
-      },
-    ).whenComplete(() {
-      if (mounted) setState(() => _showEmoji = false);
-    });
   }
 
   Widget _buildChatTitleColumn(PrivetState state, Conversation? chat) {
@@ -4279,7 +4316,12 @@ class _ConversationPaneState extends State<ConversationPane>
           size: 36,
         ),
         const SizedBox(width: 10),
-        Expanded(child: _buildChatTitleColumn(state, chat)),
+        Expanded(
+          child: ListenableBuilder(
+            listenable: state.typingTick,
+            builder: (context, _) => _buildChatTitleColumn(state, chat),
+          ),
+        ),
         IconButton(
           tooltip: 'Search in chat',
           onPressed: _toggleSearch,
@@ -4961,7 +5003,15 @@ class _ConversationPaneState extends State<ConversationPane>
     };
     final desktopActions = _buildDesktopChatHeaderActions(state, chat);
 
-    return ColoredBox(
+    return PopScope(
+      canPop: !_showEmoji,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        if (_showEmoji) {
+          setState(() => _showEmoji = false);
+        }
+      },
+      child: ColoredBox(
       color: PrivetTheme.panel,
       child: Column(
         children: [
@@ -5003,7 +5053,11 @@ class _ConversationPaneState extends State<ConversationPane>
                         const SizedBox(width: 12),
                         ConstrainedBox(
                           constraints: const BoxConstraints(maxWidth: 200),
-                          child: _buildChatTitleColumn(state, chat),
+                          child: ListenableBuilder(
+                            listenable: state.typingTick,
+                            builder: (context, _) =>
+                                _buildChatTitleColumn(state, chat),
+                          ),
                         ),
                         Expanded(
                           child: Align(
@@ -5260,6 +5314,10 @@ class _ConversationPaneState extends State<ConversationPane>
                     child: ListView.builder(
                       controller: _scroll,
                       reverse: true,
+                      // Prefetch a bit more off-screen so fling scroll stays
+                      // smooth when message bubbles are image-heavy.
+                      scrollCacheExtent: const ScrollCacheExtent.pixels(900),
+                      addAutomaticKeepAlives: false,
                       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
                       itemCount:
                           messages.length +
@@ -5423,18 +5481,25 @@ class _ConversationPaneState extends State<ConversationPane>
                   // and disappearance never shift the visible messages up/down.
                   // IgnorePointer lets taps/scroll still reach the message
                   // behind it; the bubble's own padding keeps its margins.
-                  if (state.typingUserId != null)
-                    Positioned(
-                      left: 0,
-                      bottom: 0,
-                      child: IgnorePointer(
-                        child: TypingIndicatorBubble(
-                          label: chat?.isGroup == true
-                              ? state.typingLabel(conversationId: chat?.id)
-                              : null,
+                  ListenableBuilder(
+                    listenable: state.typingTick,
+                    builder: (context, _) {
+                      if (state.typingUserId == null) {
+                        return const SizedBox.shrink();
+                      }
+                      return Positioned(
+                        left: 0,
+                        bottom: 0,
+                        child: IgnorePointer(
+                          child: TypingIndicatorBubble(
+                            label: chat?.isGroup == true
+                                ? state.typingLabel(conversationId: chat?.id)
+                                : null,
+                          ),
                         ),
-                      ),
-                    ),
+                      );
+                    },
+                  ),
                   Positioned(
                     right: 16,
                     bottom: 16,
@@ -5786,17 +5851,53 @@ class _ConversationPaneState extends State<ConversationPane>
                       ),
               ),
             ),
-            if (_showEmoji && !compact)
+            if (_showEmoji)
               TextFieldTapRegion(
                 child: CompactEmojiPicker(
-                  height: 192,
+                  // Mobile: tall enough to replace the soft keyboard; desktop
+                  // keeps the compact strip under the composer.
+                  height: compact
+                      ? (MediaQuery.sizeOf(context).height * 0.42)
+                          .clamp(280.0, 380.0)
+                      : 280,
                   textEditingController: _controller,
                   onSelected: (_) => state.notifyTyping(),
+                  onEditShortcodes: () {
+                    showModalBottomSheet<void>(
+                      context: context,
+                      isScrollControlled: true,
+                      backgroundColor: PrivetTheme.panel,
+                      shape: const RoundedRectangleBorder(
+                        borderRadius: BorderRadius.vertical(
+                          top: Radius.circular(16),
+                        ),
+                      ),
+                      builder: (ctx) {
+                        return Padding(
+                          padding: EdgeInsets.fromLTRB(
+                            16,
+                            16,
+                            16,
+                            16 + MediaQuery.paddingOf(ctx).bottom,
+                          ),
+                          child: SingleChildScrollView(
+                            child: CustomShortcodesEditor(
+                              initial: state.customShortcodes,
+                              onSave: (list) {
+                                unawaited(state.setCustomShortcodesList(list));
+                              },
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  },
                 ),
               ),
           ],
         ],
       ),
+    ),
     );
   }
 
@@ -6003,32 +6104,62 @@ class _ConversationPaneState extends State<ConversationPane>
     final composerStyle = state.chatFontFamily.isEmpty
         ? null
         : messageFontStyle(state.chatFontFamily, baseStyle);
-    return TextField(
-      key: _composerFieldKey,
-      controller: _controller,
-      focusNode: _composerFocus,
-      minLines: 1,
-      maxLines: compact ? 5 : 6,
-      keyboardType: TextInputType.multiline,
-      style: composerStyle,
-      textInputAction: TextInputAction.newline,
-      // Mobile (Android/iOS) gets the native keyboard suggestion strip +
-      // autocorrect, like Teams. Desktop/web keep the in-app autocorrect and
-      // red-underline spelling overlay. Both honor the Settings toggles.
-      autocorrect: state.autocorrectEnabled && _nativeComposerSuggestions,
-      enableSuggestions:
-          state.autocompleteEnabled && _nativeComposerSuggestions,
-      contextMenuBuilder: kIsWeb
-          ? (context, editableTextState) =>
-              const SizedBox.shrink()
-          : _composerContextMenu,
-      onTapOutside: _onComposerTapOutside,
-      onChanged: (value) {
-        if (_editingMessage != null) return;
-        state.notifyTypingIfComposing(value);
-      },
-      onTap: _onComposerTap,
-      decoration: decoration,
+    final resolvedStyle = composerStyle ?? baseStyle;
+    // Material default width is 2.0 — keep it integer so canvas AA doesn't
+    // soft-shadow one edge (1.5 looked like a 2px bar with a fuzzy right side).
+    // Height: slightly above cap-size; +2px is the closest tidy step without
+    // going back to the tall full line-box default.
+    final fontSize = resolvedStyle.fontSize ?? 16;
+    final caretHeight = fontSize + 2;
+    // Idle (>1s): caret cycles the 8 accent swatches. Typing: lock to signal.
+    // Kolobok overlay paints pack art over hidden Unicode glyphs in the field.
+    return Stack(
+      children: [
+        IdleAccentCaret(
+          focusNode: _composerFocus,
+          controller: _controller,
+          builder: (context, cursorColor) => TextField(
+            key: _composerFieldKey,
+            controller: _controller,
+            focusNode: _composerFocus,
+            cursorColor: cursorColor,
+            cursorHeight: caretHeight,
+            cursorWidth: 2.0,
+            // Soft fade blink (closer to browser/Google feel than hard on/off).
+            cursorOpacityAnimates: true,
+            minLines: 1,
+            maxLines: compact ? 5 : 6,
+            keyboardType: TextInputType.multiline,
+            style: composerStyle,
+            textInputAction: TextInputAction.newline,
+            // Mobile (Android/iOS) gets the native keyboard suggestion strip +
+            // autocorrect, like Teams. Desktop/web keep the in-app autocorrect and
+            // red-underline spelling overlay. Both honor the Settings toggles.
+            autocorrect: state.autocorrectEnabled && _nativeComposerSuggestions,
+            enableSuggestions:
+                state.autocompleteEnabled && _nativeComposerSuggestions,
+            contextMenuBuilder: kIsWeb
+                ? (context, editableTextState) =>
+                    const SizedBox.shrink()
+                : _composerContextMenu,
+            onTapOutside: _onComposerTapOutside,
+            onChanged: (value) {
+              if (_editingMessage != null) return;
+              state.notifyTypingIfComposing(value);
+            },
+            onTap: _onComposerTap,
+            decoration: decoration,
+          ),
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: ComposerKolobokOverlay(
+              fieldKey: _composerFieldKey,
+              controller: _controller,
+            ),
+          ),
+        ),
+      ],
     );
   }
 

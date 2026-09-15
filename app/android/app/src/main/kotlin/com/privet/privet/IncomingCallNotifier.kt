@@ -53,7 +53,14 @@ object IncomingCallNotifier {
         val content = PendingIntent.getActivity(
             context,
             id + 1,
-            context.packageManager.getLaunchIntentForPackage(context.packageName),
+            Intent(context, MainActivity::class.java).apply {
+                action = Intent.ACTION_MAIN
+                addCategory(Intent.CATEGORY_LAUNCHER)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                CallPayload.putExtra(this, data)
+            },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val answer = PendingIntent.getBroadcast(

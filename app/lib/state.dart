@@ -19,10 +19,12 @@ import 'util/ai_turn.dart';
 import 'util/display_capture.dart';
 import 'util/display_rate.dart';
 import 'util/emoticon_expand.dart';
+import 'util/custom_shortcodes.dart';
 import 'util/gpu_capability.dart';
 import 'util/low_resource.dart';
 import 'util/mobile_push.dart';
-import 'util/mobile_push_io.dart' show decodeNotificationPayload;
+import 'util/mobile_push_io.dart'
+    show decodeNotificationPayload, encodeNotificationPayload;
 import 'util/mobile_push_notifications.dart';
 import 'util/page_title.dart';
 import 'util/page_uri.dart';
@@ -2438,6 +2440,9 @@ class PrivetState extends ChangeNotifier {
   /// keyboard autocorrect/suggestion strip on mobile (device-local).
   bool autocorrectEnabled = true;
 
+  /// User-defined shortcode slots (`:)` → emoji). Overrides builtins.
+  List<CustomShortcode> customShortcodes = defaultCustomShortcodes();
+
   /// True when the OS-level notification permission is OFF for this app (the
   /// user dismissed the one-time system dialog). Incoming calls cannot ring
   /// through a full-screen notification in that state, so the shell surfaces
@@ -2848,6 +2853,10 @@ class PrivetState extends ChangeNotifier {
     autocompleteEnabled =
         prefs.getBool('privet_autocomplete_enabled') ?? true;
     autocorrectEnabled = prefs.getBool('privet_autocorrect_enabled') ?? true;
+    customShortcodes = decodeCustomShortcodes(
+      prefs.getString('privet_custom_shortcodes'),
+    );
+    setCustomShortcodes(activeCustomShortcodePairs(customShortcodes));
     themeMode = _themeModeFromStorage(prefs.getString('privet_theme_mode'));
     final accentValue = prefs.getInt('privet_accent');
     if (accentValue != null) accent = Color(accentValue);
@@ -2966,6 +2975,19 @@ class PrivetState extends ChangeNotifier {
     notifySession();
     final prefs = await _prefs();
     await prefs.setBool('privet_autocorrect_enabled', value);
+  }
+
+  Future<void> setCustomShortcodesList(List<CustomShortcode> next) async {
+    customShortcodes = List<CustomShortcode>.unmodifiable(
+      next.take(kCustomShortcodeSlots).toList(),
+    );
+    setCustomShortcodes(activeCustomShortcodePairs(customShortcodes));
+    notifySession();
+    final prefs = await _prefs();
+    await prefs.setString(
+      'privet_custom_shortcodes',
+      encodeCustomShortcodes(customShortcodes),
+    );
   }
 
   Future<void> setLowResourceMode(bool value, {bool auto = false}) async {
@@ -3492,10 +3514,10 @@ class PrivetState extends ChangeNotifier {
       await prefs.setBool('privet_fsi_prompted', true);
       unawaited(requestMobileFullScreenIntent());
     }
-    // Foreground service keeps the process (and WebSocket) alive so the
-    // caller's `call.incoming` arrives instantly even when the app is
-    // backgrounded, and FCM data messages are not silently dropped.
-    unawaited(AndroidRealtimeService.start());
+    // Foreground "Online" notification is intentionally not used — FCM
+    // delivers messages/calls while backgrounded. Stop any leftover service
+    // from older installs so the persistent shade entry disappears.
+    unawaited(AndroidRealtimeService.stop());
     _attachAndroidCallChannel();
     await _attachMobilePushIfNeeded();
     await initMobilePush();
@@ -3760,6 +3782,9 @@ class PrivetState extends ChangeNotifier {
   }
 
   void _handleMobilePushPayload(Map<String, String> data) {
+    // Notification taps often deliver the payload while another app still
+    // owns the screen — force MainActivity forward first.
+    unawaited(bringMobileAppToFront());
     final type = data['type'] ?? '';
     if (type == 'call.incoming') {
       unawaited(_materializeIncomingCallFromPush(data));
@@ -3815,6 +3840,10 @@ class PrivetState extends ChangeNotifier {
     directory = await _api.users();
     notifyInbox();
     warmRecentMedia();
+    // Reconnect/resume refresh the inbox preview over HTTP, but WS message
+    // events from the disconnect window are gone. Merge any chat whose
+    // lastMessage is missing from the local history cache.
+    unawaited(_resyncStaleHistories().catchError((_) {}));
   }
 
   /// Coalesce structural inbox refreshes so rapid messages don't hammer HTTP.
@@ -3939,6 +3968,53 @@ class PrivetState extends ChangeNotifier {
     final merged = byId.values.toList()
       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
     return merged;
+  }
+
+  bool _historyMissingLastMessage(String id, ChatMessage? last) {
+    if (last == null) return false;
+    final list = messagesByChat[id];
+    if (list == null || list.isEmpty) return true;
+    return !list.any((m) => m.id == last.id);
+  }
+
+  /// Force-fetch recent messages even when [historyLoaded] already contains
+  /// [id]. Used after reconnect when the inbox preview is ahead of the pane.
+  Future<void> _resyncHistory(String id) async {
+    if (_historyLoading.contains(id)) return;
+    _historyLoading.add(id);
+    try {
+      final remote = await _api.messages(id, limit: messagePageSize);
+      final existing = messagesByChat[id] ?? const <ChatMessage>[];
+      messagesByChat[id] = _mergeMessages(remote, existing);
+      hasMoreByChat[id] = remote.length >= messagePageSize;
+      historyLoaded.add(id);
+      _applyPendingMessages(id);
+      notifyChat();
+      warmRecentMedia();
+    } catch (_) {
+      // Keep the existing cache; the next reconnect/open can retry.
+    } finally {
+      _historyLoading.remove(id);
+    }
+  }
+
+  Future<void> _resyncStaleHistories() async {
+    final stale = <String>[];
+    for (final c in conversations) {
+      if (!historyLoaded.contains(c.id)) continue;
+      if (_historyMissingLastMessage(c.id, c.lastMessage)) {
+        stale.add(c.id);
+      }
+    }
+    // Prefer the open chat so the pane catches up before background ones.
+    final active = activeConversationId;
+    if (active != null && stale.contains(active)) {
+      stale.remove(active);
+      stale.insert(0, active);
+    }
+    for (final id in stale) {
+      await _resyncHistory(id);
+    }
   }
 
   void _applyPendingMessages(String id) {
@@ -4078,7 +4154,15 @@ class PrivetState extends ChangeNotifier {
                 .first;
     }
     try {
-      await ensureHistory(id);
+      // After long idle, inbox preview can be ahead of a still-"loaded"
+      // history cache; force-merge when lastMessage is missing locally.
+      final last = idx >= 0 ? conversations[idx].lastMessage : null;
+      if (historyLoaded.contains(id) &&
+          _historyMissingLastMessage(id, last)) {
+        await _resyncHistory(id);
+      } else {
+        await ensureHistory(id);
+      }
     } catch (e) {
       error = _friendlyError(e);
     }
@@ -6186,12 +6270,31 @@ Examples:
         }
         // Sound plays on the `message` event (every incoming). Notify is
         // OS toast only — no focus/viewing gates.
-        showWebNotification(
-          title: (event['title'] as String?) ?? 'Privet',
-          body: (event['body'] as String?) ?? 'New message',
-          tag: chatId,
-          onClick: () => openConversation(chatId),
-        );
+        if (_isMobilePlatform) {
+          // Use the shared FCM-local notification path so tap payloads match
+          // [_handleMobilePushPayload] (opens the chat + brings MainActivity
+          // forward). The desktop FreeDesktop path stays on showWebNotification.
+          unawaited(
+            showMobileNotification(
+              title: (event['title'] as String?) ?? 'Privet',
+              body: (event['body'] as String?) ?? 'New message',
+              tag: 'chat:$chatId',
+              payload: encodeNotificationPayload({
+                'type': 'message',
+                'conversationId': chatId,
+                if (event['messageId'] != null)
+                  'messageId': '${event['messageId']}',
+              }),
+            ),
+          );
+        } else {
+          showWebNotification(
+            title: (event['title'] as String?) ?? 'Privet',
+            body: (event['body'] as String?) ?? 'New message',
+            tag: chatId,
+            onClick: () => openConversation(chatId),
+          );
+        }
       case 'typing':
         final chatId = event['conversationId'] as String?;
         final typerId = event['userId'] as String?;

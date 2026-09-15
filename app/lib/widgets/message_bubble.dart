@@ -320,6 +320,14 @@ class MessageBubble extends StatelessWidget {
     // Teams-style: own messages on the right, others on the left.
     final maxBubble = MediaQuery.sizeOf(context).width * 0.68;
     final accent = message.hasAccentWrap;
+    // Stickers / emoji-only bodies sit on the chat background with no bubble
+    // chrome — a filled box around a Kolobok smiley reads as a "frame".
+    final emojiOnly = message.mediaItems.isEmpty &&
+        message.linkPreview == null &&
+        message.replyTo == null &&
+        message.forwardedFrom == null &&
+        !addedToTask &&
+        _emojiOnlyPayload(message.body) != null;
     final bubble = Listener(
       onPointerDown: message.pending
           ? null
@@ -351,9 +359,14 @@ class MessageBubble extends StatelessWidget {
                 },
           child: Container(
             constraints: BoxConstraints(maxWidth: maxBubble),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            padding: EdgeInsets.symmetric(
+              horizontal: emojiOnly ? 4 : 12,
+              vertical: emojiOnly ? 2 : 8,
+            ),
             decoration: BoxDecoration(
-              color: mine ? PrivetTheme.mine : PrivetTheme.panelElevated,
+              color: emojiOnly
+                  ? Colors.transparent
+                  : (mine ? PrivetTheme.mine : PrivetTheme.panelElevated),
               borderRadius: BorderRadius.only(
                 topLeft: const Radius.circular(16),
                 topRight: const Radius.circular(16),
@@ -362,10 +375,13 @@ class MessageBubble extends StatelessWidget {
               ),
               border: Border.all(
                 // Privet-P green wrap only for replies + link metadata cards.
-                color: accent
-                    ? PrivetTheme.signal.withValues(alpha: 0.75)
-                    : PrivetTheme.line,
-                width: accent ? 1.4 : 1,
+                // Emoji-only: no border either — the art is the whole surface.
+                color: emojiOnly
+                    ? Colors.transparent
+                    : (accent
+                        ? PrivetTheme.signal.withValues(alpha: 0.75)
+                        : PrivetTheme.line),
+                width: emojiOnly ? 0 : (accent ? 1.4 : 1),
               ),
             ),
             // Hug content width (no IntrinsicWidth).
@@ -1442,17 +1458,33 @@ class _BigEmojiState extends State<_BigEmoji>
   @override
   Widget build(BuildContext context) {
     // One emoji is the hero of the message — render it extra large so it reads
-    // as a big animated sticker rather than inline text. 2–3 stay medium.
-    final base = widget.text.characters.length == 1 ? 80.0 : 48.0;
+    // as a big animated sticker rather than inline text. 2–3 stay medium and
+    // sit in a tight row so a wide/fullscreen bubble cannot space them out.
+    final graphemes = widget.text.characters.toList();
+    final base = graphemes.length == 1 ? 112.0 : 64.0;
     final size = base * widget.fontScale;
-    final scale = _scale;
-    if (privetLowResource || scale == null) {
-      return PrivetEmoji(widget.text, size: size, animate: false);
-    }
-    return ScaleTransition(
-      scale: scale,
-      child: PrivetEmoji(widget.text, size: size),
-    );
+    final animate = !privetLowResource && _scale != null;
+    final child = graphemes.length <= 1
+        ? PrivetEmoji(
+            widget.text,
+            size: size,
+            animate: animate,
+          )
+        : Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var i = 0; i < graphemes.length; i++) ...[
+                if (i > 0) const SizedBox(width: 4),
+                PrivetEmoji(
+                  graphemes[i],
+                  size: size,
+                  animate: animate,
+                ),
+              ],
+            ],
+          );
+    if (!animate) return child;
+    return ScaleTransition(scale: _scale!, child: child);
   }
 }
 

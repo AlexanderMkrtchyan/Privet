@@ -60,9 +60,9 @@ Future<void> prefetchImageForCopy(String url) async {
 }
 
 /// Fetches the image at [url] and writes it to the OS clipboard through the
-/// native GTK plugin (`setClipboardImage`). The plugin decodes whatever image
-/// format the server returned (PNG/JPEG/GIF/WebP) and advertises it as an
-/// image so other apps can paste it.
+/// native remote_input plugin (`setClipboardImage`). The plugin decodes
+/// whatever image format the server returned (PNG/JPEG/GIF/WebP) and
+/// advertises it as an image so other apps can paste it.
 Future<bool> copyImageToClipboard(String url, {String? filename}) async {
   try {
     var bytes = _bytesCache[url];

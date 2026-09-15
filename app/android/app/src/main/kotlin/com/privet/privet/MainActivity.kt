@@ -123,6 +123,10 @@ class MainActivity : FlutterActivity() {
                     cancelNotificationsByTag(this, tag)
                     result.success(null)
                 }
+                "bringToFront" -> {
+                    bringMainActivityToFront()
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -249,6 +253,22 @@ class MainActivity : FlutterActivity() {
             bytes[10] == 'B'.code.toByte() && bytes[11] == 'P'.code.toByte()
         ) return "image/webp"
         return "image/png"
+    }
+
+    /**
+     * Raises this activity over whatever is currently on screen (YouTube,
+     * launcher, etc.) after a notification tap. Uses reorder-to-front so we
+     * don't spawn a duplicate task.
+     */
+    private fun bringMainActivityToFront() {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            action = Intent.ACTION_MAIN
+            addCategory(Intent.CATEGORY_LAUNCHER)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+        }
+        startActivity(intent)
     }
 
     /**

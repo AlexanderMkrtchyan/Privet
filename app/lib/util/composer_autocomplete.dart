@@ -80,9 +80,21 @@ ComposerAutocomplete? _matchParenthetical(
   final query = token.toLowerCase();
 
   final hits = <ComposerSuggestion>[];
+  for (final entry in customShortcodePairs) {
+    final code = entry.$1;
+    if (!code.startsWith('(')) continue;
+    if (!code.toLowerCase().startsWith(query)) continue;
+    hits.add(
+      ComposerSuggestion(label: code, insert: '${entry.$2} ', detail: entry.$2),
+    );
+    if (hits.length >= limit) break;
+  }
   for (final entry in emoticonParenthetical) {
     final code = entry.$1;
     if (!code.toLowerCase().startsWith(query)) continue;
+    if (customShortcodePairs.any((e) => e.$1.toLowerCase() == code.toLowerCase())) {
+      continue;
+    }
     hits.add(
       ComposerSuggestion(label: code, insert: '${entry.$2} ', detail: entry.$2),
     );

@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -297,6 +298,133 @@ std::vector<uint8_t> ReadClipboardImagePng() {
   return result;
 }
 
+/// Packs an HBITMAP into a CF_DIB memory block (BITMAPINFOHEADER + pixels).
+HGLOBAL HbitmapToCfDib(HBITMAP hbm) {
+  BITMAP bm = {};
+  if (!GetObject(hbm, sizeof(bm), &bm) || bm.bmWidth <= 0 || bm.bmHeight <= 0) {
+    return nullptr;
+  }
+
+  BITMAPINFOHEADER bi = {};
+  bi.biSize = sizeof(BITMAPINFOHEADER);
+  bi.biWidth = bm.bmWidth;
+  bi.biHeight = bm.bmHeight;  // bottom-up DIB
+  bi.biPlanes = 1;
+  bi.biBitCount = 32;
+  bi.biCompression = BI_RGB;
+
+  const size_t stride =
+      ((static_cast<size_t>(bm.bmWidth) * bi.biBitCount + 31) / 32) * 4;
+  const size_t image_size = stride * static_cast<size_t>(bm.bmHeight);
+  HGLOBAL mem =
+      GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + image_size);
+  if (!mem) return nullptr;
+
+  auto* header = static_cast<BITMAPINFOHEADER*>(GlobalLock(mem));
+  if (!header) {
+    GlobalFree(mem);
+    return nullptr;
+  }
+  *header = bi;
+  void* bits = header + 1;
+
+  HDC hdc = GetDC(nullptr);
+  const int got =
+      GetDIBits(hdc, hbm, 0, static_cast<UINT>(bm.bmHeight), bits,
+                reinterpret_cast<BITMAPINFO*>(header), DIB_RGB_COLORS);
+  ReleaseDC(nullptr, hdc);
+  GlobalUnlock(mem);
+
+  if (got == 0) {
+    GlobalFree(mem);
+    return nullptr;
+  }
+  return mem;
+}
+
+/// Decodes [data] (PNG/JPEG/GIF/WebP/BMP via GDI+) and writes it to the
+/// Windows clipboard as CF_DIB plus the modern "PNG" format. Mirrors Linux
+/// setClipboardImage so "Copy image" replaces prior text/clipboard contents.
+bool SetClipboardImage(const uint8_t* data, size_t length) {
+  if (!data || length == 0) return false;
+
+  HGLOBAL src_mem = GlobalAlloc(GMEM_MOVEABLE, length);
+  if (!src_mem) return false;
+  void* locked = GlobalLock(src_mem);
+  if (!locked) {
+    GlobalFree(src_mem);
+    return false;
+  }
+  std::memcpy(locked, data, length);
+  GlobalUnlock(src_mem);
+
+  IStream* stream = nullptr;
+  if (CreateStreamOnHGlobal(src_mem, TRUE, &stream) != S_OK) {
+    GlobalFree(src_mem);
+    return false;
+  }
+
+  std::unique_ptr<Gdiplus::Bitmap> bitmap(Gdiplus::Bitmap::FromStream(stream));
+  stream->Release();  // also frees src_mem (TRUE above)
+  if (!bitmap || bitmap->GetLastStatus() != Gdiplus::Ok) {
+    return false;
+  }
+
+  HBITMAP hbm = nullptr;
+  // Opaque white backdrop so transparent pixels don't become black in apps
+  // that ignore alpha when consuming CF_DIB.
+  if (bitmap->GetHBITMAP(Gdiplus::Color(255, 255, 255), &hbm) != Gdiplus::Ok ||
+      !hbm) {
+    return false;
+  }
+
+  HGLOBAL dib = HbitmapToCfDib(hbm);
+  DeleteObject(hbm);
+  if (!dib) return false;
+
+  std::vector<uint8_t> png = BitmapToPng(bitmap.get());
+  HGLOBAL png_mem = nullptr;
+  if (!png.empty()) {
+    png_mem = GlobalAlloc(GMEM_MOVEABLE, png.size());
+    if (png_mem) {
+      void* p = GlobalLock(png_mem);
+      if (p) {
+        std::memcpy(p, png.data(), png.size());
+        GlobalUnlock(png_mem);
+      } else {
+        GlobalFree(png_mem);
+        png_mem = nullptr;
+      }
+    }
+  }
+
+  if (!OpenClipboard(nullptr)) {
+    GlobalFree(dib);
+    if (png_mem) GlobalFree(png_mem);
+    return false;
+  }
+  EmptyClipboard();
+  // Ownership of handles transfers to the system clipboard on success.
+  if (!SetClipboardData(CF_DIB, dib)) {
+    GlobalFree(dib);
+    if (png_mem) GlobalFree(png_mem);
+    CloseClipboard();
+    return false;
+  }
+  if (png_mem) {
+    const UINT png_fmt = RegisterClipboardFormatW(L"PNG");
+    if (png_fmt != 0) {
+      if (!SetClipboardData(png_fmt, png_mem)) {
+        GlobalFree(png_mem);
+      }
+    } else {
+      GlobalFree(png_mem);
+    }
+  }
+  CloseClipboard();
+  return true;
+}
+
 void HandleMethod(
     const flutter::MethodCall<flutter::EncodableValue>& call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
@@ -482,6 +610,21 @@ void HandleMethod(
       return;
     }
     result->Success(flutter::EncodableValue(png));
+    return;
+  }
+
+  if (call.method_name() == "setClipboardImage") {
+    bool ok = false;
+    if (args) {
+      auto it = args->find(flutter::EncodableValue("png"));
+      if (it != args->end()) {
+        if (const auto* bytes =
+                std::get_if<std::vector<uint8_t>>(&it->second)) {
+          ok = SetClipboardImage(bytes->data(), bytes->size());
+        }
+      }
+    }
+    result->Success(flutter::EncodableValue(ok));
     return;
   }
 

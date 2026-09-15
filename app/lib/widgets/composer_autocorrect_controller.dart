@@ -4,8 +4,19 @@ import 'package:flutter/material.dart';
 
 import '../theme.dart';
 import '../util/composer_autocorrect.dart';
+import '../util/kolobok_images.dart';
+import '../util/kolobok_smileys.dart';
 import '../util/low_resource.dart';
 import '../util/rich_text_markup.dart';
+
+/// Byte-offset range in composer plain text covered by a Kolobok smiley.
+class ComposerKolobokSpan {
+  const ComposerKolobokSpan(this.start, this.end, this.file);
+
+  final int start;
+  final int end;
+  final String file;
+}
 
 /// Active Teams-style autocorrect highlight in the composer.
 class AutocorrectMark {
@@ -46,7 +57,13 @@ class ComposerAutocorrectController extends TextEditingController {
   List<FormatRun> _formatRuns = [];
   bool _loadingMarkup = false;
 
+  /// Kolobok ranges hidden as spaces in [buildTextSpan]; painted by overlay.
+  List<ComposerKolobokSpan> _kolobokSpans = const [];
+  bool _listeningKolobokCache = false;
+
   List<FormatRun> get formatRuns => _formatRuns;
+
+  List<ComposerKolobokSpan> get kolobokSpans => _kolobokSpans;
 
   /// The message body to send: plain text with formatting tags embedded.
   String get markupText => serializeMarkup(text, _formatRuns);
@@ -186,7 +203,16 @@ class ComposerAutocorrectController extends TextEditingController {
         _fade = 1.0 - _fadeCtrl!.value;
         notifyListeners();
       });
+    _ensureKolobokCacheListener();
   }
+
+  void _ensureKolobokCacheListener() {
+    if (_listeningKolobokCache || privetLowResource) return;
+    _listeningKolobokCache = true;
+    KolobokImageCache.instance.addListener(_onKolobokCache);
+  }
+
+  void _onKolobokCache() => notifyListeners();
 
   void clearMarks() {
     _ttl?.cancel();
@@ -532,8 +558,34 @@ class ComposerAutocorrectController extends TextEditingController {
     final issues = _issues;
     final hovered = _hoveredIssue;
     final runs = _formatRuns;
+    final light = PrivetTheme.isLight;
+    final cache = KolobokImageCache.instance;
+    final kolobokOn = !privetLowResource;
+    if (kolobokOn) _ensureKolobokCacheListener();
 
-    if (m == null && issues.isEmpty && runs.isEmpty) {
+    final readyKolobok = <ComposerKolobokSpan>[];
+    if (kolobokOn && t.isNotEmpty) {
+      var offset = 0;
+      for (final grapheme in t.characters) {
+        final file = kolobokFileForEmoji(grapheme);
+        if (file != null) {
+          if (cache.isReady(file, light: light)) {
+            readyKolobok.add(
+              ComposerKolobokSpan(offset, offset + grapheme.length, file),
+            );
+          } else {
+            cache.frameFor(file, light: light);
+          }
+        }
+        offset += grapheme.length;
+      }
+    }
+    _kolobokSpans = readyKolobok;
+
+    if (m == null &&
+        issues.isEmpty &&
+        runs.isEmpty &&
+        readyKolobok.isEmpty) {
       return super.buildTextSpan(
         context: context,
         style: style,
@@ -541,7 +593,6 @@ class ComposerAutocorrectController extends TextEditingController {
       );
     }
 
-    // Collect styled ranges: autocorrect flash wins over hover / underline.
     final cuts = <int>{0, t.length};
     if (m != null && m.start >= 0 && m.end <= t.length && m.start < m.end) {
       cuts.add(m.start);
@@ -558,6 +609,10 @@ class ComposerAutocorrectController extends TextEditingController {
       cuts.add(r.start);
       cuts.add(r.end);
     }
+    for (final k in readyKolobok) {
+      cuts.add(k.start);
+      cuts.add(k.end);
+    }
     final points = cuts.toList()..sort();
     final children = <InlineSpan>[];
     for (var i = 0; i < points.length - 1; i++) {
@@ -566,7 +621,6 @@ class ComposerAutocorrectController extends TextEditingController {
       if (a >= b) continue;
       final slice = t.substring(a, b);
       var sliceStyle = base;
-      // Rich-text format runs first (flash / spell below can override).
       for (final r in runs) {
         if (r.start <= a && r.end >= b) {
           sliceStyle = r.format.toTextStyle(sliceStyle);
@@ -604,9 +658,38 @@ class ComposerAutocorrectController extends TextEditingController {
           );
         }
       }
-      children.add(TextSpan(style: sliceStyle, text: slice));
+
+      ComposerKolobokSpan? kolobok;
+      for (final k in readyKolobok) {
+        if (k.start == a && k.end == b) {
+          kolobok = k;
+          break;
+        }
+      }
+      if (kolobok != null) {
+        children.add(
+          TextSpan(
+            text: ' ' * (b - a),
+            style: sliceStyle.copyWith(
+              letterSpacing: _kolobokLetterSpacing(b - a, sliceStyle),
+            ),
+          ),
+        );
+      } else {
+        children.add(TextSpan(style: sliceStyle, text: slice));
+      }
     }
     return TextSpan(style: base, children: children);
+  }
+
+  /// Extra letterSpacing so a [count]-space run is ~1.5em (matches chat).
+  static double _kolobokLetterSpacing(int count, TextStyle style) {
+    const advanceEm = 1.5;
+    const spaceEm = 0.28;
+    final em = style.fontSize ?? 16.0;
+    final target = advanceEm * em;
+    final spaces = spaceEm * em * count;
+    return ((target - spaces) / count).clamp(0.0, double.infinity);
   }
 
   @override
@@ -615,6 +698,10 @@ class ComposerAutocorrectController extends TextEditingController {
     _undoArmTtl?.cancel();
     _fadeCtrl?.dispose();
     _fadeCtrl = null;
+    if (_listeningKolobokCache) {
+      KolobokImageCache.instance.removeListener(_onKolobokCache);
+      _listeningKolobokCache = false;
+    }
     super.dispose();
   }
 }

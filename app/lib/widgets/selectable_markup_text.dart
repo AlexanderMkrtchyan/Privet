@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
@@ -7,6 +8,9 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../theme.dart';
 import '../util/app_clipboard.dart';
+import '../util/kolobok_images.dart';
+import '../util/kolobok_smileys.dart';
+import '../util/low_resource.dart';
 import '../util/rich_text_markup.dart';
 import '../util/web_select_cursor.dart';
 import 'message_font_picker.dart';
@@ -142,6 +146,15 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
   double? _cachedBaseFontSize;
   String _cachedSpanFont = '';
 
+  /// Kolobok decode generation the cached span was built against. Image frames
+  /// land asynchronously, so a span built while they were missing must be
+  /// rebuilt once they arrive — otherwise the glyph stays visible for good.
+  int _cachedKolobokGeneration = -1;
+
+  /// Smiley ranges in [_plainText] that the painter draws as art rather than
+  /// as glyphs. Rebuilt with the span.
+  List<_KolobokSpan> _kolobokSpans = const [];
+
   /// Visible text with markup stripped — selection offsets live in this space.
   String _plainText = '';
 
@@ -152,6 +165,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
   double _webPainterScale = 1.0;
   double? _webPainterBaseFontSize;
   String _webPainterFont = '';
+  int _webPainterKolobokGeneration = -1;
   final _WebSelRepaint _webSelRepaint = _WebSelRepaint();
 
   // Web pointer-driven select (Listener — does not fight ListView pan arena).
@@ -169,7 +183,27 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
   bool _webPainterHover = false;
 
   @override
+  void initState() {
+    super.initState();
+    KolobokImageCache.instance.addListener(_onKolobokFrames);
+    // Warm the pack so the first paint of a chat already shows the art instead
+    // of a flash of Unicode glyphs. The cache dedupes across messages.
+    KolobokImageCache.instance.preload(
+      kolobokSmileys.map((entry) => entry.file),
+      light: PrivetTheme.isLight,
+    );
+  }
+
+  void _onKolobokFrames() {
+    if (!mounted) return;
+    // Frames land off the paint path; rebuild so the transparent-glyph swap is
+    // applied now that the bitmaps exist.
+    setState(() {});
+  }
+
+  @override
   void dispose() {
+    KolobokImageCache.instance.removeListener(_onKolobokFrames);
     setPrivetMessageLinkHover(false);
     setPrivetMessageSelectHover(false);
     _releaseWebScrollHold();
@@ -395,7 +429,8 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
         _cachedBaseFontSize == _baseFontSizeKey &&
         _cachedSpanFont == widget.defaultFont &&
         _cachedSpan != null &&
-        _cachedWithRecognizers == withRecognizers) {
+        _cachedWithRecognizers == withRecognizers &&
+        _cachedKolobokGeneration == KolobokImageCache.instance.generation) {
       return _cachedSpan!;
     }
     for (final r in _linkRecognizers) {
@@ -406,21 +441,31 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     final base = _baseStyleFor(hovering: hovering);
     final parsed = parseMarkup(text);
     _plainText = parsed.plainText;
+    _kolobokSpans = [];
+    // Low-resource mode asks for no per-frame work at all, so it keeps glyphs.
+    final kolobokEnabled = !privetLowResource;
     final spans = <InlineSpan>[];
+    var segStart = 0;
 
     for (final seg in styledSegments(parsed)) {
       final segBase = seg.format.toTextStyle(base);
       final segText = seg.text;
       final matches = _urlPattern.allMatches(segText).toList();
       if (matches.isEmpty) {
-        spans.add(TextSpan(text: segText, style: segBase));
+        spans.addAll(_splitKolobok(segText, segBase, segStart, kolobokEnabled));
+        segStart += segText.length;
         continue;
       }
       var cursor = 0;
       for (final m in matches) {
         if (m.start > cursor) {
-          spans.add(
-            TextSpan(text: segText.substring(cursor, m.start), style: segBase),
+          spans.addAll(
+            _splitKolobok(
+              segText.substring(cursor, m.start),
+              segBase,
+              segStart + cursor,
+              kolobokEnabled,
+            ),
           );
         }
         var raw = m.group(0)!;
@@ -443,15 +488,28 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
         );
         cursor = m.start + raw.length;
         if (cursor < m.end) {
-          spans.add(
-            TextSpan(text: segText.substring(cursor, m.end), style: segBase),
+          spans.addAll(
+            _splitKolobok(
+              segText.substring(cursor, m.end),
+              segBase,
+              segStart + cursor,
+              kolobokEnabled,
+            ),
           );
           cursor = m.end;
         }
       }
       if (cursor < segText.length) {
-        spans.add(TextSpan(text: segText.substring(cursor), style: segBase));
+        spans.addAll(
+          _splitKolobok(
+            segText.substring(cursor),
+            segBase,
+            segStart + cursor,
+            kolobokEnabled,
+          ),
+        );
       }
+      segStart += segText.length;
     }
 
     final span = TextSpan(style: base, children: spans);
@@ -461,9 +519,83 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
       _cachedBaseFontSize = _baseFontSizeKey;
       _cachedSpanFont = widget.defaultFont;
       _cachedWithRecognizers = withRecognizers;
+      _cachedKolobokGeneration = KolobokImageCache.instance.generation;
       _cachedSpan = span;
     }
     return span;
+  }
+
+  /// Splits [text] so bundled Kolobok smileys render as art instead of glyphs.
+  ///
+  /// The character is swapped for an equal-length run of spaces, never removed:
+  /// every offset in the message — selection, copy, reply quoting,
+  /// `markupToPlain` — keeps referring to the original Unicode, so the message
+  /// format and the wire payload are untouched. A transparent colour would not
+  /// work here: colour-emoji fonts carry their own colours and ignore the text
+  /// colour, so the glyph has to be replaced outright.
+  ///
+  /// `letterSpacing` widens that run to roughly the em an emoji would occupy,
+  /// and the painter then sizes the art to whatever box the layout produced.
+  ///
+  /// A smiley is only swapped once its frame is decoded ([KolobokImageCache]);
+  /// until then the ordinary glyph renders, so a missing asset can never leave
+  /// a gap in the message.
+  List<InlineSpan> _splitKolobok(
+    String text,
+    TextStyle style,
+    int base,
+    bool enabled,
+  ) {
+    if (text.isEmpty) return const [];
+    if (!enabled) return [TextSpan(text: text, style: style)];
+
+    final cache = KolobokImageCache.instance;
+    final light = PrivetTheme.isLight;
+    final spans = <InlineSpan>[];
+    final buffer = StringBuffer();
+    var offset = base;
+
+    for (final grapheme in text.characters) {
+      final file = kolobokFileForEmoji(grapheme);
+      if (file == null || !cache.isReady(file, light: light)) {
+        buffer.write(grapheme);
+        offset += grapheme.length;
+        continue;
+      }
+      if (buffer.isNotEmpty) {
+        spans.add(TextSpan(text: buffer.toString(), style: style));
+        buffer.clear();
+      }
+      spans.add(
+        TextSpan(
+          text: ' ' * grapheme.length,
+          style: style.copyWith(
+            letterSpacing: _smileyAdvanceFor(grapheme.length, style),
+          ),
+        ),
+      );
+      _kolobokSpans.add(_KolobokSpan(offset, offset + grapheme.length, file));
+      offset += grapheme.length;
+    }
+    if (buffer.isNotEmpty) {
+      spans.add(TextSpan(text: buffer.toString(), style: style));
+    }
+    return spans;
+  }
+
+  /// Space the art occupies per smiley, in em. Wider than the 1em an emoji
+  /// glyph takes so inline smileys read a bit larger than surrounding text
+  /// (see [smileyOvershoot]).
+  static const double smileyAdvanceEm = 1.5;
+
+  /// Extra `letterSpacing` that widens a [count]-space run to
+  /// [smileyAdvanceEm]. A space is about 0.28em in the fonts in use.
+  static double _smileyAdvanceFor(int count, TextStyle style) {
+    const spaceEm = 0.28;
+    final em = style.fontSize ?? 15.0;
+    final target = smileyAdvanceEm * em;
+    final spaces = spaceEm * em * count;
+    return ((target - spaces) / count).clamp(0.0, double.infinity);
   }
 
   /// Applies [request] to the current web selection and hands the full desired
@@ -509,6 +641,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
         _webPainterBaseFontSize == _baseFontSizeKey &&
         _webPainterFont == widget.defaultFont &&
         !_cachedWithRecognizers &&
+        _webPainterKolobokGeneration == KolobokImageCache.instance.generation &&
         _webPainterHover == hovering) {
       return;
     }
@@ -518,6 +651,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     _webPainterScale = widget.fontScale;
     _webPainterBaseFontSize = _baseFontSizeKey;
     _webPainterFont = widget.defaultFont;
+    _webPainterKolobokGeneration = KolobokImageCache.instance.generation;
     _webPainter = TextPainter(
       text: _spanFor(widget.text, withRecognizers: false, hovering: hovering),
       textDirection: ui.TextDirection.ltr,
@@ -716,7 +850,12 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
             painter: _WebMessageTextPainter(
               textPainter: painter,
               getSelection: () => _webSel,
-              repaint: _webSelRepaint,
+              kolobokSpans: _kolobokSpans,
+              light: PrivetTheme.isLight,
+              repaint: Listenable.merge([
+                _webSelRepaint,
+                KolobokImageCache.instance,
+              ]),
             ),
           ),
         ),
@@ -802,15 +941,35 @@ class _WebSelRepaint extends ChangeNotifier {
   void tick() => notifyListeners();
 }
 
+/// One bundled smiley the painter draws as art, in `_plainText` coordinates.
+class _KolobokSpan {
+  const _KolobokSpan(this.start, this.end, this.file);
+
+  final int start;
+  final int end;
+
+  /// Pack basename, e.g. `smile`. See `kolobok_smileys.dart`.
+  final String file;
+}
+
+/// How far past the reserved box the art may reach. Inline smileys should read
+/// a little larger than surrounding text; the art is mostly transparent at the
+/// edges, so modest overflow does not collide with neighbouring glyphs.
+const double smileyOvershoot = 1.4;
+
 class _WebMessageTextPainter extends CustomPainter {
   _WebMessageTextPainter({
     required this.textPainter,
     required this.getSelection,
+    required this.kolobokSpans,
+    required this.light,
     required Listenable repaint,
   }) : super(repaint: repaint);
 
   final TextPainter textPainter;
   final ValueGetter<TextSelection> getSelection;
+  final List<_KolobokSpan> kolobokSpans;
+  final bool light;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -826,11 +985,62 @@ class _WebMessageTextPainter extends CustomPainter {
       }
     }
     textPainter.paint(canvas, Offset.zero);
+    _paintSmileys(canvas);
+  }
+
+  /// Draws each bundled smiley over the space its glyph would have occupied.
+  ///
+  /// Only frame 0 is used: a chat can hold dozens of these and a looping GIF is
+  /// the continuous per-frame redraw this app avoids elsewhere too. Animated
+  /// playback lives where instances are few — big-emoji bodies and reactions.
+  void _paintSmileys(Canvas canvas) {
+    if (kolobokSpans.isEmpty) return;
+    final cache = KolobokImageCache.instance;
+    final paint = Paint()..filterQuality = FilterQuality.high;
+    for (final span in kolobokSpans) {
+      if (span.end > textPainter.plainText.length) continue;
+      final image = cache.frameFor(span.file, light: light);
+      if (image == null) continue;
+      final boxes = textPainter.getBoxesForSelection(
+        TextSelection(baseOffset: span.start, extentOffset: span.end),
+      );
+      if (boxes.isEmpty) continue;
+      final source = Rect.fromLTWH(
+        0,
+        0,
+        image.width.toDouble(),
+        image.height.toDouble(),
+      );
+      for (final box in boxes) {
+        final rect = box.toRect();
+        // Contain, then allow the documented overshoot.
+        final scale = math.min(
+              rect.width / image.width,
+              rect.height / image.height,
+            ) *
+            smileyOvershoot;
+        final dest = Rect.fromCenter(
+          center: rect.center,
+          width: image.width * scale,
+          height: image.height * scale,
+        );
+        // No white halo when smileys sit in text — the disc reads as a
+        // background chip next to letters. Standalone KolobokSmiley keeps it.
+        canvas.drawImageRect(
+          image,
+          source,
+          dest,
+          paint,
+        );
+      }
+    }
   }
 
   @override
   bool shouldRepaint(covariant _WebMessageTextPainter oldDelegate) {
-    return oldDelegate.textPainter != textPainter;
+    return oldDelegate.textPainter != textPainter ||
+        oldDelegate.kolobokSpans != kolobokSpans ||
+        oldDelegate.light != light;
   }
 }
 

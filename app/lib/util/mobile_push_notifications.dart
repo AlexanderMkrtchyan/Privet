@@ -140,6 +140,15 @@ Future<void> cancelMobileNotificationsByTag(String tag) async {
   }
 }
 
+/// Bring MainActivity above the current foreground app after a notification tap.
+Future<void> bringMobileAppToFront() async {
+  try {
+    await _fsiChannel.invokeMethod<void>('bringToFront');
+  } catch (e, st) {
+    debugPrint('[privet] bring-to-front failed: $e\n$st');
+  }
+}
+
 Future<void> cancelMobileNotification(String tag) async {
   final plugin = _plugin;
   if (plugin == null || tag.isEmpty) return;

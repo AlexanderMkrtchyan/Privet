@@ -1,7 +1,7 @@
 name: privet
 description: Privet messenger — Android, Web, Windows, Linux
 publish_to: 'none'
-version: 0.1.24+8
+version: 0.1.25+9
 
 environment:
   sdk: ^3.12.2
@@ -61,6 +61,10 @@ flutter:
     - assets/icons/tray.ico
     - assets/icons/tray-unread.png
     - assets/icons/tray-unread.ico
+    # Kolobok smileys (classic ICQ-era art). Two packs: the artwork differs
+    # per background, so the right folder is picked from the theme brightness.
+    - assets/emoji/kolobok/light/
+    - assets/emoji/kolobok/dark/
     # google_fonts matches assets by API filename prefix, e.g.
     # assets/google_fonts/DMSans-Regular.ttf (not the cache hash form).
     # Bundling these lets us disable runtime fetching (big Linux desktop
