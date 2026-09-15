@@ -6,18 +6,24 @@ export PATH="${HOME}/development/flutter/bin:${PATH}"
 
 OUT="$ROOT/server/public/downloads"
 INSTALL_DIR="${PRIVET_INSTALL_DIR:-$HOME/Apps/privet}"
-VERSION="$(python3 - "$ROOT/app/pubspec.yaml" <<'PY'
+VERSION_INFO="$(python3 - "$ROOT/app/pubspec.yaml" <<'PY'
 import sys
 from pathlib import Path
 text = Path(sys.argv[1]).read_text()
 for line in text.splitlines():
     if line.startswith("version:"):
-        print(line.split(":",1)[1].strip().split("+",1)[0])
+        raw = line.split(":", 1)[1].strip()
+        if "+" in raw:
+            ver, build = raw.split("+", 1)
+        else:
+            ver, build = raw, "0"
+        print(f"{ver} {build}")
         break
 else:
     raise SystemExit("version not found")
 PY
 )"
+read -r VERSION BUILD_NUMBER <<< "$VERSION_INFO"
 STAMP="${PRIVET_BUILD:-$(date -u +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT"
 
@@ -288,6 +294,8 @@ fi
 
 flutter build linux --release \
   --dart-define=PRIVET_BUILD="$STAMP" \
+  --dart-define=PRIVET_VERSION="$VERSION" \
+  --dart-define=PRIVET_BUILD_NUMBER="$BUILD_NUMBER" \
   --dart-define=PRIVET_API="$PRIVET_API_DEFINE"
 
 BUNDLE="$ROOT/app/build/linux/x64/release/bundle"

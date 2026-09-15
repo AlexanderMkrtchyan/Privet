@@ -25,6 +25,7 @@ import '../util/agent_debug_log.dart';
 import '../util/app_clipboard.dart';
 import '../util/app_image_clipboard.dart';
 import '../util/app_update.dart';
+import '../util/build_info.dart';
 import '../util/clipboard_files.dart';
 import '../util/ai_turn.dart';
 import '../util/call_history.dart';
@@ -1846,10 +1847,16 @@ class InboxPane extends StatelessWidget {
     // update check) before the animation started, which made the click
     // feel like ~2fps. Kick both off in the background instead — the
     // sheet reacts to `state` as they finish.
-    final versionLabelFuture = PackageInfo.fromPlatform().then((info) =>
-        info.buildNumber.isEmpty
-            ? info.version
-            : '${info.version} (${info.buildNumber})');
+    // Compile-time fallback so Profile never shows a bare "Privet" while
+    // PackageInfo resolves (or if it fails on a given desktop install).
+    final versionLabelFuture = PackageInfo.fromPlatform()
+        .then(
+          (info) => formatPrivetVersionLabel(
+            version: info.version,
+            buildNumber: info.buildNumber,
+          ),
+        )
+        .catchError((_) => formatPrivetVersionLabel());
     unawaited(state.refreshAiStatus());
     final updateStatusFuture = AppUpdate.check(baseUrl: state.api.baseUrl);
     final nameCtrl = TextEditingController(text: me.displayName);
@@ -1861,7 +1868,7 @@ class InboxPane extends StatelessWidget {
     var pendingClearAvatar = false;
     var updating = false;
     var updateProgress = 0.0;
-    var versionLabel = '';
+    var versionLabel = formatPrivetVersionLabel();
     var updateStatus = AppUpdateStatus.unavailable;
     var subscribedToVersion = false;
     var subscribedToUpdate = false;
@@ -1948,6 +1955,17 @@ class InboxPane extends StatelessWidget {
                           '@${me.handle}',
                           textAlign: TextAlign.center,
                           style: TextStyle(color: PrivetTheme.mist),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          versionLabel.isEmpty
+                              ? 'Privet'
+                              : 'Privet $versionLabel',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: PrivetTheme.mist,
+                            fontSize: 12,
+                          ),
                         ),
                         const SizedBox(height: 16),
                         TextField(

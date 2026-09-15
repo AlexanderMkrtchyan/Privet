@@ -42,12 +42,32 @@ STAGE="$(mktemp -d)"
 preserve_static_extras "$STAGE"
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
+VERSION_INFO="$(python3 - "$ROOT/app/pubspec.yaml" <<'PY'
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+for line in text.splitlines():
+    if line.startswith("version:"):
+        raw = line.split(":", 1)[1].strip()
+        if "+" in raw:
+            ver, build = raw.split("+", 1)
+        else:
+            ver, build = raw, "0"
+        print(f"{ver} {build}")
+        break
+else:
+    raise SystemExit("version not found")
+PY
+)"
+read -r VERSION BUILD_NUMBER <<< "$VERSION_INFO"
 
 cd "$ROOT/app"
 # Same-origin: browser uses https://messenger.banderdog.com (no localhost API).
 flutter build web --release \
   --pwa-strategy=none \
   --dart-define=PRIVET_BUILD="$STAMP" \
+  --dart-define=PRIVET_VERSION="$VERSION" \
+  --dart-define=PRIVET_BUILD_NUMBER="$BUILD_NUMBER" \
   --no-wasm-dry-run
 
 rsync -a --delete "$ROOT/app/build/web/" "$ROOT/server/public/"

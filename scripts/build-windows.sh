@@ -4,18 +4,24 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-VERSION="$(python3 - "$ROOT/app/pubspec.yaml" <<'PY'
+VERSION_INFO="$(python3 - "$ROOT/app/pubspec.yaml" <<'PY'
 import sys
 from pathlib import Path
 text = Path(sys.argv[1]).read_text()
 for line in text.splitlines():
     if line.startswith("version:"):
-        print(line.split(":", 1)[1].strip().split("+", 1)[0])
+        raw = line.split(":", 1)[1].strip()
+        if "+" in raw:
+            ver, build = raw.split("+", 1)
+        else:
+            ver, build = raw, "0"
+        print(f"{ver} {build}")
         break
 else:
     raise SystemExit("version not found")
 PY
 )"
+read -r VERSION BUILD_NUMBER <<< "$VERSION_INFO"
 STAMP="${PRIVET_BUILD:-$(date -u +%Y%m%d-%H%M%S)}"
 OUT="$ROOT/server/public/downloads"
 mkdir -p "$OUT"
@@ -34,7 +40,9 @@ export PATH="${FLUTTER_ROOT:+$FLUTTER_ROOT/bin:}${HOME}/development/flutter/bin:
 cd "$ROOT/app"
 flutter pub get
 flutter build windows --release \
-  --dart-define=PRIVET_BUILD="$STAMP"
+  --dart-define=PRIVET_BUILD="$STAMP" \
+  --dart-define=PRIVET_VERSION="$VERSION" \
+  --dart-define=PRIVET_BUILD_NUMBER="$BUILD_NUMBER"
 
 RELEASE_DIR="$ROOT/app/build/windows/x64/runner/Release"
 test -f "$RELEASE_DIR/privet.exe" || test -f "$RELEASE_DIR/Privet.exe" || {

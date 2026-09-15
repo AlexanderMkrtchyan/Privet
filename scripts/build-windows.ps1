@@ -5,14 +5,20 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $Root
 
 $pubspec = Get-Content "app/pubspec.yaml"
-$Version = (($pubspec | Where-Object { $_ -match '^version:' }) -split ':',2)[1].Trim().Split('+')[0]
+$VersionRaw = (($pubspec | Where-Object { $_ -match '^version:' }) -split ':',2)[1].Trim()
+$VersionParts = $VersionRaw.Split('+')
+$Version = $VersionParts[0]
+$BuildNumber = if ($VersionParts.Length -gt 1) { $VersionParts[1] } else { "0" }
 $Stamp = if ($env:PRIVET_BUILD) { $env:PRIVET_BUILD } else { (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss") }
 $Out = Join-Path $Root "server/public/downloads"
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 
 Push-Location app
 flutter pub get
-flutter build windows --release --dart-define="PRIVET_BUILD=$Stamp"
+flutter build windows --release `
+  --dart-define="PRIVET_BUILD=$Stamp" `
+  --dart-define="PRIVET_VERSION=$Version" `
+  --dart-define="PRIVET_BUILD_NUMBER=$BuildNumber"
 Pop-Location
 
 $Release = Join-Path $Root "app/build/windows/x64/runner/Release"
