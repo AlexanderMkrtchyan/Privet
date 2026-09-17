@@ -46,7 +46,7 @@ function serverApiKey() {
 
 /**
  * @param {string} prompt
- * @param {{ apiKey?: string, model?: string, baseUrl?: string }} [opts]
+ * @param {{ apiKey?: string, model?: string, baseUrl?: string, maxTokens?: number, temperature?: number }} [opts]
  */
 export async function generateOpenAiCompatText(prompt, opts = {}) {
   const userKey = opts.apiKey?.trim() || '';
@@ -77,6 +77,12 @@ export async function generateOpenAiCompatText(prompt, opts = {}) {
     throw new Error('Model id is required');
   }
 
+  const maxTokens = Number(opts.maxTokens) > 0 ? Number(opts.maxTokens) : 1024;
+  const temperature =
+    typeof opts.temperature === 'number' && Number.isFinite(opts.temperature)
+      ? opts.temperature
+      : 0.4;
+
   const res = await fetch(`${base}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -93,8 +99,8 @@ export async function generateOpenAiCompatText(prompt, opts = {}) {
         },
         { role: 'user', content: prompt },
       ],
-      temperature: 0.4,
-      max_tokens: 1024,
+      temperature,
+      max_tokens: maxTokens,
     }),
   });
 

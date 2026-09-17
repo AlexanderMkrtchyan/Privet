@@ -24,6 +24,7 @@ import '../util/rich_text_markup.dart';
 import '../util/task_event_payload.dart';
 import '../util/web_select_cursor.dart';
 import 'compact_emoji_picker.dart';
+import 'accent_chrome.dart';
 import 'cached_media_image.dart';
 import 'image_lightbox.dart';
 import 'inline_video_player.dart';
@@ -359,7 +360,9 @@ class MessageBubble extends StatelessWidget {
                   _imageMenuTarget = null;
                   _openMenu(context, details.globalPosition);
                 },
-          child: Container(
+          child: AccentChromeFrame(
+            radius: 16,
+            child: Container(
             constraints: BoxConstraints(maxWidth: maxBubble),
             padding: EdgeInsets.symmetric(
               horizontal: emojiOnly ? 4 : 12,
@@ -378,12 +381,19 @@ class MessageBubble extends StatelessWidget {
               border: Border.all(
                 // Privet-P green wrap only for replies + link metadata cards.
                 // Emoji-only: no border either — the art is the whole surface.
-                color: emojiOnly
+                // Tape / larva paint their own chrome via AccentChromeFrame.
+                color: emojiOnly ||
+                        PrivetTheme.accentStyle == AccentStyle.tape ||
+                        PrivetTheme.accentStyle == AccentStyle.larva
                     ? Colors.transparent
                     : (accent
                         ? PrivetTheme.signal.withValues(alpha: 0.75)
                         : PrivetTheme.line),
-                width: emojiOnly ? 0 : (accent ? 1.4 : 1),
+                width: emojiOnly ||
+                        PrivetTheme.accentStyle == AccentStyle.tape ||
+                        PrivetTheme.accentStyle == AccentStyle.larva
+                    ? 0
+                    : (accent ? 1.4 : 1),
               ),
             ),
             // Hug content width (no IntrinsicWidth).
@@ -404,7 +414,7 @@ class MessageBubble extends StatelessWidget {
                                   ? '@${message.sender.handle}'
                                   : ''),
                         textAlign: TextAlign.left,
-                        style: GoogleFonts.syne(
+                        style: PrivetTheme.titleStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w700,
                           color: PrivetTheme.signal,
@@ -531,6 +541,7 @@ class MessageBubble extends StatelessWidget {
                 ],
               ],
             ),
+          ),
           ),
         ),
       ),
@@ -2680,7 +2691,7 @@ class _ReplyQuote extends StatelessWidget {
               children: [
                 Text(
                   name,
-                  style: GoogleFonts.syne(
+                  style: PrivetTheme.titleStyle(
                     fontSize: 11 * fontScale,
                     fontWeight: FontWeight.w700,
                     color: PrivetTheme.signal,

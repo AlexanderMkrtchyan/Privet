@@ -46,6 +46,7 @@ const List<String> kMessageFonts = [
   'arial', // Arial → Arimo
   'courier', // Courier New → Cousine
   'ubuntu', // Ubuntu desktop/terminal font
+  'syne', // Privet display face used for usernames
   // Classic book / scientific typography.
   'oldstandard', // Old Standard TT — late-19th-century scientific books
   'garamond', // EB Garamond — Claude Garamont's type for old scholarly books
@@ -68,6 +69,7 @@ const Map<String, String> kMessageFontLabels = {
   'arial': 'Arial',
   'courier': 'Courier New',
   'ubuntu': 'Ubuntu',
+  'syne': 'Syne',
   'oldstandard': 'Old Standard TT',
   'garamond': 'Scientific Book',
   'cinzel': 'Ancient Rome',
@@ -94,6 +96,8 @@ TextStyle messageFontStyle(String key, TextStyle base) {
       return GoogleFonts.cousine(textStyle: base);
     case 'ubuntu':
       return GoogleFonts.ubuntu(textStyle: base);
+    case 'syne':
+      return GoogleFonts.syne(textStyle: base);
     case 'oldstandard':
       return GoogleFonts.oldStandardTt(textStyle: base);
     case 'garamond':

@@ -61,7 +61,7 @@ export function serverAiStatus() {
 /**
  * Prefer a user-supplied key when present; otherwise OpenAI-compat env then Gemini.
  * @param {string} prompt
- * @param {{ apiKey?: string | null, model?: string | null, baseUrl?: string | null }} [opts]
+ * @param {{ apiKey?: string | null, model?: string | null, baseUrl?: string | null, maxTokens?: number, temperature?: number, disableThinking?: boolean }} [opts]
  * @returns {Promise<{ text: string, provider: string, model: string }>}
  */
 export async function generateText(prompt, opts = {}) {
@@ -79,6 +79,9 @@ export async function generateText(prompt, opts = {}) {
       const text = await generateGeminiText(prompt, {
         apiKey: userKey,
         model,
+        maxTokens: opts.maxTokens,
+        temperature: opts.temperature,
+        disableThinking: opts.disableThinking,
       });
       return { text, provider: 'gemini', model };
     }
@@ -94,6 +97,8 @@ export async function generateText(prompt, opts = {}) {
       apiKey: userKey,
       model: modelOverride,
       baseUrl,
+      maxTokens: opts.maxTokens,
+      temperature: opts.temperature,
     });
     return { text, provider: 'openai', model: modelOverride };
   }
@@ -116,6 +121,8 @@ export async function generateText(prompt, opts = {}) {
       const text = await generateOpenAiCompatText(prompt, {
         model,
         baseUrl: baseUrl || undefined,
+        maxTokens: opts.maxTokens,
+        temperature: opts.temperature,
       });
       return { text, provider: 'openai', model };
     } catch (err) {
@@ -132,7 +139,12 @@ export async function generateText(prompt, opts = {}) {
         modelOverride ||
         process.env.GEMINI_MODEL?.trim() ||
         'gemini-2.5-flash-lite';
-      const text = await generateGeminiText(prompt, { model });
+      const text = await generateGeminiText(prompt, {
+        model,
+        maxTokens: opts.maxTokens,
+        temperature: opts.temperature,
+        disableThinking: opts.disableThinking,
+      });
       return { text, provider: 'gemini', model };
     } catch (err) {
       if (openaiOk && prefer !== 'gemini') {
@@ -143,6 +155,8 @@ export async function generateText(prompt, opts = {}) {
         const text = await generateOpenAiCompatText(prompt, {
           model,
           baseUrl: baseUrl || undefined,
+          maxTokens: opts.maxTokens,
+          temperature: opts.temperature,
         });
         return { text, provider: 'openai', model };
       }

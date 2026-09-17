@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import '../models.dart';
 import '../theme.dart';
@@ -38,6 +37,13 @@ class UserNameBlock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(
+      valueListenable: PrivetTheme.revision,
+      builder: (context, _, _) => _buildName(),
+    );
+  }
+
+  Widget _buildName() {
     final handleText = handle.isEmpty
         ? ''
         : isYou
@@ -50,7 +56,7 @@ class UserNameBlock extends StatelessWidget {
           children: [
             TextSpan(
               text: displayName,
-              style: GoogleFonts.syne(
+              style: PrivetTheme.titleStyle(
                 fontWeight: FontWeight.w700,
                 fontSize: titleSize,
                 color: PrivetTheme.paper,
@@ -80,7 +86,7 @@ class UserNameBlock extends StatelessWidget {
           isYou ? '$displayName (you)' : displayName,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: GoogleFonts.syne(
+          style: PrivetTheme.titleStyle(
             fontWeight: FontWeight.w700,
             fontSize: titleSize,
           ),

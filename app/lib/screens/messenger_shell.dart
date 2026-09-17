@@ -32,6 +32,7 @@ import '../util/call_history.dart';
 import '../util/camera_capture.dart';
 import '../util/composer_autocomplete.dart';
 import '../util/emoticon_expand.dart';
+import '../util/greeting_style.dart';
 import '../util/composer_autocorrect.dart';
 import '../util/composer_media_attach.dart';
 import '../util/desktop_tray.dart';
@@ -48,6 +49,7 @@ import '../util/shared_intent.dart';
 import '../util/sounds.dart';
 import '../util/throttle.dart';
 import '../util/web_bootstrap.dart';
+import '../widgets/accent_chrome.dart';
 import '../widgets/avatar.dart';
 import '../widgets/chat_media_folder.dart';
 import '../widgets/chat_task_pane.dart';
@@ -318,7 +320,7 @@ class _MessengerShellState extends State<MessengerShell> {
                           builder: (context, _) => InboxPane(state: state),
                         ),
                       ),
-                      Container(width: 1, color: PrivetTheme.line),
+                      const AccentSplitLine(axis: Axis.vertical),
                       Expanded(
                         child: hasChat
                             ? ListenableBuilder(
@@ -2325,6 +2327,24 @@ class InboxPane extends StatelessWidget {
                         ),
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
+                          title: const Text('Daily greeting'),
+                          subtitle: Text(
+                            'Show a once-a-day greeting bar above the composer',
+                            style: TextStyle(
+                              color: PrivetTheme.mist,
+                              fontSize: 12,
+                            ),
+                          ),
+                          value: state.greetingButtonEnabled,
+                          activeThumbColor: PrivetTheme.onAccent,
+                          activeTrackColor: PrivetTheme.signal,
+                          onChanged: (v) {
+                            state.setGreetingButtonEnabled(v);
+                            setSheet(() {});
+                          },
+                        ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
                           title: const Text('Autocorrect'),
                           subtitle: Text(
                             'Fix common typos and underline misspelled words',
@@ -2438,9 +2458,9 @@ class InboxPane extends StatelessWidget {
                         ),
                         const SizedBox(height: 10),
                         _AccentPicker(
-                          selected: state.accent,
-                          onPick: (c) {
-                            state.setAccent(c);
+                          selectedId: state.accentId,
+                          onPick: (option) {
+                            state.setAccentOption(option);
                             setSheet(() {});
                           },
                         ),
@@ -3203,6 +3223,27 @@ class _ConversationPaneState extends State<ConversationPane>
   int _acReplaceStart = 0;
   int _acReplaceEnd = 0;
 
+  /// Daily greeting chip is fetching a draft (AI) or loading local pools.
+  bool _greetingBusy = false;
+
+  /// Bumps when a new greeting request starts (ignore stale responses).
+  int _greetingGen = 0;
+
+  /// Last style used for generate / regenerate (null until first tap).
+  GreetingStyle? _lastGreetingStyle;
+
+  /// Last philosopher for Philosophy regenerate (null = random again).
+  String? _lastGreetingPhilosopher;
+
+  /// Last joke category for Joke regenerate (null = random again).
+  String? _lastGreetingJokeCategory;
+
+  /// Last English mode for English regenerate (null = random again).
+  String? _lastGreetingEnglishCategory;
+
+  /// Style currently spinning (null when idle).
+  GreetingStyle? _greetingBusyStyle;
+
   /// Last text seen for autocorrect — skip re-check on fade paint ticks.
   String _lastAutocorrectText = '';
 
@@ -3890,7 +3931,10 @@ class _ConversationPaneState extends State<ConversationPane>
       _spellClickArmed = null;
       _dismissSpellingMenu();
       _controller.setHoveredSpellIssue(null);
-      _openComposerCtxMenu(event.position);
+      // Web suppresses Flutter's contextMenuBuilder, so we own the menu.
+      // Desktop/mobile use _composerContextMenu (includes Select all) — do not
+      // also open this overlay or two Cut/Copy/Paste menus stack.
+      if (kIsWeb) _openComposerCtxMenu(event.position);
       return;
     }
     if (event.buttons != kPrimaryMouseButton) return;
@@ -4776,6 +4820,13 @@ class _ConversationPaneState extends State<ConversationPane>
       _focusedReplyId = null;
       _searchController.clear();
       _messageKeys.clear();
+      _lastGreetingStyle = null;
+      _lastGreetingPhilosopher = null;
+      _lastGreetingJokeCategory = null;
+      _lastGreetingEnglishCategory = null;
+      _greetingBusyStyle = null;
+      _greetingBusy = false;
+      _greetingGen++;
     }
   }
 
@@ -5074,61 +5125,68 @@ class _ConversationPaneState extends State<ConversationPane>
         children: [
           SafeArea(
             bottom: false,
-            child: Container(
-              padding: EdgeInsets.fromLTRB(
-                compact ? 2 : 8,
-                compact ? 4 : 8,
-                compact ? 2 : 8,
-                compact ? 4 : 8,
-              ),
-              decoration: BoxDecoration(
-                border: Border(bottom: BorderSide(color: PrivetTheme.line)),
-              ),
-              child: compact
-                  ? _buildMobileChatHeader(state, chat)
-                  : Row(
-                      children: [
-                        if (widget.showBack)
-                          IconButton(
-                            onPressed: state.clearActiveConversation,
-                            icon: const Icon(Icons.arrow_back_rounded),
-                          ),
-                        PrivetAvatar(
-                          name: chat?.title ?? 'Chat',
-                          hue:
-                              chat?.peer?.avatarHue ??
-                              (chat?.isGroup == true ? 90 : 160),
-                          avatarUrl: chat?.peer?.avatarUrl == null
-                              ? null
-                              : state.api.absoluteMediaUrl(
-                                  chat!.peer!.avatarUrl,
-                                ),
-                          online:
-                              chat?.peer != null &&
-                              state.online.contains(chat!.peer!.id),
-                        ),
-                        const SizedBox(width: 12),
-                        ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 200),
-                          child: ListenableBuilder(
-                            listenable: state.typingTick,
-                            builder: (context, _) =>
-                                _buildChatTitleColumn(state, chat),
-                          ),
-                        ),
-                        Expanded(
-                          child: Align(
-                            alignment: Alignment.centerRight,
-                            child: SingleChildScrollView(
-                              scrollDirection: Axis.horizontal,
-                              child: Row(
-                                children: desktopActions,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 2 : 8,
+                    compact ? 4 : 8,
+                    compact ? 2 : 8,
+                    compact ? 4 : 8,
+                  ),
+                  child: compact
+                      ? _buildMobileChatHeader(state, chat)
+                      : Row(
+                          children: [
+                            if (widget.showBack)
+                              IconButton(
+                                onPressed: state.clearActiveConversation,
+                                icon: const Icon(Icons.arrow_back_rounded),
+                              ),
+                            PrivetAvatar(
+                              name: chat?.title ?? 'Chat',
+                              hue:
+                                  chat?.peer?.avatarHue ??
+                                  (chat?.isGroup == true ? 90 : 160),
+                              avatarUrl: chat?.peer?.avatarUrl == null
+                                  ? null
+                                  : state.api.absoluteMediaUrl(
+                                      chat!.peer!.avatarUrl,
+                                    ),
+                              online:
+                                  chat?.peer != null &&
+                                  state.online.contains(chat!.peer!.id),
+                            ),
+                            const SizedBox(width: 12),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 200),
+                              child: ListenableBuilder(
+                                listenable: state.typingTick,
+                                builder: (context, _) =>
+                                    _buildChatTitleColumn(state, chat),
                               ),
                             ),
-                          ),
+                            Expanded(
+                              child: Align(
+                                alignment: Alignment.centerRight,
+                                child: SingleChildScrollView(
+                                  scrollDirection: Axis.horizontal,
+                                  child: Row(
+                                    children: desktopActions,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
+                ),
+                if (PrivetTheme.accentStyle == AccentStyle.tape ||
+                    PrivetTheme.accentStyle == AccentStyle.larva)
+                  const AccentSplitLine(axis: Axis.horizontal)
+                else
+                  Container(height: 1, color: PrivetTheme.line),
+              ],
             ),
           ),
           if (_searchOpen)
@@ -5434,10 +5492,10 @@ class _ConversationPaneState extends State<ConversationPane>
                           showSender: true,
                           highlighted: highlighted,
                           fontScale: state.chatFontSize / 15.0,
-                          // My font applies only to my own messages; a peer's
-                          // bubbles carry their own `[font=…]` or render in the
-                          // app default, so my pick never overrides theirs.
-                          defaultFontFamily: mine ? state.chatFontFamily : '',
+                          // Accent themes can force a chat face (hacker → Cousine).
+                          // Otherwise my font applies only to my own messages.
+                          defaultFontFamily: PrivetTheme.accentMessageFontFamily ??
+                              (mine ? state.chatFontFamily : ''),
                           onSetDefaultFont: state.setChatFontFamily,
                           readByPeer:
                               mine &&
@@ -5661,6 +5719,49 @@ class _ConversationPaneState extends State<ConversationPane>
                   ),
                 ),
               ),
+            if (_shouldShowGreetingChip(state, chat))
+              Padding(
+                padding: EdgeInsets.fromLTRB(
+                  compact ? 6 : 8,
+                  0,
+                  compact ? 6 : 8,
+                  4,
+                ),
+                child: TextFieldTapRegion(
+                  child: _GreetingComposerBar(
+                    busy: _greetingBusy,
+                    busyStyle: _greetingBusyStyle,
+                    lastStyle: _lastGreetingStyle,
+                    aiAvailable:
+                        state.aiActive || state.serverAiConfigured,
+                    onStyle: _onGreetingStyleTap,
+                    onRegenerate: _lastGreetingStyle == null ||
+                            _lastGreetingStyle == GreetingStyle.sayHi ||
+                            _lastGreetingStyle == GreetingStyle.random
+                        ? null
+                        : () => _onGreetingStyleTap(
+                              _lastGreetingStyle!,
+                              philosopher: _lastGreetingPhilosopher,
+                              jokeCategory: _lastGreetingJokeCategory,
+                              englishCategory: _lastGreetingEnglishCategory,
+                            ),
+                    onDismiss: _onGreetingChipDismiss,
+                    greetingNameLabel: chat?.isGroup == true
+                        ? null
+                        : (state.greetingNameForPeer(
+                              userId: chat?.peer?.id,
+                              displayName: chat?.peer?.displayName,
+                            ) ??
+                            'Name'),
+                    greetingNameIsCustom:
+                        chat?.isGroup != true &&
+                        state.contactGreetingName(chat?.peer?.id) != null,
+                    onEditGreetingName: chat?.isGroup == true
+                        ? null
+                        : () => _editGreetingName(chat?.peer),
+                  ),
+                ),
+              ),
             SafeArea(
               top: false,
               child: Padding(
@@ -5679,18 +5780,20 @@ class _ConversationPaneState extends State<ConversationPane>
                               onKeyEvent: (node, event) =>
                                   _handleComposerKeyEvent(event),
                               child: GestureDetector(
-                                onLongPress: () {
-                                  final box = context.findRenderObject();
-                                  if (box is RenderBox && box.hasSize) {
-                                    final center = box.localToGlobal(
-                                      Offset(
-                                        box.size.width / 2,
-                                        box.size.height / 2,
-                                      ),
-                                    );
-                                    _openComposerCtxMenu(center);
-                                  }
-                                },
+                                onLongPress: kIsWeb
+                                    ? () {
+                                        final box = context.findRenderObject();
+                                        if (box is RenderBox && box.hasSize) {
+                                          final center = box.localToGlobal(
+                                            Offset(
+                                              box.size.width / 2,
+                                              box.size.height / 2,
+                                            ),
+                                          );
+                                          _openComposerCtxMenu(center);
+                                        }
+                                      }
+                                    : null,
                                 child: _wrapComposerPointerLayer(
                                   child: _buildComposerInput(
                                     state: state,
@@ -5835,18 +5938,20 @@ class _ConversationPaneState extends State<ConversationPane>
                               onKeyEvent: (node, event) =>
                                   _handleComposerKeyEvent(event),
                               child: GestureDetector(
-                                onLongPress: () {
-                                  final box = context.findRenderObject();
-                                  if (box is RenderBox && box.hasSize) {
-                                    final center = box.localToGlobal(
-                                      Offset(
-                                        box.size.width / 2,
-                                        box.size.height / 2,
-                                      ),
-                                    );
-                                    _openComposerCtxMenu(center);
-                                  }
-                                },
+                                onLongPress: kIsWeb
+                                    ? () {
+                                        final box = context.findRenderObject();
+                                        if (box is RenderBox && box.hasSize) {
+                                          final center = box.localToGlobal(
+                                            Offset(
+                                              box.size.width / 2,
+                                              box.size.height / 2,
+                                            ),
+                                          );
+                                          _openComposerCtxMenu(center);
+                                        }
+                                      }
+                                    : null,
                                 child: _wrapComposerPointerLayer(
                                   child: _buildComposerInput(
                                     state: state,
@@ -6158,9 +6263,13 @@ class _ConversationPaneState extends State<ConversationPane>
     // WYSIWYG: type in the font picked in the "Aa" menu, not just the sent
     // bubbles. Explicit [font=…] runs on selected text still win over this base.
     final baseStyle = Theme.of(context).textTheme.bodyLarge ?? const TextStyle();
-    final composerStyle = state.chatFontFamily.isEmpty
+    final accentFont = PrivetTheme.accentMessageFontFamily;
+    final family = (accentFont != null && accentFont.isNotEmpty)
+        ? accentFont
+        : state.chatFontFamily;
+    final composerStyle = family.isEmpty
         ? null
-        : messageFontStyle(state.chatFontFamily, baseStyle);
+        : messageFontStyle(family, baseStyle);
     final resolvedStyle = composerStyle ?? baseStyle;
     // Material default width is 2.0 — keep it integer so canvas AA doesn't
     // soft-shadow one edge (1.5 looked like a 2px bar with a fuzzy right side).
@@ -6173,7 +6282,7 @@ class _ConversationPaneState extends State<ConversationPane>
     final caretWidth =
         state.terminalCursorEnabled ? fontSize * 0.55 : 2.0;
     // Kolobok overlay paints pack art over hidden Unicode glyphs in the field.
-    return Stack(
+    final field = Stack(
       children: [
         TextField(
           key: _composerFieldKey,
@@ -6227,6 +6336,14 @@ class _ConversationPaneState extends State<ConversationPane>
         ),
       ],
     );
+    if (PrivetTheme.accentStyle == AccentStyle.larva) {
+      return AccentChromeFrame(
+        radius: 14,
+        forceLong: true,
+        child: field,
+      );
+    }
+    return field;
   }
 
   Widget _buildDraftPreview() {
@@ -7439,6 +7556,227 @@ class _ConversationPaneState extends State<ConversationPane>
     dismissSoftKeyboard();
   }
 
+  bool _shouldShowGreetingChip(PrivetState state, Conversation? chat) {
+    final id = chat?.id ?? state.activeConversationId;
+    if (id == null) return false;
+    if (_editingMessage != null) return false;
+    if (_recording || _draftVoice != null) return false;
+    return state.shouldShowGreetingButton(id);
+  }
+
+  Future<void> _onGreetingChipDismiss() async {
+    final chatId = widget.state.activeConversationId;
+    if (chatId == null) return;
+    await widget.state.consumeGreetingButton(chatId);
+    if (mounted) {
+      setState(() {
+        _lastGreetingStyle = null;
+        _lastGreetingPhilosopher = null;
+        _lastGreetingJokeCategory = null;
+        _lastGreetingEnglishCategory = null;
+        _greetingBusyStyle = null;
+        _greetingBusy = false;
+        _greetingGen++;
+      });
+    }
+  }
+
+  Future<void> _editGreetingName(PrivetUser? peer) async {
+    if (peer == null) return;
+    final state = widget.state;
+    final existing = state.contactGreetingName(peer.id) ?? '';
+    final fallback = PrivetState.greetingFirstName(peer.displayName) ??
+        (peer.handle.trim().isNotEmpty ? peer.handle.trim() : 'them');
+    final ctrl = TextEditingController(text: existing);
+    final result = await showDialog<String?>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setLocal) {
+            final typed = ctrl.text.trim();
+            final preview = PrivetState.greetingFirstName(
+                  typed.isNotEmpty ? typed : fallback,
+                ) ??
+                fallback;
+            return AlertDialog(
+              backgroundColor: PrivetTheme.panelElevated,
+              title: Text(
+                'Name for Say hi',
+                style: GoogleFonts.syne(fontWeight: FontWeight.w700),
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'Only you see this. Say hi will open with “Hi, $preview,”',
+                    style: TextStyle(color: PrivetTheme.mist, fontSize: 13),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: ctrl,
+                    autofocus: true,
+                    maxLength: 48,
+                    textCapitalization: TextCapitalization.words,
+                    decoration: InputDecoration(
+                      labelText: 'Greeting name',
+                      hintText: fallback,
+                      counterText: '',
+                    ),
+                    onChanged: (_) => setLocal(() {}),
+                    onSubmitted: (v) => Navigator.of(ctx).pop(v),
+                  ),
+                ],
+              ),
+              actions: [
+                if (existing.isNotEmpty)
+                  TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(''),
+                    child: Text(
+                      'Clear',
+                      style: GoogleFonts.ibmPlexSans(
+                        fontWeight: FontWeight.w600,
+                        color: PrivetTheme.mist,
+                      ),
+                    ),
+                  ),
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(null),
+                  child: Text(
+                    'Cancel',
+                    style: GoogleFonts.ibmPlexSans(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(ctx).pop(ctrl.text),
+                  child: Text(
+                    'Save',
+                    style: GoogleFonts.ibmPlexSans(fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    ctrl.dispose();
+    if (!mounted || result == null) return;
+    await state.setContactGreetingName(peer.id, result);
+  }
+
+  Future<void> _onGreetingStyleTap(
+    GreetingStyle style, {
+    String? philosopher,
+    String? jokeCategory,
+    String? englishCategory,
+  }) async {
+    if (_greetingBusy) return;
+    final state = widget.state;
+    final chat = _chat;
+    final chatId = state.activeConversationId;
+    if (chatId == null) return;
+    final gen = ++_greetingGen;
+    setState(() {
+      _greetingBusy = true;
+      _greetingBusyStyle = style;
+      _lastGreetingStyle = style;
+      _lastGreetingPhilosopher =
+          style == GreetingStyle.philosophy ? philosopher : null;
+      _lastGreetingJokeCategory =
+          style == GreetingStyle.joke ? jokeCategory : null;
+      _lastGreetingEnglishCategory =
+          style == GreetingStyle.english ? englishCategory : null;
+    });
+    final draft = await state.generateGreetingDraft(
+      isGroup: chat?.isGroup == true,
+      peerDisplayName: chat?.peer?.displayName,
+      peerUserId: chat?.peer?.id,
+      style: style,
+      philosopher: philosopher,
+      jokeCategory: jokeCategory,
+      englishCategory: englishCategory,
+    );
+    if (!mounted || gen != _greetingGen) return;
+    setState(() {
+      _greetingBusy = false;
+      _greetingBusyStyle = null;
+    });
+    if (draft == null || draft.isEmpty) {
+      final err = state.error;
+      if (err != null && err.isNotEmpty && mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(err),
+              backgroundColor: const Color(0xFFB3261E),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+      }
+      return;
+    }
+    var cleaned = draft.trim();
+    if (cleaned.length >= 2) {
+      final a = cleaned[0];
+      final b = cleaned[cleaned.length - 1];
+      if ((a == '"' && b == '"') || (a == "'" && b == "'")) {
+        cleaned = cleaned.substring(1, cleaned.length - 1).trim();
+      }
+    }
+    if (cleaned.isEmpty) return;
+    _applyGreetingToComposer(cleaned);
+    // Keep the bar open for regenerate / another manner.
+    // Consume only on dismiss or send.
+  }
+
+  /// Insert greeting text through EditableText so overlay teardown / focus
+  /// reconnect cannot leave an empty composer (common on first pick).
+  void _applyGreetingToComposer(String cleaned) {
+    _controller.clearMarks();
+    _controller.clearFormatRuns();
+    final next = TextEditingValue(
+      text: cleaned,
+      selection: TextSelection.collapsed(offset: cleaned.length),
+    );
+    if (!_composerFocus.hasFocus) {
+      _composerFocus.requestFocus();
+    }
+    final editable = _composerEditableState();
+    if (editable != null) {
+      editable.userUpdateTextEditingValue(
+        next,
+        SelectionChangedCause.toolbar,
+      );
+    } else {
+      _controller.value = next;
+    }
+    _lastAutocorrectText = cleaned;
+    _syncComposerHasContent();
+    widget.state.notifyTyping();
+    // Overlay click-through / IME reconnect can wipe once after focus.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_controller.text == cleaned) return;
+      final again = TextEditingValue(
+        text: cleaned,
+        selection: TextSelection.collapsed(offset: cleaned.length),
+      );
+      final editable2 = _composerEditableState();
+      if (editable2 != null) {
+        editable2.userUpdateTextEditingValue(
+          again,
+          SelectionChangedCause.toolbar,
+        );
+      } else {
+        _controller.value = again;
+      }
+      _lastAutocorrectText = cleaned;
+      _syncComposerHasContent();
+    });
+  }
+
   Future<void> _send() async {
     if (_editingMessage != null) {
       await _commitEditMessage();
@@ -7462,6 +7800,7 @@ class _ConversationPaneState extends State<ConversationPane>
     final dismissKeyboard = mounted && PrivetTheme.isCompact(context);
     _clearComposerAutocomplete();
     _controller.clearMarks();
+    final greetingChatId = widget.state.activeConversationId;
     if (voice != null) {
       final caption = text.trim();
       _controller.clear();
@@ -7482,6 +7821,9 @@ class _ConversationPaneState extends State<ConversationPane>
         replyToId: replyToId,
         replyTo: replyPreview,
       );
+      if (greetingChatId != null) {
+        unawaited(widget.state.consumeGreetingButton(greetingChatId));
+      }
       final err = widget.state.error;
       if (err != null && err.isNotEmpty) {
         _voiceToast(err);
@@ -7514,6 +7856,9 @@ class _ConversationPaneState extends State<ConversationPane>
         replyTo: replyPreview,
         replyQuote: replyQuote,
       );
+      if (greetingChatId != null) {
+        unawaited(widget.state.consumeGreetingButton(greetingChatId));
+      }
       if (dismissKeyboard) _dismissComposerKeyboard();
       _scrollToEnd();
       return;
@@ -7525,6 +7870,9 @@ class _ConversationPaneState extends State<ConversationPane>
       replyTo: replyPreview,
       replyQuote: replyQuote,
     );
+    if (greetingChatId != null) {
+      unawaited(widget.state.consumeGreetingButton(greetingChatId));
+    }
     _controller.clear();
     setState(() {
       _replyingTo = null;
@@ -7813,26 +8161,35 @@ class _CallActionButton extends StatelessWidget {
             : null,
         child: Material(
           color: Colors.transparent,
-          child: Ink(
-            decoration: BoxDecoration(
-              color: active
-                  ? PrivetTheme.panelElevated
-                  : PrivetTheme.ink.withValues(alpha: 0.35),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: borderColor),
-            ),
-            child: InkWell(
-              onTap: enabled ? onPressed : null,
-              mouseCursor: enabled
-                  ? SystemMouseCursors.click
-                  : SystemMouseCursors.basic,
-              borderRadius: BorderRadius.circular(12),
-              hoverColor: PrivetTheme.paper.withValues(alpha: 0.06),
-              splashColor: PrivetTheme.paper.withValues(alpha: 0.08),
-              child: SizedBox(
-                height: kChatHeaderChipHeight,
-                width: kChatHeaderChipHeight,
-                child: Icon(icon, size: 18, color: iconColor),
+          child: AccentChromeFrame(
+            radius: 12,
+            forceLong: false,
+            child: Ink(
+              decoration: BoxDecoration(
+                color: active
+                    ? PrivetTheme.panelElevated
+                    : PrivetTheme.ink.withValues(alpha: 0.35),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: (PrivetTheme.accentStyle == AccentStyle.tape ||
+                          PrivetTheme.accentStyle == AccentStyle.larva)
+                      ? Colors.transparent
+                      : borderColor,
+                ),
+              ),
+              child: InkWell(
+                onTap: enabled ? onPressed : null,
+                mouseCursor: enabled
+                    ? SystemMouseCursors.click
+                    : SystemMouseCursors.basic,
+                borderRadius: BorderRadius.circular(12),
+                hoverColor: PrivetTheme.paper.withValues(alpha: 0.06),
+                splashColor: PrivetTheme.paper.withValues(alpha: 0.08),
+                child: SizedBox(
+                  height: kChatHeaderChipHeight,
+                  width: kChatHeaderChipHeight,
+                  child: Icon(icon, size: 18, color: iconColor),
+                ),
               ),
             ),
           ),
@@ -7988,6 +8345,555 @@ class _ThemeModeSelector extends StatelessWidget {
   }
 }
 
+/// Compact style chips for the once-a-day greeting above the composer.
+class _GreetingComposerBar extends StatelessWidget {
+  const _GreetingComposerBar({
+    required this.busy,
+    required this.busyStyle,
+    required this.lastStyle,
+    required this.aiAvailable,
+    required this.onStyle,
+    required this.onRegenerate,
+    required this.onDismiss,
+    this.greetingNameLabel,
+    this.greetingNameIsCustom = false,
+    this.onEditGreetingName,
+  });
+
+  final bool busy;
+  final GreetingStyle? busyStyle;
+  final GreetingStyle? lastStyle;
+  final bool aiAvailable;
+  final void Function(
+    GreetingStyle style, {
+    String? philosopher,
+    String? jokeCategory,
+    String? englishCategory,
+  }) onStyle;
+  final VoidCallback? onRegenerate;
+  final VoidCallback onDismiss;
+
+  /// DM only: name Say hi will address (local alias or peer first name).
+  final String? greetingNameLabel;
+  final bool greetingNameIsCustom;
+  final VoidCallback? onEditGreetingName;
+
+  static const _styles = <GreetingStyle>[
+    GreetingStyle.sayHi,
+    GreetingStyle.joke,
+    GreetingStyle.philosophy,
+    GreetingStyle.work,
+    GreetingStyle.warm,
+    GreetingStyle.punchy,
+    GreetingStyle.english,
+    GreetingStyle.ai,
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: PrivetTheme.panelElevated,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(6, 4, 2, 4),
+        child: Row(
+          children: [
+            Expanded(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (final style in _styles) ...[
+                      if (style == GreetingStyle.ai && !aiAvailable)
+                        const SizedBox.shrink()
+                      else if (style == GreetingStyle.philosophy)
+                        _GreetingDropdownChip(
+                          label: 'Philosophy',
+                          icon: Icons.menu_book_rounded,
+                          selected: lastStyle == style && !busy,
+                          busy: busy && busyStyle == style,
+                          enabled: !busy,
+                          items: [
+                            for (final name in kGreetingPhilosophers)
+                              (id: name, label: name),
+                          ],
+                          onPick: (philosopher) => onStyle(
+                            GreetingStyle.philosophy,
+                            philosopher: philosopher,
+                          ),
+                        )
+                      else if (style == GreetingStyle.joke)
+                        _GreetingDropdownChip(
+                          label: 'Joke',
+                          icon: Icons.mood_rounded,
+                          selected: lastStyle == style && !busy,
+                          busy: busy && busyStyle == style,
+                          enabled: !busy,
+                          items: [
+                            for (final id in kGreetingJokeCategories)
+                              (
+                                id: id,
+                                label: greetingJokeCategoryLabel(id),
+                              ),
+                          ],
+                          onPick: (category) => onStyle(
+                            GreetingStyle.joke,
+                            jokeCategory: category,
+                          ),
+                        )
+                      else if (style == GreetingStyle.english)
+                        _GreetingDropdownChip(
+                          label: 'English',
+                          icon: Icons.spellcheck_rounded,
+                          selected: lastStyle == style && !busy,
+                          busy: busy && busyStyle == style,
+                          enabled: !busy,
+                          items: [
+                            for (final id in kGreetingEnglishCategories)
+                              (
+                                id: id,
+                                label: greetingEnglishCategoryLabel(id),
+                              ),
+                          ],
+                          onPick: (category) => onStyle(
+                            GreetingStyle.english,
+                            englishCategory: category,
+                          ),
+                        )
+                      else
+                        _GreetingStyleChip(
+                          label: style.label,
+                          tooltip: style.tooltip,
+                          icon: style == GreetingStyle.ai
+                              ? Icons.auto_awesome_rounded
+                              : style == GreetingStyle.sayHi
+                                  ? Icons.waving_hand_rounded
+                                  : null,
+                          selected: lastStyle == style && !busy,
+                          busy: busy && busyStyle == style,
+                          enabled: !busy,
+                          onTap: () => onStyle(style),
+                        ),
+                      if (!(style == GreetingStyle.ai && !aiAvailable))
+                        const SizedBox(width: 4),
+                    ],
+                    if (onRegenerate != null)
+                      _GreetingStyleChip(
+                        label: 'Again',
+                        tooltip: 'Another line in the same style',
+                        icon: Icons.refresh_rounded,
+                        selected: false,
+                        busy: false,
+                        enabled: !busy,
+                        onTap: onRegenerate!,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            if (greetingNameLabel != null && onEditGreetingName != null)
+              Padding(
+                padding: const EdgeInsets.only(right: 2),
+                child: _GreetingStyleChip(
+                  label: greetingNameLabel!,
+                  tooltip: greetingNameIsCustom
+                      ? 'Greeting name (only you) — tap to edit'
+                      : 'Set name for Say hi',
+                  icon: Icons.badge_outlined,
+                  selected: greetingNameIsCustom && !busy,
+                  busy: false,
+                  enabled: !busy,
+                  onTap: onEditGreetingName!,
+                ),
+              ),
+            IconButton(
+              tooltip: 'Dismiss for today',
+              onPressed: busy ? null : onDismiss,
+              visualDensity: VisualDensity.compact,
+              iconSize: 18,
+              padding: const EdgeInsets.all(6),
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              icon: Icon(
+                Icons.close_rounded,
+                color: PrivetTheme.mist,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Greeting chip with a Random + items dropdown (Philosophy, Joke types, …).
+class _GreetingDropdownChip extends StatefulWidget {
+  const _GreetingDropdownChip({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.busy,
+    required this.enabled,
+    required this.items,
+    required this.onPick,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final bool busy;
+  final bool enabled;
+
+  /// Specific picks; `id` is what [onPick] receives (null = Random).
+  final List<({String id, String label})> items;
+
+  /// `null` means Random from the pool.
+  final ValueChanged<String?> onPick;
+
+  @override
+  State<_GreetingDropdownChip> createState() => _GreetingDropdownChipState();
+}
+
+class _GreetingDropdownChipState extends State<_GreetingDropdownChip> {
+  final _link = LayerLink();
+  OverlayEntry? _overlay;
+
+  static const double _menuWidth = 236;
+  static const double _itemHeight = 42;
+
+  @override
+  void dispose() {
+    _hideMenu();
+    super.dispose();
+  }
+
+  void _toggleMenu() {
+    if (!widget.enabled || widget.busy) return;
+    if (_overlay != null) {
+      _hideMenu();
+      return;
+    }
+    _showMenu();
+  }
+
+  void _showMenu() {
+    if (_overlay != null) return;
+    final overlay = Overlay.of(context);
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final anchor = box.localToGlobal(Offset.zero) & box.size;
+    final screen = MediaQuery.sizeOf(context);
+    // Random + divider + all items (same math as the font picker).
+    final entries = 1 + widget.items.length;
+    final menuHeight = _itemHeight * entries + 8;
+    final height = menuHeight < screen.height - 16
+        ? menuHeight
+        : screen.height - 16;
+    final placeBelow =
+        anchor.bottom + 6 + height <= screen.height ||
+        anchor.bottom >= anchor.top + height;
+    final top = placeBelow
+        ? anchor.bottom + 6
+        : (anchor.top - 6 - height).clamp(8.0, screen.height - height - 8.0);
+    final left = (anchor.left + anchor.width / 2 - _menuWidth / 2).clamp(
+      8.0,
+      (screen.width - _menuWidth - 8.0).clamp(8.0, screen.width),
+    );
+
+    void pick(String? id) {
+      // Fire pick first; dismiss on the next frame so the pointer-up cannot
+      // fall through into the composer (same pattern as the spelling menu).
+      widget.onPick(id);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _hideMenu();
+      });
+    }
+
+    _overlay = OverlayEntry(
+      builder: (ctx) {
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: Listener(
+                // Opaque: translucent lets the click reach the composer under
+                // the overlay and wipe / desync the text input connection.
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: (_) => _hideMenu(),
+              ),
+            ),
+            Positioned(
+              left: left,
+              top: top,
+              child: TextFieldTapRegion(
+                child: Material(
+                  color: PrivetTheme.panelElevated,
+                  elevation: 24,
+                  shadowColor: Colors.black87,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    side: BorderSide(color: PrivetTheme.line),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: SizedBox(
+                    width: _menuWidth,
+                    height: height,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _GreetingMenuItem(
+                          label: 'Random',
+                          icon: Icons.shuffle_rounded,
+                          onTap: () => pick(null),
+                        ),
+                        Divider(
+                          height: 1,
+                          thickness: 1,
+                          color: PrivetTheme.line,
+                        ),
+                        Flexible(
+                          child: SingleChildScrollView(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                for (final item in widget.items)
+                                  _GreetingMenuItem(
+                                    label: item.label,
+                                    onTap: () => pick(item.id),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    overlay.insert(_overlay!);
+  }
+
+  void _hideMenu() {
+    _overlay?.remove();
+    _overlay = null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = widget.selected ? PrivetTheme.onAccent : PrivetTheme.paper;
+    return CompositedTransformTarget(
+      link: _link,
+      child: MouseRegion(
+        cursor: widget.enabled && !widget.busy
+            ? SystemMouseCursors.click
+            : SystemMouseCursors.basic,
+        child: Material(
+          color: widget.selected
+              ? PrivetTheme.signal
+              : PrivetTheme.paper.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(10),
+          child: InkWell(
+            onTap: widget.enabled && !widget.busy ? _toggleMenu : null,
+            borderRadius: BorderRadius.circular(10),
+            mouseCursor: widget.enabled && !widget.busy
+                ? SystemMouseCursors.click
+                : SystemMouseCursors.basic,
+            hoverColor: PrivetTheme.signal.withValues(alpha: 0.08),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (widget.busy)
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.8,
+                        color: widget.selected
+                            ? PrivetTheme.onAccent
+                            : PrivetTheme.signal,
+                      ),
+                    )
+                  else
+                    Icon(widget.icon, size: 14, color: fg),
+                  const SizedBox(width: 5),
+                  Text(
+                    widget.label,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: fg.withValues(
+                        alpha: widget.enabled || widget.busy ? 1 : 0.45,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 2),
+                  Icon(
+                    Icons.expand_less_rounded,
+                    size: 14,
+                    color: fg.withValues(alpha: 0.7),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GreetingMenuItem extends StatelessWidget {
+  const _GreetingMenuItem({
+    required this.label,
+    required this.onTap,
+    this.icon,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+  final IconData? icon;
+
+  static const double _itemHeight = 42;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          hoverColor: PrivetTheme.signal.withValues(alpha: 0.1),
+          child: SizedBox(
+            height: _itemHeight,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: Row(
+                children: [
+                  if (icon != null) ...[
+                    Icon(icon, size: 16, color: PrivetTheme.mist),
+                    const SizedBox(width: 10),
+                  ],
+                  Expanded(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.ibmPlexSans(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: PrivetTheme.paper,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GreetingStyleChip extends StatefulWidget {
+  const _GreetingStyleChip({
+    required this.label,
+    required this.tooltip,
+    required this.selected,
+    required this.busy,
+    required this.enabled,
+    required this.onTap,
+    this.icon,
+  });
+
+  final String label;
+  final String tooltip;
+  final bool selected;
+  final bool busy;
+  final bool enabled;
+  final VoidCallback onTap;
+  final IconData? icon;
+
+  @override
+  State<_GreetingStyleChip> createState() => _GreetingStyleChipState();
+}
+
+class _GreetingStyleChipState extends State<_GreetingStyleChip> {
+  @override
+  Widget build(BuildContext context) {
+    final fg = widget.selected ? PrivetTheme.onAccent : PrivetTheme.paper;
+    final chip = MouseRegion(
+      cursor: widget.enabled
+          ? SystemMouseCursors.click
+          : SystemMouseCursors.basic,
+      child: Material(
+        color: widget.selected
+            ? PrivetTheme.signal
+            : PrivetTheme.paper.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          onTap: widget.enabled ? widget.onTap : null,
+          borderRadius: BorderRadius.circular(10),
+          mouseCursor: widget.enabled
+              ? SystemMouseCursors.click
+              : SystemMouseCursors.basic,
+          hoverColor: PrivetTheme.signal.withValues(alpha: 0.08),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (widget.busy)
+                  SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 1.8,
+                      color: widget.selected
+                          ? PrivetTheme.onAccent
+                          : PrivetTheme.signal,
+                    ),
+                  )
+                else if (widget.icon != null)
+                  Icon(widget.icon, size: 14, color: fg)
+                else if (widget.label == 'Say hi')
+                  Icon(Icons.waving_hand_rounded, size: 14, color: fg),
+                if (widget.busy ||
+                    widget.icon != null ||
+                    widget.label == 'Say hi')
+                  const SizedBox(width: 5),
+                Text(
+                  widget.label,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: fg.withValues(
+                      alpha: widget.enabled || widget.busy ? 1 : 0.45,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    return Tooltip(
+      message: widget.tooltip,
+      waitDuration: const Duration(milliseconds: 280),
+      preferBelow: false,
+      child: chip,
+    );
+  }
+}
+
 /// [✓ Tasks] chip — opens the task pane directly. Payments / reminders live in
 /// the adjacent [⋮] overflow so tasks dominate the header.
 class _AddChipButton extends StatelessWidget {
@@ -7997,6 +8903,8 @@ class _AddChipButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final special = PrivetTheme.accentStyle == AccentStyle.tape ||
+        PrivetTheme.accentStyle == AccentStyle.larva;
     return Padding(
       padding: const EdgeInsets.only(left: 4),
       child: Tooltip(
@@ -8004,27 +8912,33 @@ class _AddChipButton extends StatelessWidget {
         waitDuration: const Duration(milliseconds: 280),
         child: Material(
           color: Colors.transparent,
-          child: Ink(
-            decoration: BoxDecoration(
-              color: PrivetTheme.panelElevated,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: PrivetTheme.signal.withValues(alpha: 0.7),
+          child: AccentChromeFrame(
+            radius: 12,
+            forceLong: false,
+            child: Ink(
+              decoration: BoxDecoration(
+                color: PrivetTheme.panelElevated,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: special
+                      ? Colors.transparent
+                      : PrivetTheme.signal.withValues(alpha: 0.7),
+                ),
               ),
-            ),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(12),
-              mouseCursor: SystemMouseCursors.click,
-              hoverColor: PrivetTheme.paper.withValues(alpha: 0.06),
-              splashColor: PrivetTheme.paper.withValues(alpha: 0.08),
-              onTap: onTap,
-              child: SizedBox(
-                height: kChatHeaderChipHeight,
-                width: kChatHeaderChipHeight,
-                child: Icon(
-                  Icons.checklist_rounded,
-                  size: 18,
-                  color: PrivetTheme.signal,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                mouseCursor: SystemMouseCursors.click,
+                hoverColor: PrivetTheme.paper.withValues(alpha: 0.06),
+                splashColor: PrivetTheme.paper.withValues(alpha: 0.08),
+                onTap: onTap,
+                child: SizedBox(
+                  height: kChatHeaderChipHeight,
+                  width: kChatHeaderChipHeight,
+                  child: Icon(
+                    Icons.checklist_rounded,
+                    size: 18,
+                    color: PrivetTheme.signal,
+                  ),
                 ),
               ),
             ),
@@ -8037,10 +8951,10 @@ class _AddChipButton extends StatelessWidget {
 
 /// Row of accent swatches acting as a color picker for the app accent.
 class _AccentPicker extends StatelessWidget {
-  const _AccentPicker({required this.selected, required this.onPick});
+  const _AccentPicker({required this.selectedId, required this.onPick});
 
-  final Color selected;
-  final ValueChanged<Color> onPick;
+  final String selectedId;
+  final ValueChanged<AccentOption> onPick;
 
   @override
   Widget build(BuildContext context) {
@@ -8048,43 +8962,129 @@ class _AccentPicker extends StatelessWidget {
       spacing: 12,
       runSpacing: 12,
       children: [
-        for (final option in PrivetTheme.accentOptions)
-          _swatch(option.seed, option.label),
+        for (final option in PrivetTheme.accentOptions) _swatch(option),
       ],
     );
   }
 
-  Widget _swatch(Color seed, String label) {
-    final isSelected = seed.toARGB32() == selected.toARGB32();
+  Widget _swatch(AccentOption option) {
+    final isSelected = option.id == selectedId;
     return Tooltip(
-      message: label,
+      message: option.label,
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         child: GestureDetector(
-          onTap: () => onPick(seed),
+          onTap: () => onPick(option),
           child: Container(
             width: 34,
             height: 34,
             decoration: BoxDecoration(
-              color: seed,
               shape: BoxShape.circle,
               border: Border.all(
                 color: isSelected ? PrivetTheme.paper : PrivetTheme.line,
                 width: isSelected ? 2.5 : 1,
               ),
             ),
-            child: isSelected
-                ? Icon(
-                    Icons.check_rounded,
-                    size: 18,
-                    color: PrivetTheme.onAccent,
-                  )
-                : null,
+            child: ClipOval(
+              child: CustomPaint(
+                painter: _AccentSwatchPainter(option),
+                child: isSelected
+                    ? Icon(
+                        Icons.check_rounded,
+                        size: 18,
+                        color: option.style == AccentStyle.hacker ||
+                                option.style == AccentStyle.yellow ||
+                                option.style == AccentStyle.tape
+                            ? const Color(0xFF0E1114)
+                            : PrivetTheme.onAccent,
+                      )
+                    : null,
+              ),
+            ),
           ),
         ),
       ),
     );
   }
+}
+
+class _AccentSwatchPainter extends CustomPainter {
+  _AccentSwatchPainter(this.option);
+  final AccentOption option;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    switch (option.style) {
+      case AccentStyle.tape:
+        final paint = Paint()..style = PaintingStyle.fill;
+        const black = Color(0xFF111111);
+        const yellow = Color(0xFFF0D000);
+        const stripe = 5.0;
+        for (var i = -size.height; i < size.width + size.height; i += stripe * 2) {
+          paint.color = black;
+          canvas.drawPath(
+            Path()
+              ..moveTo(i, 0)
+              ..lineTo(i + stripe, 0)
+              ..lineTo(i + stripe - size.height, size.height)
+              ..lineTo(i - size.height, size.height)
+              ..close(),
+            paint,
+          );
+          paint.color = yellow;
+          canvas.drawPath(
+            Path()
+              ..moveTo(i + stripe, 0)
+              ..lineTo(i + stripe * 2, 0)
+              ..lineTo(i + stripe * 2 - size.height, size.height)
+              ..lineTo(i + stripe - size.height, size.height)
+              ..close(),
+            paint,
+          );
+        }
+      case AccentStyle.hacker:
+        canvas.drawRect(rect, Paint()..color = const Color(0xFF020804));
+        final ink = Paint()
+          ..color = const Color(0xFF39FF14)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..strokeCap = StrokeCap.square;
+        // Tiny ">_" glyph without TextPainter (avoids TextDirection clashes).
+        final cx = size.width * 0.32;
+        final cy = size.height * 0.5;
+        canvas.drawLine(Offset(cx - 4, cy - 5), Offset(cx + 2, cy), ink);
+        canvas.drawLine(Offset(cx + 2, cy), Offset(cx - 4, cy + 5), ink);
+        canvas.drawLine(
+          Offset(size.width * 0.55, cy + 4),
+          Offset(size.width * 0.78, cy + 4),
+          ink,
+        );
+      case AccentStyle.larva:
+        canvas.drawRect(rect, Paint()..color = option.seed);
+        final hair = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1
+          ..strokeCap = StrokeCap.round
+          ..color = const Color(0xFFF4EBC4);
+        final c = Offset(size.width / 2, size.height / 2);
+        for (var i = 0; i < 16; i++) {
+          final a = i / 16 * 6.28318;
+          canvas.drawLine(
+            c + Offset(math.cos(a) * 8, math.sin(a) * 8),
+            c + Offset(math.cos(a) * 15, math.sin(a) * 15),
+            hair,
+          );
+        }
+      case AccentStyle.yellow:
+      case AccentStyle.solid:
+        canvas.drawRect(rect, Paint()..color = option.seed);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _AccentSwatchPainter oldDelegate) =>
+      oldDelegate.option.id != option.id;
 }
 
 /// Floating formatting bar shown above the composer when text is selected.

@@ -142,7 +142,7 @@ class PrivetApp extends StatefulWidget {
 class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
   final PrivetState _state = PrivetState();
   /// Only session-level fields should rebuild MaterialApp.
-  (bool, String?, ThemeMode, int, bool, bool)? _sessionKey;
+  (bool, String?, ThemeMode, int, String, bool, bool)? _sessionKey;
 
   @override
   void initState() {
@@ -167,6 +167,7 @@ class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
       _state.user?.id,
       _state.themeMode,
       _state.accent.toARGB32(),
+      _state.accentId,
       _state.lowResourceMode,
       _state.smoothMotionMode,
     );
@@ -226,6 +227,7 @@ class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
     PrivetTheme.apply(
       brightness: _effectiveBrightness(),
       accent: _state.accent,
+      style: PrivetTheme.optionFor(id: _state.accentId, seed: _state.accent).style,
     );
     final low = _state.lowResourceMode;
     return MaterialApp(

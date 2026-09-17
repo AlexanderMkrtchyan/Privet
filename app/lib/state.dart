@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:ui' show Color, Offset, Size;
+import 'dart:ui' show Brightness, Color, Offset, PlatformDispatcher, Size;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show ThemeMode;
@@ -14,6 +14,7 @@ import 'api/realtime.dart';
 import 'models.dart';
 import 'remote_control/control_channel.dart';
 import 'remote_control/protocol.dart';
+import 'theme.dart';
 import 'util/agent_debug_log.dart';
 import 'util/ai_turn.dart';
 import 'util/display_capture.dart';
@@ -21,6 +22,8 @@ import 'util/display_rate.dart';
 import 'util/emoticon_expand.dart';
 import 'util/custom_shortcodes.dart';
 import 'util/gpu_capability.dart';
+import 'util/greeting_style.dart';
+import 'util/greeting_pools.dart';
 import 'util/low_resource.dart';
 import 'util/mobile_push.dart';
 import 'util/mobile_push_io.dart'
@@ -2446,6 +2449,21 @@ class PrivetState extends ChangeNotifier {
   /// Suggest emoticon shortcodes and AI commands while typing (device-local).
   bool autocompleteEnabled = true;
 
+  /// Show the once-a-day AI greeting chip above the composer (device-local).
+  bool greetingButtonEnabled = true;
+
+  /// Chat ids where the greeting chip was used or dismissed today (device-local).
+  final Set<String> _greetingConsumedChatIds = {};
+  String _greetingConsumedDay = '';
+
+  /// Recent greeting drafts by style(+philosopher) so regenerate stays fresh.
+  final Map<String, List<String>> _recentGreetingDrafts = {};
+  static const int _maxRecentGreetingDrafts = 6;
+
+  /// Local-only greeting names keyed by peer user id (device-local).
+  /// Used by the Hi button so drafts say "Hi, Geoffrey," instead of their handle.
+  final Map<String, String> _contactGreetingNames = {};
+
   /// Auto-fix common typos, red-underline misspelled words, and use the native
   /// keyboard autocorrect/suggestion strip on mobile (device-local).
   bool autocorrectEnabled = true;
@@ -2481,6 +2499,9 @@ class PrivetState extends ChangeNotifier {
 
   /// Chosen accent seed (device-local). Derived per light/dark in PrivetTheme.
   Color accent = const Color(0xFFB6F24A);
+
+  /// Accent option id (device-local). Distinguishes Yellow vs Tape (same hue).
+  String accentId = 'lime';
 
   /// Chat message body text size in logical px (device-local, default 15).
   /// Message bubbles render body text at this size; Ctrl+scroll over the chat
@@ -2518,6 +2539,10 @@ class PrivetState extends ChangeNotifier {
   /// A [kMessageFonts] key picked in the "Aa" picker; every chat renders
   /// message text in it unless the message carries an explicit `[font=…]` run.
   String chatFontFamily = '';
+
+  /// Font family from before an accent forced Courier/Garamond (hacker/tape).
+  /// Restored when the user leaves that accent. '' means Default.
+  String? _chatFontBeforeAccent;
 
   /// Where # AI commands are allowed once enabled (legacy prefs; sharing is # vs #me).
   AiUsageScope aiScope = AiUsageScope.onlyMe;
@@ -2866,6 +2891,13 @@ class PrivetState extends ChangeNotifier {
         prefs.getBool('privet_notifications_enabled') ?? true;
     autocompleteEnabled =
         prefs.getBool('privet_autocomplete_enabled') ?? true;
+    greetingButtonEnabled =
+        prefs.getBool('privet_greeting_button_enabled') ?? true;
+    _loadGreetingConsumed(prefs);
+    _loadContactGreetingNames(prefs);
+    if (greetingButtonEnabled) {
+      unawaited(GreetingPools.load());
+    }
     autocorrectEnabled = prefs.getBool('privet_autocorrect_enabled') ?? true;
     terminalCursorEnabled =
         prefs.getBool('privet_terminal_cursor') ?? true;
@@ -2876,6 +2908,10 @@ class PrivetState extends ChangeNotifier {
     themeMode = _themeModeFromStorage(prefs.getString('privet_theme_mode'));
     final accentValue = prefs.getInt('privet_accent');
     if (accentValue != null) accent = Color(accentValue);
+    final storedAccentId = prefs.getString('privet_accent_id');
+    final matched = PrivetTheme.optionFor(id: storedAccentId, seed: accent);
+    accentId = matched.id;
+    accent = matched.seed;
     final storedFontSize = prefs.getDouble('privet_chat_font_size');
     if (storedFontSize != null) {
       chatFontSize = storedFontSize.clamp(11.0, 24.0).toDouble();
@@ -2885,6 +2921,7 @@ class PrivetState extends ChangeNotifier {
       taskFontSize = storedTaskFontSize.clamp(11.0, 24.0).toDouble();
     }
     chatFontFamily = prefs.getString('privet_chat_font_family') ?? '';
+    _chatFontBeforeAccent = prefs.getString('privet_chat_font_before_accent');
     final storedExpanded = prefs.getString('privet_task_expanded');
     if (storedExpanded != null && storedExpanded.isNotEmpty) {
       try {
@@ -2986,6 +3023,288 @@ class PrivetState extends ChangeNotifier {
     await prefs.setBool('privet_autocomplete_enabled', value);
   }
 
+  Future<void> setGreetingButtonEnabled(bool value) async {
+    if (greetingButtonEnabled == value) return;
+    greetingButtonEnabled = value;
+    notifySession();
+    _bump(chatTick);
+    final prefs = await _prefs();
+    await prefs.setBool('privet_greeting_button_enabled', value);
+  }
+
+  static String _calendarDayStamp([DateTime? at]) {
+    final d = at ?? DateTime.now();
+    final m = d.month.toString().padLeft(2, '0');
+    final day = d.day.toString().padLeft(2, '0');
+    return '${d.year}-$m-$day';
+  }
+
+  void _loadGreetingConsumed(SharedPreferences prefs) {
+    final today = _calendarDayStamp();
+    final storedDay = prefs.getString('privet_greeting_day') ?? '';
+    if (storedDay != today) {
+      _greetingConsumedDay = today;
+      _greetingConsumedChatIds.clear();
+      return;
+    }
+    _greetingConsumedDay = today;
+    _greetingConsumedChatIds
+      ..clear()
+      ..addAll(prefs.getStringList('privet_greeting_chats') ?? const []);
+  }
+
+  void _rollGreetingDayIfNeeded() {
+    final today = _calendarDayStamp();
+    if (_greetingConsumedDay == today) return;
+    _greetingConsumedDay = today;
+    _greetingConsumedChatIds.clear();
+  }
+
+  /// First token of a display name ("Alex Kim" → "Alex").
+  static String? greetingFirstName(String? displayName) {
+    final raw = displayName?.trim() ?? '';
+    if (raw.isEmpty) return null;
+    final first = raw.split(RegExp(r'\s+')).first.trim();
+    return first.isEmpty ? null : first;
+  }
+
+  void _loadContactGreetingNames(SharedPreferences prefs) {
+    _contactGreetingNames.clear();
+    final raw = prefs.getString('privet_contact_greeting_names');
+    if (raw == null || raw.isEmpty) return;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      for (final e in decoded.entries) {
+        final key = e.key.toString().trim();
+        final value = e.value?.toString().trim() ?? '';
+        if (key.isEmpty || value.isEmpty) continue;
+        _contactGreetingNames[key] = value;
+      }
+    } catch (_) {
+      // Corrupt prefs: start empty.
+    }
+  }
+
+  Future<void> _persistContactGreetingNames() async {
+    final prefs = await _prefs();
+    if (_contactGreetingNames.isEmpty) {
+      await prefs.remove('privet_contact_greeting_names');
+      return;
+    }
+    await prefs.setString(
+      'privet_contact_greeting_names',
+      jsonEncode(_contactGreetingNames),
+    );
+  }
+
+  /// Local greeting name for [userId], or null if unset.
+  String? contactGreetingName(String? userId) {
+    if (userId == null || userId.isEmpty) return null;
+    final name = _contactGreetingNames[userId]?.trim();
+    return (name == null || name.isEmpty) ? null : name;
+  }
+
+  /// Set or clear the local greeting name for [userId] (visible only to you).
+  Future<void> setContactGreetingName(String userId, String? name) async {
+    final id = userId.trim();
+    if (id.isEmpty) return;
+    final trimmed = name?.trim() ?? '';
+    if (trimmed.isEmpty) {
+      if (!_contactGreetingNames.containsKey(id)) return;
+      _contactGreetingNames.remove(id);
+    } else {
+      final next = trimmed.length > 48 ? trimmed.substring(0, 48) : trimmed;
+      if (_contactGreetingNames[id] == next) return;
+      _contactGreetingNames[id] = next;
+    }
+    _bump(chatTick);
+    super.notifyListeners();
+    await _persistContactGreetingNames();
+  }
+
+  /// Name the Hi button should address: local alias, else peer display name.
+  String? greetingNameForPeer({
+    String? userId,
+    String? displayName,
+  }) {
+    final alias = contactGreetingName(userId);
+    if (alias != null) return greetingFirstName(alias) ?? alias;
+    return greetingFirstName(displayName);
+  }
+
+  /// Whether the daily greeting chip should appear for [chatId].
+  /// Offline styles work without AI; the AI chip is optional.
+  bool shouldShowGreetingButton(String chatId) {
+    if (!greetingButtonEnabled) return false;
+    _rollGreetingDayIfNeeded();
+    if (_greetingConsumedChatIds.contains(chatId)) return false;
+    if (_hasOutgoingMessageToday(chatId)) return false;
+    return true;
+  }
+
+  bool _hasOutgoingMessageToday(String chatId) {
+    final me = user?.id;
+    if (me == null) return false;
+    final now = DateTime.now();
+    final start = DateTime(now.year, now.month, now.day);
+    final msgs = messagesByChat[chatId];
+    if (msgs != null) {
+      for (var i = msgs.length - 1; i >= 0; i--) {
+        final m = msgs[i];
+        if (m.createdAt.isBefore(start)) break;
+        if (m.sender.id == me && !m.isDeleted && !m.isCallHistory) {
+          return true;
+        }
+      }
+    }
+    for (final c in conversations) {
+      if (c.id != chatId) continue;
+      final last = c.lastMessage;
+      if (last == null) return false;
+      if (last.createdAt.isBefore(start)) return false;
+      return last.sender.id == me && !last.isDeleted && !last.isCallHistory;
+    }
+    return false;
+  }
+
+  /// Hide the greeting chip for this chat until tomorrow.
+  Future<void> consumeGreetingButton(String chatId) async {
+    _rollGreetingDayIfNeeded();
+    if (!_greetingConsumedChatIds.add(chatId)) return;
+    _bump(chatTick);
+    super.notifyListeners();
+    final prefs = await _prefs();
+    await prefs.setString('privet_greeting_day', _greetingConsumedDay);
+    await prefs.setStringList(
+      'privet_greeting_chats',
+      _greetingConsumedChatIds.toList()..sort(),
+    );
+  }
+
+  /// Generate a greeting draft. Offline styles use baked quote pools; [GreetingStyle.ai]
+  /// asks the model using recent chat context. Does not post a bubble.
+  Future<String?> generateGreetingDraft({
+    required bool isGroup,
+    String? peerDisplayName,
+    String? peerUserId,
+    GreetingStyle style = GreetingStyle.sayHi,
+    String? philosopher,
+    String? jokeCategory,
+    String? englishCategory,
+  }) async {
+    final chatId = activeConversationId;
+    if (chatId == null) return null;
+
+    final first = isGroup
+        ? null
+        : greetingNameForPeer(
+            userId: peerUserId,
+            displayName: peerDisplayName,
+          );
+    final resolved = style.resolve();
+    final recentKey = switch (resolved) {
+      GreetingStyle.philosophy =>
+        '${resolved.id}|${(philosopher ?? '').trim().toLowerCase()}',
+      GreetingStyle.joke =>
+        '${resolved.id}|${(jokeCategory ?? '').trim().toLowerCase()}',
+      GreetingStyle.english =>
+        '${resolved.id}|${(englishCategory ?? '').trim().toLowerCase()}',
+      _ => resolved.id,
+    };
+    final recent =
+        List<String>.from(_recentGreetingDrafts[recentKey] ?? const []);
+
+    if (resolved.isLocal) {
+      try {
+        final pools = await GreetingPools.load();
+        final pickedPhil = resolved == GreetingStyle.philosophy
+            ? (philosopher?.trim().isNotEmpty == true
+                ? philosopher!.trim()
+                : GreetingStyleX.pickPhilosopher())
+            : null;
+        final pickedJoke = resolved == GreetingStyle.joke
+            ? (jokeCategory?.trim().isNotEmpty == true
+                ? jokeCategory!.trim().toLowerCase()
+                : null) // null = any type
+            : null;
+        final pickedEnglish = resolved == GreetingStyle.english
+            ? (englishCategory?.trim().isNotEmpty == true
+                ? englishCategory!.trim().toLowerCase()
+                : null) // null = any mode
+            : null;
+        final text = pools
+            .compose(
+              style: resolved,
+              firstName: first,
+              philosopher: pickedPhil,
+              jokeCategory: pickedJoke,
+              englishCategory: pickedEnglish,
+              avoid: recent,
+            )
+            .trim();
+        if (text.isEmpty) {
+          setError('Greeting pool was empty — try another style.');
+          return null;
+        }
+        _rememberGreetingDraft(recentKey, text);
+        return text;
+      } catch (e) {
+        setError(e.toString());
+        return null;
+      }
+    }
+
+    // AI path — short encouraging draft from recent chat (server: # greet-draft).
+    if (!aiActive && !serverAiConfigured) {
+      setError(
+        'AI is not configured. Add a DeepSeek key in Profile & settings, '
+        'or ask an admin to enable server AI.',
+      );
+      return null;
+    }
+    final input = (first != null && first.isNotEmpty)
+        ? '# greet-draft $first'
+        : '# greet-draft';
+    try {
+      final res = await _api.aiChat(
+        chatId,
+        input: input,
+        apiKey: aiApiKey.isEmpty ? null : aiApiKey,
+        model: aiModel.trim().isEmpty ? null : aiModel.trim(),
+        baseUrl: aiBaseUrl.isEmpty ? null : aiBaseUrl,
+      );
+      var text = (res['text'] as String?)?.trim() ?? '';
+      if (text.isEmpty) {
+        setError('Greeting came back empty — try again.');
+        return null;
+      }
+      // Strip accidental wrapping quotes.
+      if (text.length >= 2) {
+        final a = text[0];
+        final b = text[text.length - 1];
+        if ((a == '"' && b == '"') || (a == "'" && b == "'")) {
+          text = text.substring(1, text.length - 1).trim();
+        }
+      }
+      _rememberGreetingDraft(recentKey, text);
+      return text;
+    } catch (e) {
+      final err = e is ApiException ? e.message : e.toString();
+      setError(err);
+      return null;
+    }
+  }
+
+  void _rememberGreetingDraft(String key, String text) {
+    final bucket = _recentGreetingDrafts.putIfAbsent(key, () => []);
+    bucket.remove(text);
+    bucket.add(text);
+    while (bucket.length > _maxRecentGreetingDrafts) {
+      bucket.removeAt(0);
+    }
+  }
+
   Future<void> setAutocorrectEnabled(bool value) async {
     autocorrectEnabled = value;
     notifySession();
@@ -3076,11 +3395,85 @@ class PrivetState extends ChangeNotifier {
   }
 
   Future<void> setAccent(Color value) async {
-    accent = value;
-    notifySession();
-    final prefs = await _prefs();
-    await prefs.setInt('privet_accent', value.toARGB32());
+    final matched = PrivetTheme.optionFor(seed: value);
+    await setAccentOption(matched);
   }
+
+  Brightness _brightnessForAccent() {
+    switch (themeMode) {
+      case ThemeMode.light:
+        return Brightness.light;
+      case ThemeMode.dark:
+        return Brightness.dark;
+      case ThemeMode.system:
+        return PlatformDispatcher.instance.platformBrightness;
+    }
+  }
+
+  Future<void> setAccentOption(AccentOption option) async {
+    final previous = PrivetTheme.optionFor(id: accentId, seed: accent);
+    final prevForced = _forcedFontForStyle(previous.style);
+
+    accent = option.seed;
+    accentId = option.id;
+
+    // Apply palette immediately (don't wait for MaterialApp rebuild) so chrome
+    // listening to PrivetTheme.revision repaints under the profile sheet.
+    PrivetTheme.apply(
+      brightness: _brightnessForAccent(),
+      accent: accent,
+      style: option.style,
+    );
+    PrivetTheme.bumpRevision();
+
+    // Hacker → Courier New; tape → Garamond. Remember the prior face and
+    // restore it when leaving a forced accent (ubuntu → hacker → yellow
+    // lands back on ubuntu).
+    final nextForced = _forcedFontForStyle(option.style);
+    if (nextForced != null) {
+      if (prevForced == null) {
+        _chatFontBeforeAccent = chatFontFamily;
+      }
+      chatFontFamily = nextForced;
+    } else if (prevForced != null) {
+      chatFontFamily = _chatFontBeforeAccent ?? '';
+      _chatFontBeforeAccent = null;
+    }
+
+    // Force every pane to rebuild even while UiOverlayPause holds notifyShell.
+    _pauseShell = false;
+    _pauseInbox = false;
+    _pauseChat = false;
+    _bump(sessionTick);
+    _bump(shellTick);
+    _bump(inboxTick);
+    _bump(chatTick);
+    super.notifyListeners();
+    _syncBrowserTabIndicator();
+
+    final prefs = await _prefs();
+    await prefs.setInt('privet_accent', option.seed.toARGB32());
+    await prefs.setString('privet_accent_id', option.id);
+    if (chatFontFamily.isEmpty) {
+      await prefs.remove('privet_chat_font_family');
+    } else {
+      await prefs.setString('privet_chat_font_family', chatFontFamily);
+    }
+    if (_chatFontBeforeAccent == null) {
+      await prefs.remove('privet_chat_font_before_accent');
+    } else {
+      await prefs.setString(
+        'privet_chat_font_before_accent',
+        _chatFontBeforeAccent!,
+      );
+    }
+  }
+
+  static String? _forcedFontForStyle(AccentStyle style) => switch (style) {
+        AccentStyle.hacker => 'courier',
+        AccentStyle.tape => 'garamond',
+        _ => null,
+      };
 
   /// Clamps [value] to the 11–24 px range and rebuilds the open chat.
   /// Ctrl+scroll and the Profile slider both call this; prefs persist it.
@@ -5215,6 +5608,7 @@ class PrivetState extends ChangeNotifier {
 # summarize — unread (shared with chat)
 # summarize 40 — last 40 messages (shared)
 # <question> — ask about this chat (shared)
+# greet [Name] — short English greeting draft
 
 #me summarize — same, but only you see Q+A
 #me <question> — private answer only for you
@@ -5223,7 +5617,8 @@ Enable AI in Profile & settings and add your API key.
 
 Examples:
 # what did we decide?
-#me draft a reply to Mira''';
+#me draft a reply to Mira
+# greet Alex''';
 
   /// `#me …` → private; plain `# …` → shared with the chat.
   static ({bool private, String apiInput, String displayQuestion})
@@ -6529,6 +6924,7 @@ Examples:
   }
 
   void _onTabVisible() {
+    if (documentHidden || !documentHasFocus) return;
     final id = activeConversationId;
     if (id == null || user == null || !chatSurfaceMounted) return;
     if (!_userRecentlyPresent) return;

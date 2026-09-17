@@ -6,6 +6,8 @@ const HELP_TEXT = `Privet AI
 # summarize — unread (shared with chat)
 # summarize 40 — last 40 messages (shared)
 # <question> — ask about this chat (shared)
+# greet [Name] — short English greeting draft (Name optional)
+# greet-draft [Name] — short encouraging greeting from recent chat
 
 #me summarize — private (only you)
 #me <question> — private answer only for you
@@ -14,7 +16,8 @@ Enable AI in Profile & settings and add your API key.
 
 Examples:
 # what did we decide about the meeting?
-#me draft a short reply`;
+#me draft a short reply
+# greet Alex`;
 
 /** @type {Map<string, number>} */
 const lastCallByUser = new Map();
@@ -47,6 +50,15 @@ export function parseAiInput(input) {
   if (recent) {
     const n = Math.min(Math.max(parseInt(recent[1], 10) || 40, 5), 120);
     return { type: 'summarize_recent', limit: n };
+  }
+  if (lower === 'greet' || lower.startsWith('greet ')) {
+    const name = rest.slice(5).trim(); // after "greet"
+    return { type: 'greet', name: name || null };
+  }
+  // Composer "AI" chip — short encouraging draft from recent chat.
+  if (lower === 'greet-draft' || lower.startsWith('greet-draft ')) {
+    const name = rest.slice('greet-draft'.length).trim();
+    return { type: 'greet_draft', name: name || null };
   }
   return { type: 'ask', question: rest };
 }
@@ -195,6 +207,94 @@ export async function runPrivetAi({
 
   let contextLines;
   let userTask;
+
+  if (parsed.type === 'greet') {
+    const name = String(parsed.name || '').trim();
+    const address = name
+      ? `Start with "Hi, ${name}," (use that exact first name).`
+      : `Start with "Hi there," — do not use a personal name.`;
+    const prompt = `You draft a short chat greeting the user will send themselves.
+
+${address}
+Then add one brief warm line: a light work nudge, a short wise quote, OR a gentle joke (pick one at random).
+
+Rules:
+- English only.
+- 1–2 sentences total.
+- Plain text only — no quotation marks around the whole message, no labels, no preamble like "Here is a greeting".
+- Sound natural, like a human typed it.
+- No "As an AI" disclaimers.`;
+
+    const { text, provider, model: usedModel } = await generateText(prompt, {
+      apiKey,
+      model,
+      baseUrl,
+      maxTokens: 80,
+      temperature: 0.7,
+    });
+    return {
+      text,
+      meta: {
+        kind: 'greet',
+        messageCount: 0,
+        provider,
+        model: usedModel,
+      },
+    };
+  }
+
+  if (parsed.type === 'greet_draft') {
+    const name = String(parsed.name || '').trim();
+    const address = name
+      ? `Start with "Hi, ${name}," (that exact first name).`
+      : `Start with "Hi there," — do not invent a personal name.`;
+    contextLines = messagesForAiContext(conversationId, userId, {
+      unreadOnly: false,
+      limit: 24,
+    });
+    const prompt = `You are drafting a short chat message the USER will send to someone else.
+The named person is the recipient — not the person being coached.
+
+${address}
+Optionally add one light, NEUTRAL line that nods at recent chat mood/topic (plans, jokes, stress, wins).
+
+POINT OF VIEW:
+- Write AS the user, TO the recipient.
+- Do NOT tell the recipient what they should do, keep doing, or work on ("keep the wins rolling", "you've got this on X", "don't forget to…").
+- Do NOT assign tasks or pep-talk the recipient about their progress.
+- Prefer a shared/neutral vibe ("nice to see the FAQs sorted") or a brief note about the sender's own situation if that fits — never a coach talking down to the addressee.
+
+HARD RULES:
+- English only.
+- At most 2 short sentences total (~25 words). One sentence after Hi is ideal.
+- Output ONLY the greeting text — no quotes around it, no preamble, no markdown, no bullets.
+- Do not volunteer product names for coding tools or assistants (Cursor, VS Code, ChatGPT, Claude, Copilot, etc.).
+- No poems, essays, speeches, or long pep talks.
+- Do not invent private facts that are not in the chat.
+
+Recent chat (${contextLines.length} lines):
+${contextLines.length ? contextLines.join('\n') : '(empty — keep a simple warm hi)'}`;
+
+    // Gemini 2.5 thinking can eat a tiny maxOutputTokens budget and return
+    // empty text — keep headroom and disable thinking for this short draft.
+    const { text, provider, model: usedModel } = await generateText(prompt, {
+      apiKey,
+      model,
+      baseUrl,
+      maxTokens: 512,
+      temperature: 0.75,
+      disableThinking: true,
+    });
+    return {
+      text,
+      meta: {
+        kind: 'greet_draft',
+        messageCount: contextLines.length,
+        provider,
+        model: usedModel,
+      },
+    };
+  }
 
   if (parsed.type === 'summarize_unread') {
     contextLines = messagesForAiContext(conversationId, userId, {

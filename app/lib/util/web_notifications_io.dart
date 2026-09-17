@@ -155,13 +155,14 @@ bool get notificationsGranted {
 bool get documentHidden {
   _ensureFocusHooks();
   if (!_isDesktop) return false;
-  return _windowHidden;
+  // Tray-hide latch wins over stale HWND focus/visibility on Windows.
+  return _forceHidden || _windowHidden;
 }
 
 bool get documentHasFocus {
   _ensureFocusHooks();
   if (!_isDesktop) return true;
-  if (_windowHidden) return false;
+  if (_forceHidden || _windowHidden) return false;
   return _windowFocused;
 }
 
@@ -463,7 +464,7 @@ void _ensureFocusHooks() {
 }
 
 void _fireVisible() {
-  if (!documentHasFocus) return;
+  if (_forceHidden || !documentHasFocus) return;
   for (final cb in List<void Function()>.from(_visibleCallbacks)) {
     try {
       cb();
@@ -476,6 +477,10 @@ class _DesktopFocusListener with WindowListener {
   static final instance = _DesktopFocusListener._();
 
   void _onWindowShown() {
+    // Hidden-to-tray windows can still get WM_SETFOCUS / "show" on Windows.
+    // Do not treat that as the user coming back — it would mark-read +
+    // skip the tray red-dot.
+    if (_forceHidden) return;
     unawaited(() async {
       await refreshDesktopFocusState();
       _fireVisible();
@@ -484,6 +489,7 @@ class _DesktopFocusListener with WindowListener {
 
   @override
   void onWindowFocus() {
+    if (_forceHidden) return;
     _windowHidden = false;
     _windowFocused = true;
     _fireVisible();
@@ -517,6 +523,7 @@ class _DesktopFocusListener with WindowListener {
       case 'blur':
         _windowFocused = false;
       case 'focus':
+        if (_forceHidden) return;
         _windowHidden = false;
         _windowFocused = true;
         _fireVisible();

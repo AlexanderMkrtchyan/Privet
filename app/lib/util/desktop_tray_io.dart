@@ -48,6 +48,9 @@ class _DesktopTrayHost with WindowListener, TrayListener {
   int _unreadCount = 0;
   bool _showingUnreadIcon = false;
   Menu? _trayMenu;
+  /// Serializes icon swaps — overlapping setIcon/destroy races leave the
+  /// Windows tray stuck on the default glyph.
+  Future<void> _chromeChain = Future.value();
 
   void attach() {
     if (_attached) return;
@@ -91,9 +94,8 @@ class _DesktopTrayHost with WindowListener, TrayListener {
     try {
       _iconPath = await _resolveIconPath(unread: false);
       _unreadIconPath = await _resolveIconPath(unread: true);
-      await trayManager.setIcon(_iconPath!);
+      await _replaceTrayIcon(_setIconArgument(unread: false));
       _showingUnreadIcon = false;
-      await _ensureContextMenu();
       await _applyUnreadChrome(force: true);
       _trayReady = true;
     } catch (e, st) {
@@ -106,25 +108,56 @@ class _DesktopTrayHost with WindowListener, TrayListener {
     final next = count < 0 ? 0 : count;
     if (_trayReady && next == _unreadCount) return;
     _unreadCount = next;
-    await ensureTray();
-    if (!_trayReady) return;
-    await _applyUnreadChrome();
+    final done = Completer<void>();
+    final prev = _chromeChain;
+    _chromeChain = done.future;
+    try {
+      await prev;
+      await ensureTray();
+      if (!_trayReady) return;
+      await _applyUnreadChrome();
+    } finally {
+      done.complete();
+    }
+  }
+
+  /// Windows [tray_manager] always prefixes `data/flutter_assets/`. Pass the
+  /// bundled relative asset so LoadImage hits the ICO next to the exe.
+  String _setIconArgument({required bool unread}) {
+    if (Platform.isWindows) {
+      return unread
+          ? 'assets/icons/tray-unread.ico'
+          : 'assets/icons/tray.ico';
+    }
+    if (unread) return _unreadIconPath ?? _iconPath!;
+    return _iconPath!;
+  }
+
+  Future<void> _replaceTrayIcon(String iconArg) async {
+    // NIM_MODIFY often leaves the previous glyph in the Windows tray.
+    // Delete + re-add is the reliable refresh. Skip destroy on first
+    // create — the native nid is still uninitialized.
+    if (Platform.isWindows && _trayReady) {
+      try {
+        await trayManager.destroy();
+      } catch (e, st) {
+        debugPrint('DesktopTray: destroy before setIcon failed: $e\n$st');
+      }
+      _menuReady = false;
+    }
+    await trayManager.setIcon(iconArg);
+    await _ensureContextMenu();
   }
 
   Future<void> _applyUnreadChrome({bool force = false}) async {
     final hasUnread = _unreadCount > 0;
 
     if (force || hasUnread != _showingUnreadIcon) {
-      final path = hasUnread
-          ? (_unreadIconPath ?? _iconPath)
-          : _iconPath;
-      if (path != null) {
-        try {
-          await trayManager.setIcon(path);
-          _showingUnreadIcon = hasUnread;
-        } catch (e, st) {
-          debugPrint('DesktopTray: setIcon failed: $e\n$st');
-        }
+      try {
+        await _replaceTrayIcon(_setIconArgument(unread: hasUnread));
+        _showingUnreadIcon = hasUnread;
+      } catch (e, st) {
+        debugPrint('DesktopTray: setIcon failed: $e\n$st');
       }
     }
 
@@ -217,6 +250,19 @@ class _DesktopTrayHost with WindowListener, TrayListener {
     }
     setDesktopWindowVisible(false);
     await windowManager.hide();
+    // Re-stamp the glyph after hide: Windows can drop a NIM_MODIFY that
+    // happened while the HWND was still in the taskbar.
+    if (Platform.isWindows) {
+      final done = Completer<void>();
+      final prev = _chromeChain;
+      _chromeChain = done.future;
+      try {
+        await prev;
+        await _applyUnreadChrome(force: true);
+      } finally {
+        done.complete();
+      }
+    }
   }
 
   Future<void> quit() async {

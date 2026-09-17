@@ -1,7 +1,7 @@
 name: privet
 description: Privet messenger — Android, Web, Windows, Linux
 publish_to: 'none'
-version: 0.1.27+11
+version: 0.1.28+12
 
 environment:
   sdk: ^3.12.2
@@ -59,6 +59,7 @@ flutter:
     - assets/sounds/incoming_call.wav
     - assets/sounds/outgoing/
     - assets/dictionaries/en_words.txt
+    - assets/greetings/greeting_pools.json
     - assets/icons/tray.png
     - assets/icons/tray.ico
     - assets/icons/tray-unread.png

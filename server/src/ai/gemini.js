@@ -15,7 +15,7 @@ export function loadGeminiApiKeys() {
 
 /**
  * @param {string} prompt
- * @param {{ apiKey?: string, model?: string }} [opts]
+ * @param {{ apiKey?: string, model?: string, maxTokens?: number, temperature?: number, disableThinking?: boolean }} [opts]
  * @returns {Promise<string>}
  */
 export async function generateGeminiText(prompt, opts = {}) {
@@ -29,12 +29,25 @@ export async function generateGeminiText(prompt, opts = {}) {
     opts.model?.trim() ||
     process.env.GEMINI_MODEL?.trim() ||
     'gemini-2.5-flash-lite';
+  const maxTokens = Number(opts.maxTokens) > 0 ? Number(opts.maxTokens) : 1024;
+  const temperature =
+    typeof opts.temperature === 'number' && Number.isFinite(opts.temperature)
+      ? opts.temperature
+      : 0.4;
+  const disableThinking = opts.disableThinking === true;
   let lastError;
 
   for (const [i, apiKey] of keys.entries()) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       try {
-        return await callGemini({ apiKey, model, prompt });
+        return await callGemini({
+          apiKey,
+          model,
+          prompt,
+          maxTokens,
+          temperature,
+          disableThinking,
+        });
       } catch (err) {
         lastError = err;
         const status = err.status ?? null;
@@ -51,17 +64,30 @@ export async function generateGeminiText(prompt, opts = {}) {
   throw lastError ?? new Error('Gemini request failed');
 }
 
-async function callGemini({ apiKey, model, prompt }) {
+async function callGemini({
+  apiKey,
+  model,
+  prompt,
+  maxTokens,
+  temperature,
+  disableThinking,
+}) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const generationConfig = {
+    temperature,
+    maxOutputTokens: maxTokens,
+  };
+  // Gemini 2.5* may spend the whole output budget on "thinking" and return
+  // empty visible text when maxOutputTokens is small.
+  if (disableThinking) {
+    generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  }
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.4,
-        maxOutputTokens: 1024,
-      },
+      generationConfig,
     }),
   });
 
@@ -81,11 +107,30 @@ async function callGemini({ apiKey, model, prompt }) {
     throw new Error('Gemini returned invalid JSON');
   }
 
-  const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text?.trim()) {
-    throw new Error('Gemini returned empty text');
+  const candidate = json?.candidates?.[0];
+  const parts = candidate?.content?.parts;
+  let text = '';
+  if (Array.isArray(parts)) {
+    text = parts
+      .filter((p) => p && !p.thought && typeof p.text === 'string')
+      .map((p) => p.text)
+      .join('')
+      .trim();
+    if (!text) {
+      text = parts
+        .filter((p) => p && typeof p.text === 'string')
+        .map((p) => p.text)
+        .join('')
+        .trim();
+    }
+  } else if (typeof parts?.[0]?.text === 'string') {
+    text = parts[0].text.trim();
   }
-  return text.trim();
+  if (!text) {
+    const reason = candidate?.finishReason || json?.promptFeedback?.blockReason || 'unknown';
+    throw new Error(`Gemini returned empty text (${reason})`);
+  }
+  return text;
 }
 
 function sleep(ms) {
