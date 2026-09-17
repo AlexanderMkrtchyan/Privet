@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
@@ -682,9 +684,13 @@ class ComposerAutocorrectController extends TextEditingController {
     return TextSpan(style: base, children: children);
   }
 
-  /// Extra letterSpacing so a [count]-space run is ~1.5em (matches chat).
+  /// Extra letterSpacing so a [count]-space run matches chat body advance.
   static double _kolobokLetterSpacing(int count, TextStyle style) {
-    const advanceEm = 1.5;
+    final advanceEm = (!kIsWeb &&
+            (defaultTargetPlatform == TargetPlatform.android ||
+                defaultTargetPlatform == TargetPlatform.linux))
+        ? 1.65
+        : 1.5;
     const spaceEm = 0.28;
     final em = style.fontSize ?? 16.0;
     final target = advanceEm * em;

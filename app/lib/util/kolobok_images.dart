@@ -63,6 +63,11 @@ class KolobokImageCache extends ChangeNotifier {
   int get generation => _generation;
   int _generation = 0;
 
+  /// Fires only when [generation] advances — not on every animation tick.
+  /// Use this for list previews that swap Unicode → art without needing
+  /// continuous GIF playback.
+  final ValueNotifier<int> generationListenable = ValueNotifier(0);
+
   int _listenerCount = 0;
   bool _ticking = false;
   Duration _lastTick = Duration.zero;
@@ -144,6 +149,7 @@ class KolobokImageCache extends ChangeNotifier {
       _anims[path]?.dispose();
       _anims[path] = _KolobokAnim(frames, delays);
       _generation++;
+      generationListenable.value = _generation;
       notifyListeners();
       _ensureTicking();
     } catch (_) {

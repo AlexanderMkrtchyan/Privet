@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -1463,7 +1465,13 @@ class _BigEmojiState extends State<_BigEmoji>
     final graphemes = widget.text.characters.toList();
     final base = graphemes.length == 1 ? 112.0 : 64.0;
     final size = base * widget.fontScale;
-    final animate = !privetLowResource && _scale != null;
+    final tightEmoji = !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.linux);
+    // Entrance bounce peaks at 1.18×; skip it on Android/Linux — scaled paint
+    // still collides with the timestamp and with neighbouring smileys.
+    final animate = !tightEmoji && !privetLowResource && _scale != null;
+    final gap = tightEmoji ? 12.0 : 4.0;
     final child = graphemes.length <= 1
         ? PrivetEmoji(
             widget.text,
@@ -1474,16 +1482,25 @@ class _BigEmojiState extends State<_BigEmoji>
             mainAxisSize: MainAxisSize.min,
             children: [
               for (var i = 0; i < graphemes.length; i++) ...[
-                if (i > 0) const SizedBox(width: 4),
-                PrivetEmoji(
-                  graphemes[i],
-                  size: size,
-                  animate: animate,
+                if (i > 0) SizedBox(width: gap),
+                SizedBox(
+                  width: size,
+                  height: size,
+                  child: PrivetEmoji(
+                    graphemes[i],
+                    size: size,
+                    animate: animate,
+                  ),
                 ),
               ],
             ],
           );
-    if (!animate) return child;
+    if (!animate) {
+      return SizedBox(
+        height: size,
+        child: child,
+      );
+    }
     return ScaleTransition(scale: _scale!, child: child);
   }
 }

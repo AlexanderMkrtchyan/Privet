@@ -8,6 +8,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   file_selector_linux
   flutter_webrtc
   fvp
+  local_notifier
   record_linux
   screen_retriever_linux
   tray_manager

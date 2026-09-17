@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:desktop_notifications/desktop_notifications.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:local_notifier/local_notifier.dart';
 import 'package:window_manager/window_manager.dart';
 
 /// Desktop focus / visibility for unread badges (Linux / Windows / macOS).
@@ -13,10 +14,15 @@ import 'package:window_manager/window_manager.dart';
 /// the window is in the background, so unread + tray never bump.
 ///
 /// Linux also uses FreeDesktop notifications (same top-bar toasts as browser /
-/// Teams). Android uses flutter_local_notifications for WS-driven toasts.
+/// Teams). Windows uses [local_notifier] WinToast toasts. Android uses
+/// flutter_local_notifications for WS-driven toasts.
 
 bool _windowFocused = true;
 bool _windowHidden = false;
+/// Latched when we hide to the tray. [refreshDesktopFocusState] must not clear
+/// this from a stale `isVisible()` read — on Windows the HWND can still report
+/// visible after [windowManager.hide], which would swallow unread + tray.
+bool _forceHidden = false;
 bool _hooksInstalled = false;
 final List<void Function()> _visibleCallbacks = [];
 
@@ -32,11 +38,18 @@ bool _androidPermissionGranted = false;
 final Map<String, void Function()> _androidClickByTag = {};
 int _androidNotificationId = 1;
 
+bool _windowsReady = false;
+bool _windowsFailed = false;
+final Map<String, LocalNotification> _windowsByTag = {};
+final Map<String, void Function()> _windowsClickByTag = {};
+
 bool get _isDesktop =>
     !kIsWeb &&
     (Platform.isLinux || Platform.isWindows || Platform.isMacOS);
 
 bool get _linuxNotifySupported => !kIsWeb && Platform.isLinux;
+
+bool get _windowsNotifySupported => !kIsWeb && Platform.isWindows;
 
 bool get _androidNotifySupported => !kIsWeb && Platform.isAndroid;
 
@@ -76,6 +89,26 @@ Future<bool> _initAndroidNotifications() async {
   return true;
 }
 
+Future<bool> _initWindowsNotifications() async {
+  if (!_windowsNotifySupported) return false;
+  if (_windowsReady) return true;
+  if (_windowsFailed) return false;
+  try {
+    // WinToast needs a Start Menu shortcut + AppUserModelID; requireCreate
+    // makes one when missing so toasts actually appear.
+    await localNotifier.setup(
+      appName: 'Privet',
+      shortcutPolicy: ShortcutPolicy.requireCreate,
+    );
+    _windowsReady = true;
+    return true;
+  } catch (e, st) {
+    _windowsFailed = true;
+    debugPrint('windows notifications unavailable: $e\n$st');
+    return false;
+  }
+}
+
 Future<bool> requestNotificationPermission() async {
   if (_linuxNotifySupported) {
     if (_notificationsReady) return true;
@@ -90,6 +123,9 @@ Future<bool> requestNotificationPermission() async {
       debugPrint('desktop notifications unavailable: $e\n$st');
       return false;
     }
+  }
+  if (_windowsNotifySupported) {
+    return _initWindowsNotifications();
   }
   if (_androidNotifySupported) {
     await _initAndroidNotifications();
@@ -106,6 +142,9 @@ Future<bool> requestNotificationPermission() async {
 bool get notificationsGranted {
   if (_linuxNotifySupported) {
     return _notificationsReady && !_notificationsFailed;
+  }
+  if (_windowsNotifySupported) {
+    return _windowsReady && !_windowsFailed;
   }
   if (_androidNotifySupported) {
     return _androidReady && _androidPermissionGranted;
@@ -142,6 +181,15 @@ void showWebNotification({
     ));
     return;
   }
+  if (_windowsNotifySupported) {
+    unawaited(_showWindowsNotification(
+      title: title,
+      body: body,
+      tag: tag,
+      onClick: onClick,
+    ));
+    return;
+  }
   if (_androidNotifySupported) {
     unawaited(_showAndroidNotification(
       title: title,
@@ -150,6 +198,47 @@ void showWebNotification({
       onClick: onClick,
       isCall: isCall,
     ));
+  }
+}
+
+Future<void> _showWindowsNotification({
+  required String title,
+  required String body,
+  String? tag,
+  void Function()? onClick,
+}) async {
+  if (!await _initWindowsNotifications()) return;
+  final id = (tag != null && tag.isNotEmpty) ? tag : 'privet';
+  // Replace prior toast for the same chat so the shade doesn't stack.
+  final previous = _windowsByTag.remove(id);
+  if (previous != null) {
+    try {
+      await previous.close();
+    } catch (_) {}
+  }
+  if (onClick != null) {
+    _windowsClickByTag[id] = onClick;
+  } else {
+    _windowsClickByTag.remove(id);
+  }
+  final notification = LocalNotification(
+    identifier: id,
+    title: title,
+    body: body.isEmpty ? ' ' : body,
+    // App plays its own message chime; OS beep would double up.
+    silent: true,
+  );
+  notification.onClick = () {
+    unawaited(() async {
+      await _raiseDesktopWindow();
+      _windowsClickByTag[id]?.call();
+    }());
+  };
+  _windowsByTag[id] = notification;
+  try {
+    await notification.show();
+  } catch (e, st) {
+    debugPrint('windows notification failed: $e\n$st');
   }
 }
 
@@ -291,11 +380,18 @@ void ensureDesktopFocusHooks() => _ensureFocusHooks();
 Future<void> refreshDesktopFocusState() async {
   if (!_isDesktop) return;
   _ensureFocusHooks();
+  // Tray-hide latch wins: do not trust a false-positive isVisible() after hide.
+  if (_forceHidden) {
+    _windowHidden = true;
+    _windowFocused = false;
+    return;
+  }
   try {
+    final minimized = await windowManager.isMinimized();
     final visible = await windowManager.isVisible();
     final focused = await windowManager.isFocused();
-    _windowHidden = !visible;
-    _windowFocused = focused && visible;
+    _windowHidden = minimized || !visible;
+    _windowFocused = focused && visible && !minimized;
   } catch (_) {}
 }
 
@@ -304,6 +400,13 @@ void dismissDesktopNotification(String tag) {
   if (_linuxNotifySupported && tag.isNotEmpty) {
     final notification = _activeNotificationsByTag.remove(tag);
     _replaceIdsByTag.remove(tag);
+    if (notification != null) {
+      unawaited(notification.close().catchError((_) {}));
+    }
+  }
+  if (_windowsNotifySupported && tag.isNotEmpty) {
+    _windowsClickByTag.remove(tag);
+    final notification = _windowsByTag.remove(tag);
     if (notification != null) {
       unawaited(notification.close().catchError((_) {}));
     }
@@ -320,12 +423,14 @@ void setDesktopWindowVisible(bool visible) {
   if (!_isDesktop) return;
   _ensureFocusHooks();
   if (visible) {
+    _forceHidden = false;
     _windowHidden = false;
     unawaited(() async {
       await refreshDesktopFocusState();
       _fireVisible();
     }());
   } else {
+    _forceHidden = true;
     _windowHidden = true;
     _windowFocused = false;
   }
@@ -340,10 +445,16 @@ void _ensureFocusHooks() {
     // the first blur if we attach after the user already switched away).
     () async {
       try {
+        if (_forceHidden) {
+          _windowFocused = false;
+          _windowHidden = true;
+          return;
+        }
+        final minimized = await windowManager.isMinimized();
         final focused = await windowManager.isFocused();
         final visible = await windowManager.isVisible();
-        _windowFocused = focused && visible;
-        _windowHidden = !visible;
+        _windowFocused = focused && visible && !minimized;
+        _windowHidden = minimized || !visible;
       } catch (_) {}
     }();
   } catch (e, st) {

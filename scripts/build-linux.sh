@@ -41,20 +41,39 @@ case "$PRIVET_API_DEFINE" in
 esac
 
 cd "$ROOT/app"
-# tray_manager needs ayatana-appindicator3 headers. Prefer system -dev;
-# otherwise use the repo-local extract under .local-build-deps (no sudo).
+# tray_manager needs ayatana-appindicator3 headers; local_notifier needs
+# libnotify headers. Prefer system -dev; otherwise use the repo-local extract
+# under .local-build-deps (no sudo).
+LOCAL_PC="$ROOT/.local-build-deps/pkgconfig"
+need_local_pc=0
 if ! pkg-config --exists ayatana-appindicator3-0.1 2>/dev/null && \
    ! pkg-config --exists appindicator3-0.1 2>/dev/null; then
-  LOCAL_PC="$ROOT/.local-build-deps/pkgconfig"
+  need_local_pc=1
+fi
+if ! pkg-config --exists libnotify 2>/dev/null; then
+  need_local_pc=1
+fi
+if [[ "$need_local_pc" -eq 1 ]]; then
   if [[ -d "$LOCAL_PC" ]]; then
     export PKG_CONFIG_PATH="$LOCAL_PC${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    echo "Using local ayatana-appindicator pkg-config at $LOCAL_PC"
+    echo "Using local ayatana-appindicator / libnotify pkg-config at $LOCAL_PC"
   else
-    echo "Missing ayatana-appindicator3 for tray_manager." >&2
-    echo "Install: sudo apt-get install -y libayatana-appindicator3-dev" >&2
+    echo "Missing desktop native -dev headers for tray_manager / local_notifier." >&2
+    echo "Install: sudo apt-get install -y libayatana-appindicator3-dev libnotify-dev" >&2
     echo "Or recreate .local-build-deps (see agent notes)." >&2
     exit 1
   fi
+fi
+if ! pkg-config --exists ayatana-appindicator3-0.1 2>/dev/null && \
+   ! pkg-config --exists appindicator3-0.1 2>/dev/null; then
+  echo "Missing ayatana-appindicator3 for tray_manager." >&2
+  echo "Install: sudo apt-get install -y libayatana-appindicator3-dev" >&2
+  exit 1
+fi
+if ! pkg-config --exists libnotify 2>/dev/null; then
+  echo "Missing libnotify for local_notifier." >&2
+  echo "Install: sudo apt-get install -y libnotify-dev" >&2
+  exit 1
 fi
 flutter pub get
 

@@ -1,4 +1,6 @@
 import 'package:animated_emoji/animated_emoji.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../util/kolobok_smileys.dart';
@@ -42,11 +44,36 @@ class PrivetEmoji extends StatelessWidget {
     final trimmed = emoji.trim();
     if (trimmed.isEmpty) return const SizedBox.shrink();
 
-    Widget glyphFallback() => Text(
-      trimmed,
-      style: TextStyle(fontSize: size, height: 1),
-      textAlign: TextAlign.center,
-    );
+    final constrainBig = !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.linux) &&
+        size >= 48;
+
+    Widget glyphFallback() {
+      final text = Text(
+        trimmed,
+        style: TextStyle(
+          fontSize: size,
+          height: 1,
+          leadingDistribution: TextLeadingDistribution.even,
+        ),
+        textAlign: TextAlign.center,
+        textHeightBehavior: const TextHeightBehavior(
+          applyHeightToFirstAscent: false,
+          applyHeightToLastDescent: false,
+        ),
+      );
+      // Android/Linux colour-emoji fonts report ascent/descent larger than
+      // [size], so unconstrained Text overflows and paints over the timestamp.
+      if (!constrainBig) return text;
+      return SizedBox(
+        width: size,
+        height: size,
+        child: Center(
+          child: FittedBox(fit: BoxFit.contain, child: text),
+        ),
+      );
+    }
 
     // Kolobok before the size threshold — small chips still need the pack art
     // (settings shortcode preview is ~26–32px). Skip Lottie below the threshold.
@@ -69,7 +96,7 @@ class PrivetEmoji extends StatelessWidget {
 
     if (data == null) return glyphFallback();
 
-    return AnimatedEmoji(
+    final animated = AnimatedEmoji(
       data,
       size: size,
       repeat: repeat,
@@ -77,6 +104,8 @@ class PrivetEmoji extends StatelessWidget {
       source: AnimatedEmojiSource.network,
       errorWidget: glyphFallback(),
     );
+    if (!constrainBig) return animated;
+    return SizedBox(width: size, height: size, child: animated);
   }
 
   /// Strip variation selectors / ZWJ noise that break id matching.

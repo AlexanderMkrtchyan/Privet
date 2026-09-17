@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -585,8 +587,16 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
 
   /// Space the art occupies per smiley, in em. Wider than the 1em an emoji
   /// glyph takes so inline smileys read a bit larger than surrounding text
-  /// (see [smileyOvershoot]).
-  static const double smileyAdvanceEm = 1.5;
+  /// (see [smileyOvershoot]). Android/Linux keep overshoot at 1.0, so reserve
+  /// a touch more width so consecutive smileys do not kiss.
+  static double get smileyAdvanceEm {
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.linux)) {
+      return 1.65;
+    }
+    return 1.5;
+  }
 
   /// Extra `letterSpacing` that widens a [count]-space run to
   /// [smileyAdvanceEm]. A space is about 0.28em in the fonts in use.
@@ -955,7 +965,18 @@ class _KolobokSpan {
 /// How far past the reserved box the art may reach. Inline smileys should read
 /// a little larger than surrounding text; the art is mostly transparent at the
 /// edges, so modest overflow does not collide with neighbouring glyphs.
-const double smileyOvershoot = 1.4;
+///
+/// On Android/Linux the colour-emoji / line metrics leave less slack —
+/// overshoot paints over neighbouring letters and stacked smileys, so stay
+/// at 1.0.
+double get smileyOvershoot {
+  if (!kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.linux)) {
+    return 1.0;
+  }
+  return 1.4;
+}
 
 class _WebMessageTextPainter extends CustomPainter {
   _WebMessageTextPainter({

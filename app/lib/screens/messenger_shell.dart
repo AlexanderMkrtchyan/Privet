@@ -58,12 +58,14 @@ import '../widgets/composer_autocorrect_controller.dart';
 import '../widgets/composer_kolobok_overlay.dart';
 import '../widgets/composer_voice_bar.dart';
 import '../widgets/custom_shortcodes_editor.dart';
-import '../widgets/idle_accent_caret.dart';
+import '../widgets/kolobok_plain_text.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/message_font_picker.dart';
 import '../widgets/screen_share_picker.dart';
+import '../widgets/terminal_block_caret.dart';
 import '../widgets/user_name.dart';
 import '../widgets/typing_indicator.dart';
+import '../widgets/update_available_banner.dart';
 import '../widgets/web_attach_button.dart';
 import 'call_screen.dart';
 
@@ -343,6 +345,15 @@ class _MessengerShellState extends State<MessengerShell> {
                 onPopInvokedWithResult: (didPop, result) {
                   if (didPop) return;
                   if (inCall) return; // never exit during a call
+                  // Android: emoji panel mirrors the soft keyboard — system back
+                  // dismisses it first. ConversationPane's PopScope closes the
+                  // panel; skipping here avoids jumping to contacts in the same
+                  // gesture (both nested PopScopes receive the callback).
+                  if (!kIsWeb &&
+                      defaultTargetPlatform == TargetPlatform.android &&
+                      state.emojiPanelOpen) {
+                    return;
+                  }
                   if (hasChat) {
                     state.clearActiveConversation();
                   }
@@ -374,6 +385,8 @@ class _MessengerShellState extends State<MessengerShell> {
               return Positioned.fill(child: CallOverlay(state: state));
             },
           ),
+          // Windows-only floating update card (no-op on Linux/web).
+          UpdateAvailableBanner.maybe(state: state),
         ],
       ),
     ),
@@ -971,7 +984,7 @@ class InboxPane extends StatelessWidget {
                                       ),
                                     )
                                   else
-                                    Text(
+                                    KolobokPlainText(
                                       lastPreview ?? 'No messages yet',
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
@@ -994,7 +1007,7 @@ class InboxPane extends StatelessWidget {
                                       maintainSize: true,
                                       maintainState: true,
                                       maintainAnimation: true,
-                                      child: Text(
+                                      child: KolobokPlainText(
                                         lastPreview ?? 'No messages yet — say hi',
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
@@ -2387,6 +2400,25 @@ class InboxPane extends StatelessWidget {
                             fontWeight: FontWeight.w700,
                           ),
                         ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('Terminal cursor'),
+                          subtitle: Text(
+                            'Block caret like Ubuntu terminal / vim. '
+                            'Off uses a thin beam — same blink and colors',
+                            style: TextStyle(
+                              color: PrivetTheme.mist,
+                              fontSize: 12,
+                            ),
+                          ),
+                          value: state.terminalCursorEnabled,
+                          activeThumbColor: PrivetTheme.onAccent,
+                          activeTrackColor: PrivetTheme.signal,
+                          onChanged: (v) {
+                            state.setTerminalCursorEnabled(v);
+                            setSheet(() {});
+                          },
+                        ),
                         const SizedBox(height: 12),
                         _ThemeModeSelector(
                           mode: state.themeMode,
@@ -3219,7 +3251,7 @@ class _ConversationPaneState extends State<ConversationPane>
       if (!mounted || widget.state.activeConversationId == null) return;
       setState(() {
         _draftMedia.add(file);
-        _showEmoji = false;
+        _syncEmojiPanel(false);
       });
       _syncComposerHasContent();
     });
@@ -3309,9 +3341,15 @@ class _ConversationPaneState extends State<ConversationPane>
     _composerFocus.unfocus();
   }
 
+  /// Keeps [_showEmoji] and [PrivetState.emojiPanelOpen] in sync for Android back.
+  void _syncEmojiPanel(bool open) {
+    _showEmoji = open;
+    widget.state.setEmojiPanelOpen(open);
+  }
+
   void _onComposerTap() {
     if (_showEmoji) {
-      setState(() => _showEmoji = false);
+      setState(() => _syncEmojiPanel(false));
     }
     if (!_composerFocus.hasFocus) {
       _composerFocus.requestFocus();
@@ -3467,7 +3505,7 @@ class _ConversationPaneState extends State<ConversationPane>
       if (!mounted) return;
       setState(() {
         _draftMedia.add(image);
-        _showEmoji = false;
+        _syncEmojiPanel(false);
       });
       _syncComposerHasContent();
       _composerFocus.requestFocus();
@@ -3514,7 +3552,7 @@ class _ConversationPaneState extends State<ConversationPane>
       if (!mounted) return;
       setState(() {
         _draftMedia.add(image);
-        _showEmoji = false;
+        _syncEmojiPanel(false);
       });
       _syncComposerHasContent();
       _composerFocus.requestFocus();
@@ -3540,7 +3578,7 @@ class _ConversationPaneState extends State<ConversationPane>
           filename: 'paste-png-${DateTime.now().millisecondsSinceEpoch}.png',
           mimeType: 'image/png',
         ));
-        _showEmoji = false;
+        _syncEmojiPanel(false);
       });
       _syncComposerHasContent();
       _composerFocus.requestFocus();
@@ -3927,7 +3965,7 @@ class _ConversationPaneState extends State<ConversationPane>
 
   void _toggleEmoji() {
     if (_showEmoji) {
-      setState(() => _showEmoji = false);
+      setState(() => _syncEmojiPanel(false));
       // Restore the soft keyboard so the composer stays editable.
       _composerFocus.requestFocus();
       return;
@@ -3935,7 +3973,7 @@ class _ConversationPaneState extends State<ConversationPane>
     // Keep the composer bar visible above the panel (WhatsApp-style). A modal
     // sheet used to cover the TextField so you couldn't see inserted emoji.
     _composerFocus.unfocus();
-    setState(() => _showEmoji = true);
+    setState(() => _syncEmojiPanel(true));
   }
 
   Widget _buildChatTitleColumn(PrivetState state, Conversation? chat) {
@@ -4773,6 +4811,7 @@ class _ConversationPaneState extends State<ConversationPane>
   @override
   void dispose() {
     cancelMediaDeviceChanges();
+    widget.state.setEmojiPanelOpen(false);
     widget.state.reopenChatTick.removeListener(_onReopenChat);
     final id = _draftConversationId;
     if (id != null) widget.state.detachChatSurface(id);
@@ -4816,7 +4855,7 @@ class _ConversationPaneState extends State<ConversationPane>
           (subject != null && subject.trim().isNotEmpty) ? '$subject\n' : '';
       _draftVoice = null;
       _controller.loadMarkup(subjectLine + text);
-      _showEmoji = false;
+      _syncEmojiPanel(false);
     });
     _syncComposerHasContent();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -5026,7 +5065,7 @@ class _ConversationPaneState extends State<ConversationPane>
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
         if (_showEmoji) {
-          setState(() => _showEmoji = false);
+          setState(() => _syncEmojiPanel(false));
         }
       },
       child: ColoredBox(
@@ -5422,7 +5461,7 @@ class _ConversationPaneState extends State<ConversationPane>
                                   setState(() {
                                     _replyingTo = msg;
                                     _replySnippet = snippet;
-                                    _showEmoji = false;
+                                    _syncEmojiPanel(false);
                                   });
                                   // Selection belongs only in the reply bar, not the draft.
                                   if (snippet != null) {
@@ -6129,44 +6168,53 @@ class _ConversationPaneState extends State<ConversationPane>
     // going back to the tall full line-box default.
     final fontSize = resolvedStyle.fontSize ?? 16;
     final caretHeight = fontSize + 2;
-    // Idle (>1s): caret cycles the 8 accent swatches. Typing: lock to signal.
+    // Ubuntu blink (600ms on/off); each lit flash advances accent swatches.
+    // Block (terminal/vim) vs thin beam — Profile → Appearance toggle.
+    final caretWidth =
+        state.terminalCursorEnabled ? fontSize * 0.55 : 2.0;
     // Kolobok overlay paints pack art over hidden Unicode glyphs in the field.
     return Stack(
       children: [
-        IdleAccentCaret(
-          focusNode: _composerFocus,
+        TextField(
+          key: _composerFieldKey,
           controller: _controller,
-          builder: (context, cursorColor) => TextField(
-            key: _composerFieldKey,
-            controller: _controller,
-            focusNode: _composerFocus,
-            cursorColor: cursorColor,
-            cursorHeight: caretHeight,
-            cursorWidth: 2.0,
-            // Soft fade blink (closer to browser/Google feel than hard on/off).
-            cursorOpacityAnimates: true,
-            minLines: 1,
-            maxLines: compact ? 5 : 6,
-            keyboardType: TextInputType.multiline,
-            style: composerStyle,
-            textInputAction: TextInputAction.newline,
-            // Mobile (Android/iOS) gets the native keyboard suggestion strip +
-            // autocorrect, like Teams. Desktop/web keep the in-app autocorrect and
-            // red-underline spelling overlay. Both honor the Settings toggles.
-            autocorrect: state.autocorrectEnabled && _nativeComposerSuggestions,
-            enableSuggestions:
-                state.autocompleteEnabled && _nativeComposerSuggestions,
-            contextMenuBuilder: kIsWeb
-                ? (context, editableTextState) =>
-                    const SizedBox.shrink()
-                : _composerContextMenu,
-            onTapOutside: _onComposerTapOutside,
-            onChanged: (value) {
-              if (_editingMessage != null) return;
-              state.notifyTypingIfComposing(value);
-            },
-            onTap: _onComposerTap,
-            decoration: decoration,
+          focusNode: _composerFocus,
+          showCursor: false,
+          cursorColor: PrivetTheme.signal,
+          cursorHeight: caretHeight,
+          cursorWidth: caretWidth,
+          minLines: 1,
+          maxLines: compact ? 5 : 6,
+          keyboardType: TextInputType.multiline,
+          style: composerStyle,
+          textInputAction: TextInputAction.newline,
+          // Mobile (Android/iOS) gets the native keyboard suggestion strip +
+          // autocorrect, like Teams. Desktop/web keep the in-app autocorrect and
+          // red-underline spelling overlay. Both honor the Settings toggles.
+          autocorrect: state.autocorrectEnabled && _nativeComposerSuggestions,
+          enableSuggestions:
+              state.autocompleteEnabled && _nativeComposerSuggestions,
+          contextMenuBuilder: kIsWeb
+              ? (context, editableTextState) =>
+                  const SizedBox.shrink()
+              : _composerContextMenu,
+          onTapOutside: _onComposerTapOutside,
+          onChanged: (value) {
+            if (_editingMessage != null) return;
+            state.notifyTypingIfComposing(value);
+          },
+          onTap: _onComposerTap,
+          decoration: decoration,
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: TerminalBlockCaret(
+              fieldKey: _composerFieldKey,
+              focusNode: _composerFocus,
+              controller: _controller,
+              height: caretHeight,
+              width: caretWidth,
+            ),
           ),
         ),
         Positioned.fill(
@@ -7163,7 +7211,7 @@ class _ConversationPaneState extends State<ConversationPane>
           mimeType: mime,
         ),
       );
-      _showEmoji = false;
+      _syncEmojiPanel(false);
     });
     _syncComposerHasContent();
   }
@@ -7545,7 +7593,7 @@ class _ConversationPaneState extends State<ConversationPane>
       _replySnippet = null;
       _draftMedia.clear();
       _draftVoice = null;
-      _showEmoji = false;
+      _syncEmojiPanel(false);
     });
     _syncComposerHasContent();
     _composerFocus.requestFocus();

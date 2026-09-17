@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
@@ -69,7 +71,15 @@ class _ComposerKolobokPainter extends CustomPainter {
   final int generation;
   final int clockMs;
 
-  static const double _overshoot = 1.4;
+  /// Match chat body: no overshoot on Android/Linux (avoids covering typed text).
+  static double get _overshoot {
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.linux)) {
+      return 1.0;
+    }
+    return 1.4;
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -84,6 +94,7 @@ class _ComposerKolobokPainter extends CustomPainter {
     final cache = KolobokImageCache.instance;
     final paint = Paint()..filterQuality = FilterQuality.high;
     final plainLen = editable.text?.toPlainText().length ?? 0;
+    final overshoot = _overshoot;
 
     for (final span in spans) {
       if (span.end > plainLen) continue;
@@ -104,7 +115,7 @@ class _ComposerKolobokPainter extends CustomPainter {
         final scale = (rect.width / image.width < rect.height / image.height
                 ? rect.width / image.width
                 : rect.height / image.height) *
-            _overshoot;
+            overshoot;
         final dest = Rect.fromCenter(
           center: rect.center,
           width: image.width * scale,

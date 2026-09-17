@@ -9,6 +9,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   firebase_core
   flutter_webrtc
   fvp
+  local_notifier
   record_windows
   screen_retriever_windows
   tray_manager

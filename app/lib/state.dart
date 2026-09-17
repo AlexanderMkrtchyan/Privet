@@ -2382,6 +2382,16 @@ class PrivetState extends ChangeNotifier {
   final Map<String, DateTime> lastSeen = {};
   List<PrivetUser> blocked = [];
   String? activeConversationId;
+
+  /// Composer emoji panel is open. Android back must close it (like the soft
+  /// keyboard) before [clearActiveConversation] — nested [PopScope]s both fire.
+  bool emojiPanelOpen = false;
+
+  void setEmojiPanelOpen(bool open) {
+    if (emojiPanelOpen == open) return;
+    emojiPanelOpen = open;
+  }
+
   /// Active-chat typer (convenience mirror of [typingByChat]).
   String? typingUserId;
   /// conversationId → userId currently typing (for inbox + chat chrome).
@@ -2439,6 +2449,10 @@ class PrivetState extends ChangeNotifier {
   /// Auto-fix common typos, red-underline misspelled words, and use the native
   /// keyboard autocorrect/suggestion strip on mobile (device-local).
   bool autocorrectEnabled = true;
+
+  /// Block (Ubuntu terminal / vim) composer caret. Off = thin beam. Same blink
+  /// speed and accent color cycle either way (device-local, default on).
+  bool terminalCursorEnabled = true;
 
   /// User-defined shortcode slots (`:)` → emoji). Overrides builtins.
   List<CustomShortcode> customShortcodes = defaultCustomShortcodes();
@@ -2853,6 +2867,8 @@ class PrivetState extends ChangeNotifier {
     autocompleteEnabled =
         prefs.getBool('privet_autocomplete_enabled') ?? true;
     autocorrectEnabled = prefs.getBool('privet_autocorrect_enabled') ?? true;
+    terminalCursorEnabled =
+        prefs.getBool('privet_terminal_cursor') ?? true;
     customShortcodes = decodeCustomShortcodes(
       prefs.getString('privet_custom_shortcodes'),
     );
@@ -2975,6 +2991,16 @@ class PrivetState extends ChangeNotifier {
     notifySession();
     final prefs = await _prefs();
     await prefs.setBool('privet_autocorrect_enabled', value);
+  }
+
+  Future<void> setTerminalCursorEnabled(bool value) async {
+    if (terminalCursorEnabled == value) return;
+    terminalCursorEnabled = value;
+    _bump(sessionTick);
+    _bump(chatTick);
+    super.notifyListeners();
+    final prefs = await _prefs();
+    await prefs.setBool('privet_terminal_cursor', value);
   }
 
   Future<void> setCustomShortcodesList(List<CustomShortcode> next) async {
@@ -6517,6 +6543,7 @@ Examples:
   void clearActiveConversation() {
     activeConversationId = null;
     typingUserId = null;
+    emojiPanelOpen = false;
     notifyShell();
     notifyChatAndInbox();
   }

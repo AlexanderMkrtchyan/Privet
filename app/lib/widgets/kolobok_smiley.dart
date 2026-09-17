@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
@@ -91,6 +93,13 @@ class _KolobokSmileyState extends State<KolobokSmiley> {
     final label = widget.semanticLabel ?? kolobokEmojiForFile(widget.file);
     final halo = widget.showHalo ?? !PrivetTheme.isLight;
     final box = widget.size;
+    // Large sticker-size smileys: keep the halo inside the layout box on
+    // Android/Linux so it cannot paint over the message timestamp / nearby text.
+    final constrainBig = !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.linux) &&
+        box >= 48;
+    final haloExtent = constrainBig ? box : box * 1.35;
 
     if (image == null) {
       return SizedBox(
@@ -109,13 +118,13 @@ class _KolobokSmileyState extends State<KolobokSmiley> {
         height: box,
         child: Stack(
           alignment: Alignment.center,
-          clipBehavior: Clip.none,
+          clipBehavior: constrainBig ? Clip.hardEdge : Clip.none,
           children: [
             if (halo)
               IgnorePointer(
                 child: Container(
-                  width: box * 1.35,
-                  height: box * 1.35,
+                  width: haloExtent,
+                  height: haloExtent,
                   decoration: const BoxDecoration(
                     shape: BoxShape.circle,
                     gradient: RadialGradient(
