@@ -1481,13 +1481,17 @@ class _BigEmojiState extends State<_BigEmoji>
             defaultTargetPlatform == TargetPlatform.linux);
     // Entrance bounce peaks at 1.18×; skip it on Android/Linux — scaled paint
     // still collides with the timestamp and with neighbouring smileys.
-    final animate = !tightEmoji && !privetLowResource && _scale != null;
+    final entrance = !tightEmoji && !privetLowResource && _scale != null;
+    // Kolobok playback is a separate concern from the entrance bounce. Tying
+    // them together silently froze every big smiley on Android/Linux to its
+    // first frame, which is exactly the "sticker looks broken" report.
+    const emojiAnimate = true;
     final gap = tightEmoji ? 12.0 : 4.0;
     final child = graphemes.length <= 1
         ? PrivetEmoji(
             widget.text,
             size: size,
-            animate: animate,
+            animate: emojiAnimate,
           )
         : Row(
             mainAxisSize: MainAxisSize.min,
@@ -1500,13 +1504,13 @@ class _BigEmojiState extends State<_BigEmoji>
                   child: PrivetEmoji(
                     graphemes[i],
                     size: size,
-                    animate: animate,
+                    animate: emojiAnimate,
                   ),
                 ),
               ],
             ],
           );
-    if (!animate) {
+    if (!entrance) {
       return SizedBox(
         height: size,
         child: child,

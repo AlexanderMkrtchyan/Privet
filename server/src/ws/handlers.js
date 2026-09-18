@@ -285,6 +285,15 @@ export function registerWebsocket(app) {
           return;
         }
 
+        // App-level heartbeat. Clients ping every ~20s so a half-open socket
+        // (idle NAT/proxy drop with no FIN) is detected instead of going dark.
+        // Handled before touchSocket so a keepalive never steals the sound
+        // primary from the device the user is actually looking at.
+        if (msg.type === 'ping') {
+          socket.send(JSON.stringify({ type: 'pong', t: Date.now() }));
+          return;
+        }
+
         // Any inbound traffic from this tab makes it the sound primary.
         touchSocket(userId, socket);
 

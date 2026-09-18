@@ -12,7 +12,6 @@ import '../theme.dart';
 import '../util/app_clipboard.dart';
 import '../util/kolobok_images.dart';
 import '../util/kolobok_smileys.dart';
-import '../util/low_resource.dart';
 import '../util/rich_text_markup.dart';
 import '../util/web_select_cursor.dart';
 import 'message_font_picker.dart';
@@ -444,8 +443,10 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     final parsed = parseMarkup(text);
     _plainText = parsed.plainText;
     _kolobokSpans = [];
-    // Low-resource mode asks for no per-frame work at all, so it keeps glyphs.
-    final kolobokEnabled = !privetLowResource;
+    // The bundled Kolobok pack is the app's own smiley set, so it always renders
+    // as art even in "Low RAM & CPU" mode — otherwise a chat looks half pack /
+    // half system glyph depending on which surfaces were gated.
+    const kolobokEnabled = true;
     final spans = <InlineSpan>[];
     var segStart = 0;
 
@@ -1124,9 +1125,11 @@ class _WebMessageTextPainter extends CustomPainter {
 
   /// Draws each bundled smiley over the space its glyph would have occupied.
   ///
-  /// Only frame 0 is used: a chat can hold dozens of these and a looping GIF is
-  /// the continuous per-frame redraw this app avoids elsewhere too. Animated
-  /// playback lives where instances are few — big-emoji bodies and reactions.
+  /// Playback shares [KolobokImageCache]'s clock: the painter is registered on
+  /// the cache as its `repaint` listenable (see the `CustomPaint` in
+  /// `_buildWebBody`), so frames advance with the same ticker as the composer
+  /// overlay and standalone [KolobokSmiley] instances. Never freeze to frame 0
+  /// here — that reads as a broken image next to an animated composer.
   void _paintSmileys(Canvas canvas) {
     if (kolobokSpans.isEmpty) return;
     final cache = KolobokImageCache.instance;
@@ -1137,7 +1140,7 @@ class _WebMessageTextPainter extends CustomPainter {
     final lines = textPainter.computeLineMetrics();
     for (final span in kolobokSpans) {
       if (span.end > textPainter.plainText.length) continue;
-      final image = cache.frameFor(span.file, light: light);
+      final image = cache.frameFor(span.file, light: light, animate: true);
       if (image == null) continue;
       final boxes = textPainter.getBoxesForSelection(
         TextSelection(baseOffset: span.start, extentOffset: span.end),

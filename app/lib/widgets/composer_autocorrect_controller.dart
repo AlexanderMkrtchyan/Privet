@@ -211,7 +211,7 @@ class ComposerAutocorrectController extends TextEditingController {
   }
 
   void _ensureKolobokCacheListener() {
-    if (_listeningKolobokCache || privetLowResource) return;
+    if (_listeningKolobokCache) return;
     _listeningKolobokCache = true;
     KolobokImageCache.instance.addListener(_onKolobokCache);
   }
@@ -564,11 +564,13 @@ class ComposerAutocorrectController extends TextEditingController {
     final runs = _formatRuns;
     final light = PrivetTheme.isLight;
     final cache = KolobokImageCache.instance;
-    final kolobokOn = !privetLowResource;
-    if (kolobokOn) _ensureKolobokCacheListener();
+    // Always render the bundled Kolobok pack in the composer — the "Low RAM &
+    // CPU" switch must not leave typed smileys as system glyphs while the sent
+    // message shows pack art.
+    _ensureKolobokCacheListener();
 
     final readyKolobok = <ComposerKolobokSpan>[];
-    if (kolobokOn && t.isNotEmpty) {
+    if (t.isNotEmpty) {
       var offset = 0;
       for (final grapheme in t.characters) {
         final file = kolobokFileForEmoji(grapheme);

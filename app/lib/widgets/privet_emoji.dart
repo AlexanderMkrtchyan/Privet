@@ -77,12 +77,16 @@ class PrivetEmoji extends StatelessWidget {
 
     // Kolobok before the size threshold — small chips still need the pack art
     // (settings shortcode preview is ~26–32px). Skip Lottie below the threshold.
+    //
+    // The bundled pack is the app's own smiley set, so it is intentionally NOT
+    // tied to the "Low RAM & CPU" switch: that switch must never leave a chat
+    // half Kolobok / half system glyph (which read as "frozen first frame").
     final kolobok = kolobokFileForEmoji(trimmed);
     if (kolobok != null) {
       return KolobokSmiley(
         kolobok,
         size: size,
-        animate: animate && !privetLowResource && size >= staticGlyphThreshold,
+        animate: animate && size >= staticGlyphThreshold,
       );
     }
 

@@ -70,7 +70,10 @@ echo "==> [3/4] Deploying web + downloads to production"
 echo ""
 
 echo "==> [4/4] Committing, tagging and pushing to GitHub"
-git add -u app/pubspec.yaml server/public/
+# Stage the source tree as well as the release metadata. Historically only
+# pubspec.yaml + server/public/ were committed, so a local Linux fix could ship
+# in the local build yet never reach GitHub/CI and vanish on the next update.
+git add app/lib app/pubspec.yaml server scripts .github
 if git diff --cached --quiet; then
   echo "Nothing staged to commit."
 else
@@ -93,4 +96,4 @@ echo "Tag pushed:            ${TAG}"
 echo "Production web:        https://messenger.banderdog.com/app/?v=${STAMP}"
 echo "Production Android:    https://messenger.banderdog.com/downloads/privet-android-${NEW_VERSION}.apk"
 echo "GitHub Release (Windows .exe) will be published by CI automatically."
-echo "Note: uncommitted changes outside app/pubspec.yaml and server/public/ were left untouched."
+echo "Note: app/lib, app/pubspec.yaml, server/, scripts/ and .github/ changes are committed with the release so Linux fixes always reach GitHub."

@@ -2311,7 +2311,7 @@ class PrivetState extends ChangeNotifier {
     _rt = RealtimeClient(url: _api.wsUrl);
     _rt.addHandler(_onEvent);
     _rt.onReconnected = () {
-      unawaited(refreshInbox());
+      unawaited(_resyncAfterReconnect());
     };
     _disposeVisibility = onDocumentVisible(_onTabVisible);
     // Install focus hooks early (web document focus / desktop window focus).
@@ -2327,6 +2327,9 @@ class PrivetState extends ChangeNotifier {
   void Function()? _disposeVisibility;
   Timer? _focusedReadTimer;
   Timer? _inboxReconcileTimer;
+  /// Last time the window regained focus and we re-checked the socket / inbox.
+  DateTime? _lastVisibleResyncAt;
+  bool _resyncingAfterReconnect = false;
   SharedPreferences? _prefsCache;
   /// Keep under the peer clear window and above the server rate limit so
   /// refreshes are not dropped (matched 2s/2s used to lag ~3–4s).
@@ -4908,7 +4911,7 @@ class PrivetState extends ChangeNotifier {
     final token = _api.token;
     if (user == null || token == null) return;
     await _rt.ensureConnected(token);
-    unawaited(refreshInbox());
+    unawaited(_resyncAfterReconnect());
     // A share from another app brought us to the front — pick up the payload.
     unawaited(_pollSharedIntents());
   }
@@ -6849,6 +6852,20 @@ Examples:
 
   void _onTabVisible() {
     if (documentHidden || !documentHasFocus) return;
+    // Desktop window regained focus / shown from the tray. A socket that idled
+    // in the background may be half-open, so re-verify it and pull the inbox —
+    // unread count, tray red dot and toasts must not wait for the user to poke
+    // the app. Throttled so rapid focus toggles do not hammer HTTP.
+    final token = _api.token;
+    if (user != null && token != null) {
+      final now = DateTime.now();
+      final last = _lastVisibleResyncAt;
+      if (last == null || now.difference(last) > const Duration(seconds: 5)) {
+        _lastVisibleResyncAt = now;
+        unawaited(_rt.ensureConnected(token));
+        unawaited(_resyncAfterReconnect());
+      }
+    }
     final id = activeConversationId;
     if (id == null || user == null || !chatSurfaceMounted) return;
     if (!_userRecentlyPresent) return;
@@ -6858,6 +6875,74 @@ Examples:
       notifyListeners();
     }
     _markRead(id, reason: 'tabVisible');
+  }
+
+  /// Pull the inbox after the socket (re)connects and raise the OS toast/chime
+  /// for anything that landed during the dead window — WS events from the gap
+  /// are gone, so the unread delta is the only signal we get.
+  Future<void> _resyncAfterReconnect() async {
+    if (_resyncingAfterReconnect) return;
+    _resyncingAfterReconnect = true;
+    try {
+      final before = <String, int>{
+        for (final c in conversations) c.id: c.unreadCount,
+      };
+      try {
+        await refreshInbox();
+      } catch (_) {
+        return;
+      }
+      final backgrounded = documentHidden || !documentHasFocus;
+      for (final c in conversations) {
+        final last = c.lastMessage;
+        if (last == null || c.muted) continue;
+        if (last.sender.id == user?.id) continue;
+        final had = before[c.id];
+        final gained = had == null ? c.unreadCount > 0 : c.unreadCount > had;
+        if (!gained) continue;
+        // Already looking at that chat in a focused window — no need to shout.
+        if (activeConversationId == c.id && !backgrounded) continue;
+        if (soundEnabled) playMessageSound(messageId: last.id);
+        if (!notificationsEnabled) continue;
+        // Phones backgrounded: FCM owns the OS toast.
+        if (_isMobilePlatform && !mobileAppInForeground) continue;
+        final senderName = last.sender.displayName.isNotEmpty
+            ? last.sender.displayName
+            : (last.sender.handle.isNotEmpty
+                ? '@${last.sender.handle}'
+                : 'Privet');
+        showWebNotification(
+          title: c.isGroup ? c.title : senderName,
+          body: _notificationPreview(last),
+          tag: c.id,
+          onClick: () => openConversation(c.id),
+        );
+      }
+    } finally {
+      _resyncingAfterReconnect = false;
+    }
+  }
+
+  static String _notificationPreview(ChatMessage message) {
+    switch (message.kind) {
+      case 'text':
+      case 'ai':
+        return message.body.length > 140
+            ? message.body.substring(0, 140)
+            : message.body;
+      case 'image':
+        return '📷 Photo';
+      case 'video':
+        return '🎬 Video';
+      case 'voice':
+        return '🎤 Voice message';
+      case 'audio':
+        return '🎵 Audio';
+      case 'album':
+        return '📎 Album';
+      default:
+        return message.fileName ?? '📎 File';
+    }
   }
 
   void clearActiveConversation() {

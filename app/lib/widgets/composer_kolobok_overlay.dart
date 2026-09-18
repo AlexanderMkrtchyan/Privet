@@ -3,7 +3,6 @@ import 'package:flutter/rendering.dart';
 
 import '../theme.dart';
 import '../util/kolobok_images.dart';
-import '../util/low_resource.dart';
 import 'composer_autocorrect_controller.dart';
 import 'selectable_markup_text.dart'
     show kolobokArtSlot, kolobokDestRect, kolobokPaintCenter, kolobokPaintScale;
@@ -31,7 +30,6 @@ class _ComposerKolobokOverlayState extends State<ComposerKolobokOverlay> {
 
   @override
   Widget build(BuildContext context) {
-    if (privetLowResource) return const SizedBox.shrink();
     return ListenableBuilder(
       listenable: Listenable.merge([
         widget.controller,

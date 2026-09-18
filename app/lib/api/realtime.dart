@@ -19,6 +19,17 @@ class RealtimeClient {
   int _reconnectAttempt = 0;
   bool _manualDisconnect = false;
 
+  /// App-level heartbeat. Idle NAT/proxy paths drop a WebSocket without a FIN,
+  /// so neither [onDone] nor [onError] fires and the client keeps thinking it is
+  /// connected while the server's sends vanish into a half-open socket. Pinging
+  /// on a timer and treating silence as death makes the client reconnect (and
+  /// pull the inbox) instead of going dark until the user opens a window.
+  Timer? _heartbeatTimer;
+  DateTime? _lastInboundAt;
+  bool _forceReconnecting = false;
+  static const Duration _heartbeatInterval = Duration(seconds: 20);
+  static const Duration _staleAfter = Duration(seconds: 65);
+
   /// Fired after an automatic reconnect succeeds (e.g. app resume / network flap).
   void Function()? onReconnected;
 
@@ -41,6 +52,8 @@ class RealtimeClient {
     _authSent = false;
     _sub = _channel!.stream.listen(
       (raw) {
+        // Any inbound byte proves the socket is still alive end to end.
+        _lastInboundAt = DateTime.now();
         final data = jsonDecode(raw as String) as Map<String, dynamic>;
         for (final h in List<WsHandler>.from(_handlers)) {
           h(data);
@@ -52,6 +65,45 @@ class RealtimeClient {
     send({'type': 'auth', 'token': token});
     _authSent = true;
     _reconnectAttempt = 0;
+    _startHeartbeat();
+  }
+
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _lastInboundAt = DateTime.now();
+    _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
+      if (_manualDisconnect || _authToken == null || !_authSent) return;
+      final last = _lastInboundAt;
+      if (last != null && DateTime.now().difference(last) > _staleAfter) {
+        _forceReconnect();
+        return;
+      }
+      send({'type': 'ping'});
+    });
+  }
+
+  /// Close a socket that stopped answering, then reopen + resync immediately.
+  void _forceReconnect() {
+    if (_manualDisconnect || _authToken == null || _forceReconnecting) return;
+    _forceReconnecting = true;
+    final token = _authToken!;
+    unawaited(() async {
+      try {
+        await _sub?.cancel();
+        _sub = null;
+        try {
+          await _channel?.sink.close();
+        } catch (_) {}
+        _channel = null;
+        _authSent = false;
+        await _openConnection(token);
+        onReconnected?.call();
+      } catch (_) {
+        _scheduleReconnect();
+      } finally {
+        _forceReconnecting = false;
+      }
+    }());
   }
 
   void _onConnectionLost() {
@@ -297,6 +349,8 @@ class RealtimeClient {
   Future<void> disconnect() async {
     _manualDisconnect = true;
     _authToken = null;
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _reconnectAttempt = 0;

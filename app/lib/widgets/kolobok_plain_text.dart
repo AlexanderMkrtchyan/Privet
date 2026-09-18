@@ -64,7 +64,6 @@ class KolobokPlainText extends StatelessWidget {
 
   List<InlineSpan> _spans(bool light) {
     if (text.isEmpty) return const [];
-    if (privetLowResource) return [TextSpan(text: text)];
 
     final cache = KolobokImageCache.instance;
     final em = style?.fontSize ?? 13.0;
