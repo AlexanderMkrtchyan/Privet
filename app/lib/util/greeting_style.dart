@@ -1,6 +1,6 @@
 import 'dart:math';
 
-/// Manner for the daily greeting draft above the composer.
+/// Manner for the greeting draft above the composer.
 enum GreetingStyle {
   /// Plain "Hi, Name." — no quote, no AI.
   sayHi,

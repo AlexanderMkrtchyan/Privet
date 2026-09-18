@@ -177,6 +177,13 @@ final Map<String, String> _emojiByFile = {
 String stripEmojiVariation(String raw) =>
     raw.replaceAll(RegExp(r'[\uFE0E\uFE0F]'), '');
 
+/// Invisible stand-in for one UTF-16 unit of a hidden Kolobok glyph.
+///
+/// Regular U+0020 in a long run does not wrap in Flutter (the line is treated
+/// as trailing spaces and overflows). U+200B is a wrap opportunity of the
+/// same UTF-16 length, so offsets stay aligned with the original emoji.
+const String kKolobokPlaceholderUnit = '\u200B';
+
 /// Asset path for [file] in the pack matching the current brightness.
 ///
 /// The two packs are separate artwork with identical filenames.

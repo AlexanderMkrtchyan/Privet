@@ -5,6 +5,7 @@ import '../util/kolobok_images.dart';
 import '../util/kolobok_smileys.dart';
 import '../util/low_resource.dart';
 import 'kolobok_smiley.dart';
+import 'selectable_markup_text.dart' show linuxKolobokInlineEm;
 
 /// Single-line (or clipped) plain text with Kolobok art for mapped smileys.
 ///
@@ -67,8 +68,9 @@ class KolobokPlainText extends StatelessWidget {
 
     final cache = KolobokImageCache.instance;
     final em = style?.fontSize ?? 13.0;
-    // Slightly larger than the text so smileys read like chat-body art.
-    final emojiSize = em * 1.15;
+    // A little larger than a capital letter (~0.7em) so list previews match
+    // chat-body Kolobok size.
+    final emojiSize = em * linuxKolobokInlineEm;
     final spans = <InlineSpan>[];
     final buffer = StringBuffer();
 

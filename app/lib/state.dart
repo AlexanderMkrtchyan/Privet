@@ -2449,12 +2449,9 @@ class PrivetState extends ChangeNotifier {
   /// Suggest emoticon shortcodes and AI commands while typing (device-local).
   bool autocompleteEnabled = true;
 
-  /// Show the once-a-day AI greeting chip above the composer (device-local).
+  /// Show the greeting bar above the composer (device-local). Off stays off
+  /// until the user turns it back on — no day-roll or idle auto-show.
   bool greetingButtonEnabled = true;
-
-  /// Chat ids where the greeting chip was used or dismissed today (device-local).
-  final Set<String> _greetingConsumedChatIds = {};
-  String _greetingConsumedDay = '';
 
   /// Recent greeting drafts by style(+philosopher) so regenerate stays fresh.
   final Map<String, List<String>> _recentGreetingDrafts = {};
@@ -2893,7 +2890,6 @@ class PrivetState extends ChangeNotifier {
         prefs.getBool('privet_autocomplete_enabled') ?? true;
     greetingButtonEnabled =
         prefs.getBool('privet_greeting_button_enabled') ?? true;
-    _loadGreetingConsumed(prefs);
     _loadContactGreetingNames(prefs);
     if (greetingButtonEnabled) {
       unawaited(GreetingPools.load());
@@ -3028,36 +3024,9 @@ class PrivetState extends ChangeNotifier {
     greetingButtonEnabled = value;
     notifySession();
     _bump(chatTick);
+    if (value) unawaited(GreetingPools.load());
     final prefs = await _prefs();
     await prefs.setBool('privet_greeting_button_enabled', value);
-  }
-
-  static String _calendarDayStamp([DateTime? at]) {
-    final d = at ?? DateTime.now();
-    final m = d.month.toString().padLeft(2, '0');
-    final day = d.day.toString().padLeft(2, '0');
-    return '${d.year}-$m-$day';
-  }
-
-  void _loadGreetingConsumed(SharedPreferences prefs) {
-    final today = _calendarDayStamp();
-    final storedDay = prefs.getString('privet_greeting_day') ?? '';
-    if (storedDay != today) {
-      _greetingConsumedDay = today;
-      _greetingConsumedChatIds.clear();
-      return;
-    }
-    _greetingConsumedDay = today;
-    _greetingConsumedChatIds
-      ..clear()
-      ..addAll(prefs.getStringList('privet_greeting_chats') ?? const []);
-  }
-
-  void _rollGreetingDayIfNeeded() {
-    final today = _calendarDayStamp();
-    if (_greetingConsumedDay == today) return;
-    _greetingConsumedDay = today;
-    _greetingConsumedChatIds.clear();
   }
 
   /// First token of a display name ("Alex Kim" → "Alex").
@@ -3133,54 +3102,9 @@ class PrivetState extends ChangeNotifier {
     return greetingFirstName(displayName);
   }
 
-  /// Whether the daily greeting chip should appear for [chatId].
-  /// Offline styles work without AI; the AI chip is optional.
-  bool shouldShowGreetingButton(String chatId) {
-    if (!greetingButtonEnabled) return false;
-    _rollGreetingDayIfNeeded();
-    if (_greetingConsumedChatIds.contains(chatId)) return false;
-    if (_hasOutgoingMessageToday(chatId)) return false;
-    return true;
-  }
-
-  bool _hasOutgoingMessageToday(String chatId) {
-    final me = user?.id;
-    if (me == null) return false;
-    final now = DateTime.now();
-    final start = DateTime(now.year, now.month, now.day);
-    final msgs = messagesByChat[chatId];
-    if (msgs != null) {
-      for (var i = msgs.length - 1; i >= 0; i--) {
-        final m = msgs[i];
-        if (m.createdAt.isBefore(start)) break;
-        if (m.sender.id == me && !m.isDeleted && !m.isCallHistory) {
-          return true;
-        }
-      }
-    }
-    for (final c in conversations) {
-      if (c.id != chatId) continue;
-      final last = c.lastMessage;
-      if (last == null) return false;
-      if (last.createdAt.isBefore(start)) return false;
-      return last.sender.id == me && !last.isDeleted && !last.isCallHistory;
-    }
-    return false;
-  }
-
-  /// Hide the greeting chip for this chat until tomorrow.
-  Future<void> consumeGreetingButton(String chatId) async {
-    _rollGreetingDayIfNeeded();
-    if (!_greetingConsumedChatIds.add(chatId)) return;
-    _bump(chatTick);
-    super.notifyListeners();
-    final prefs = await _prefs();
-    await prefs.setString('privet_greeting_day', _greetingConsumedDay);
-    await prefs.setStringList(
-      'privet_greeting_chats',
-      _greetingConsumedChatIds.toList()..sort(),
-    );
-  }
+  /// Whether the greeting bar should appear. Only the settings toggle; skip
+  /// (✕) turns it off until the user enables it again.
+  bool shouldShowGreetingButton() => greetingButtonEnabled;
 
   /// Generate a greeting draft. Offline styles use baked quote pools; [GreetingStyle.ai]
   /// asks the model using recent chat context. Does not post a bubble.

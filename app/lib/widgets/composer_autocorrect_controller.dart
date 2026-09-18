@@ -10,6 +10,8 @@ import '../util/kolobok_images.dart';
 import '../util/kolobok_smileys.dart';
 import '../util/low_resource.dart';
 import '../util/rich_text_markup.dart';
+import 'selectable_markup_text.dart'
+    show linuxKolobokPairExtraEm, smileyAdvanceEm;
 
 /// Byte-offset range in composer plain text covered by a Kolobok smiley.
 class ComposerKolobokSpan {
@@ -669,11 +671,19 @@ class ComposerAutocorrectController extends TextEditingController {
         }
       }
       if (kolobok != null) {
+        var extraEm = 0.0;
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+          extraEm = linuxKolobokPairExtraEm;
+        }
         children.add(
           TextSpan(
-            text: ' ' * (b - a),
+            text: kKolobokPlaceholderUnit * (b - a),
             style: sliceStyle.copyWith(
-              letterSpacing: _kolobokLetterSpacing(b - a, sliceStyle),
+              letterSpacing: _kolobokLetterSpacing(
+                b - a,
+                sliceStyle,
+                extraEm: extraEm,
+              ),
             ),
           ),
         );
@@ -685,17 +695,16 @@ class ComposerAutocorrectController extends TextEditingController {
   }
 
   /// Extra letterSpacing so a [count]-space run matches chat body advance.
-  static double _kolobokLetterSpacing(int count, TextStyle style) {
-    final advanceEm = (!kIsWeb &&
-            (defaultTargetPlatform == TargetPlatform.android ||
-                defaultTargetPlatform == TargetPlatform.linux))
-        ? 1.65
-        : 1.5;
-    const spaceEm = 0.28;
+  static double _kolobokLetterSpacing(
+    int count,
+    TextStyle style, {
+    double extraEm = 0,
+  }) {
+    const placeholderEm = 0.0;
     final em = style.fontSize ?? 16.0;
-    final target = advanceEm * em;
-    final spaces = spaceEm * em * count;
-    return ((target - spaces) / count).clamp(0.0, double.infinity);
+    final target = (smileyAdvanceEm + extraEm) * em;
+    final intrinsic = placeholderEm * em * count;
+    return ((target - intrinsic) / count).clamp(0.0, double.infinity);
   }
 
   @override

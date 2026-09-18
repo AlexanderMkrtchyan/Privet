@@ -444,7 +444,7 @@ class PrivetTheme {
       AccentStyle.tape => TapeOutlineBorder(
           borderRadius: BorderRadius.circular(radius),
         ),
-      // Plain gold ring — long fluff + wind is painted by AccentChromeFrame.
+      // Plain gold ring — fluff is painted by AccentChromeFrame.
       AccentStyle.larva => OutlineInputBorder(
           borderRadius: BorderRadius.circular(radius),
           borderSide: const BorderSide(color: Color(0xFFE8D89A), width: 1.4),

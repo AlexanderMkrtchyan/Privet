@@ -105,7 +105,16 @@ app_dir.mkdir(exist_ok=True)
 (app_dir / "index.html").write_text(it)
 
 # Landing page (source-controlled) becomes the public site root.
-shutil.copyfile("$ROOT/server/landing/index.html", str(root / "index.html"))
+# Stamp download card versions from pubspec so the marketing site
+# never lags behind the shipped release.
+ver = "0.0.0"
+for line in Path("$ROOT/app/pubspec.yaml").read_text().splitlines():
+    if line.startswith("version:"):
+        ver = line.split(":", 1)[1].strip().split("+", 1)[0]
+        break
+landing_html = Path("$ROOT/server/landing/index.html").read_text()
+landing_html = re.sub(r"v\d+\.\d+\.\d+", f"v{ver}", landing_html)
+(root / "index.html").write_text(landing_html)
 
 # Point loader at uniquely named bundle (path change beats query-cache).
 boot = Path("$ROOT/server/public/flutter_bootstrap.js")

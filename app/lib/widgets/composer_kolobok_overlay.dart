@@ -1,5 +1,3 @@
-import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
@@ -7,6 +5,8 @@ import '../theme.dart';
 import '../util/kolobok_images.dart';
 import '../util/low_resource.dart';
 import 'composer_autocorrect_controller.dart';
+import 'selectable_markup_text.dart'
+    show kolobokArtSlot, kolobokDestRect, kolobokPaintCenter, kolobokPaintScale;
 
 /// Paints Kolobok art over hidden composer glyphs (same trick as message bodies).
 ///
@@ -71,16 +71,6 @@ class _ComposerKolobokPainter extends CustomPainter {
   final int generation;
   final int clockMs;
 
-  /// Match chat body: no overshoot on Android/Linux (avoids covering typed text).
-  static double get _overshoot {
-    if (!kIsWeb &&
-        (defaultTargetPlatform == TargetPlatform.android ||
-            defaultTargetPlatform == TargetPlatform.linux)) {
-      return 1.0;
-    }
-    return 1.4;
-  }
-
   @override
   void paint(Canvas canvas, Size size) {
     if (spans.isEmpty) return;
@@ -94,7 +84,9 @@ class _ComposerKolobokPainter extends CustomPainter {
     final cache = KolobokImageCache.instance;
     final paint = Paint()..filterQuality = FilterQuality.high;
     final plainLen = editable.text?.toPlainText().length ?? 0;
-    final overshoot = _overshoot;
+    final fontSize = editable.textScaler.scale(
+      editable.text?.style?.fontSize ?? 16.0,
+    );
 
     for (final span in spans) {
       if (span.end > plainLen) continue;
@@ -110,16 +102,30 @@ class _ComposerKolobokPainter extends CustomPainter {
         image.width.toDouble(),
         image.height.toDouble(),
       );
+      final caret = editable
+          .getLocalRectForCaret(TextPosition(offset: span.start))
+          .shift(origin);
       for (final box in boxes) {
         final rect = box.toRect().shift(origin);
-        final scale = (rect.width / image.width < rect.height / image.height
-                ? rect.width / image.width
-                : rect.height / image.height) *
-            overshoot;
-        final dest = Rect.fromCenter(
-          center: rect.center,
-          width: image.width * scale,
-          height: image.height * scale,
+        final artSlot = kolobokArtSlot(rect, fontSize);
+        final scale = kolobokPaintScale(
+          slot: artSlot,
+          imageWidth: image.width,
+          imageHeight: image.height,
+          fontSize: fontSize,
+        );
+        final destH = image.height * scale;
+        final destW = image.width * scale;
+        final dest = kolobokDestRect(
+          artSlot: artSlot,
+          center: kolobokPaintCenter(
+            slot: artSlot,
+            destHeight: destH,
+            fontSize: fontSize,
+            letterMidY: caret.center.dy,
+          ),
+          width: destW,
+          height: destH,
         );
         // Inline with typed text — skip the dark-UI white halo.
         canvas.drawImageRect(image, source, dest, paint);

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -6,6 +7,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart' show rootBundle;
 
 import 'kolobok_smileys.dart';
+import 'kolobok_webp.dart';
 
 class _KolobokAnim {
   _KolobokAnim(this.frames, this.delaysMs)
@@ -133,8 +135,51 @@ class KolobokImageCache extends ChangeNotifier {
   Future<void> _decode(String path) async {
     try {
       final data = await rootBundle.load(path);
-      final codec = await ui.instantiateImageCodec(data.buffer.asUint8List());
-      final frames = <ui.Image>[];
+      final bytes = data.buffer.asUint8List(
+        data.offsetInBytes,
+        data.lengthInBytes,
+      );
+      final anim = await _decodeBytes(bytes);
+      if (anim == null) return;
+      _anims[path]?.dispose();
+      _anims[path] = anim;
+      _generation++;
+      generationListenable.value = _generation;
+      notifyListeners();
+      _ensureTicking();
+    } catch (_) {
+      // Missing or undecodable asset: leave it uncached so the Unicode glyph
+      // keeps rendering instead of leaving a hole in the message.
+    }
+  }
+
+  /// Native multi-frame codec first; if it only yields a still, split the
+  /// animated WebP and decode each ANMF as a still image.
+  ///
+  /// Windows Impeller / WIC often reports a single frame for lossless VP8L
+  /// animation, which is every Kolobok file — Linux Skia decodes them fine.
+  Future<_KolobokAnim?> _decodeBytes(Uint8List bytes) async {
+    final parsed = parseAnimatedWebp(bytes);
+    final native = await _decodeWithEngine(bytes);
+    if (native != null &&
+        (parsed == null || native.frames.length >= parsed.frames.length)) {
+      return native;
+    }
+    if (parsed != null) {
+      final split = await _decodeParsedWebp(parsed);
+      if (split != null) {
+        native?.dispose();
+        return split;
+      }
+    }
+    return native;
+  }
+
+  Future<_KolobokAnim?> _decodeWithEngine(Uint8List bytes) async {
+    final frames = <ui.Image>[];
+    ui.Codec? codec;
+    try {
+      codec = await ui.instantiateImageCodec(bytes);
       final delays = <int>[];
       for (var i = 0; i < codec.frameCount; i++) {
         final info = await codec.getNextFrame();
@@ -145,17 +190,131 @@ class KolobokImageCache extends ChangeNotifier {
         delays.add(ms <= 0 ? 100 : ms);
       }
       codec.dispose();
-      if (frames.isEmpty) return;
-      _anims[path]?.dispose();
-      _anims[path] = _KolobokAnim(frames, delays);
-      _generation++;
-      generationListenable.value = _generation;
-      notifyListeners();
-      _ensureTicking();
+      codec = null;
+      if (frames.isEmpty) return null;
+      return _KolobokAnim(frames, delays);
     } catch (_) {
-      // Missing or undecodable asset: leave it uncached so the Unicode glyph
-      // keeps rendering instead of leaving a hole in the message.
+      codec?.dispose();
+      for (final img in frames) {
+        img.dispose();
+      }
+      return null;
     }
+  }
+
+  Future<_KolobokAnim?> _decodeParsedWebp(KolobokWebpAnimation parsed) async {
+    final frames = <ui.Image>[];
+    final delays = <int>[];
+    ui.Image? canvas;
+    var prevDispose = false;
+    var prevRect = ui.Rect.zero;
+
+    try {
+      for (final frame in parsed.frames) {
+        final still = await _decodeStill(frame.stillWebp);
+        if (still == null) {
+          for (final img in frames) {
+            img.dispose();
+          }
+          return null;
+        }
+
+        final dest = ui.Rect.fromLTWH(
+          frame.offsetX.toDouble(),
+          frame.offsetY.toDouble(),
+          frame.width.toDouble(),
+          frame.height.toDouble(),
+        );
+        final fullReplace = canvas == null &&
+            !prevDispose &&
+            !frame.blend &&
+            dest.left == 0 &&
+            dest.top == 0 &&
+            dest.width == parsed.canvasWidth &&
+            dest.height == parsed.canvasHeight;
+
+        late final ui.Image displayed;
+        if (fullReplace) {
+          displayed = still;
+        } else {
+          displayed = await _compositeFrame(
+            previous: canvas,
+            still: still,
+            canvasWidth: parsed.canvasWidth,
+            canvasHeight: parsed.canvasHeight,
+            dest: dest,
+            blend: frame.blend,
+            clearPrevious: prevDispose,
+            previousRect: prevRect,
+          );
+          still.dispose();
+        }
+
+        frames.add(displayed);
+        delays.add(frame.durationMs <= 0 ? 100 : frame.durationMs);
+        canvas = displayed;
+        prevDispose = frame.disposeToBackground;
+        prevRect = dest;
+      }
+    } catch (_) {
+      for (final img in frames) {
+        img.dispose();
+      }
+      return null;
+    }
+
+    if (frames.isEmpty) return null;
+    return _KolobokAnim(frames, delays);
+  }
+
+  Future<ui.Image?> _decodeStill(Uint8List bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final info = await codec.getNextFrame();
+      codec.dispose();
+      return info.image;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<ui.Image> _compositeFrame({
+    required ui.Image? previous,
+    required ui.Image still,
+    required int canvasWidth,
+    required int canvasHeight,
+    required ui.Rect dest,
+    required bool blend,
+    required bool clearPrevious,
+    required ui.Rect previousRect,
+  }) async {
+    final recorder = ui.PictureRecorder();
+    final canvas = ui.Canvas(recorder);
+    if (previous != null) {
+      canvas.drawImage(previous, ui.Offset.zero, ui.Paint());
+    }
+    if (clearPrevious && previous != null) {
+      canvas.drawRect(
+        previousRect,
+        ui.Paint()..blendMode = ui.BlendMode.clear,
+      );
+    }
+    final src = ui.Rect.fromLTWH(
+      0,
+      0,
+      still.width.toDouble(),
+      still.height.toDouble(),
+    );
+    canvas.drawImageRect(
+      still,
+      src,
+      dest,
+      ui.Paint()..blendMode = blend ? ui.BlendMode.srcOver : ui.BlendMode.src,
+    );
+    final picture = recorder.endRecording();
+    final image = await picture.toImage(canvasWidth, canvasHeight);
+    picture.dispose();
+    return image;
   }
 
   /// Warms [files] so the first paint of a chat already has its art.

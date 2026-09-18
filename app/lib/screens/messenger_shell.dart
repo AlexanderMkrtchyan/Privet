@@ -2327,9 +2327,11 @@ class InboxPane extends StatelessWidget {
                         ),
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
-                          title: const Text('Daily greeting'),
+                          title: const Text('Greeting bar'),
                           subtitle: Text(
-                            'Show a once-a-day greeting bar above the composer',
+                            'Joke, philosophy, and other drafts above the '
+                            'composer. Skip (✕) turns this off until you '
+                            'turn it back on here.',
                             style: TextStyle(
                               color: PrivetTheme.mist,
                               fontSize: 12,
@@ -3223,7 +3225,7 @@ class _ConversationPaneState extends State<ConversationPane>
   int _acReplaceStart = 0;
   int _acReplaceEnd = 0;
 
-  /// Daily greeting chip is fetching a draft (AI) or loading local pools.
+  /// Greeting bar is fetching a draft (AI) or loading local pools.
   bool _greetingBusy = false;
 
   /// Bumps when a new greeting request starts (ignore stale responses).
@@ -7561,13 +7563,11 @@ class _ConversationPaneState extends State<ConversationPane>
     if (id == null) return false;
     if (_editingMessage != null) return false;
     if (_recording || _draftVoice != null) return false;
-    return state.shouldShowGreetingButton(id);
+    return state.shouldShowGreetingButton();
   }
 
   Future<void> _onGreetingChipDismiss() async {
-    final chatId = widget.state.activeConversationId;
-    if (chatId == null) return;
-    await widget.state.consumeGreetingButton(chatId);
+    await widget.state.setGreetingButtonEnabled(false);
     if (mounted) {
       setState(() {
         _lastGreetingStyle = null;
@@ -7800,7 +7800,6 @@ class _ConversationPaneState extends State<ConversationPane>
     final dismissKeyboard = mounted && PrivetTheme.isCompact(context);
     _clearComposerAutocomplete();
     _controller.clearMarks();
-    final greetingChatId = widget.state.activeConversationId;
     if (voice != null) {
       final caption = text.trim();
       _controller.clear();
@@ -7821,9 +7820,6 @@ class _ConversationPaneState extends State<ConversationPane>
         replyToId: replyToId,
         replyTo: replyPreview,
       );
-      if (greetingChatId != null) {
-        unawaited(widget.state.consumeGreetingButton(greetingChatId));
-      }
       final err = widget.state.error;
       if (err != null && err.isNotEmpty) {
         _voiceToast(err);
@@ -7856,9 +7852,6 @@ class _ConversationPaneState extends State<ConversationPane>
         replyTo: replyPreview,
         replyQuote: replyQuote,
       );
-      if (greetingChatId != null) {
-        unawaited(widget.state.consumeGreetingButton(greetingChatId));
-      }
       if (dismissKeyboard) _dismissComposerKeyboard();
       _scrollToEnd();
       return;
@@ -7870,9 +7863,6 @@ class _ConversationPaneState extends State<ConversationPane>
       replyTo: replyPreview,
       replyQuote: replyQuote,
     );
-    if (greetingChatId != null) {
-      unawaited(widget.state.consumeGreetingButton(greetingChatId));
-    }
     _controller.clear();
     setState(() {
       _replyingTo = null;
@@ -8345,7 +8335,7 @@ class _ThemeModeSelector extends StatelessWidget {
   }
 }
 
-/// Compact style chips for the once-a-day greeting above the composer.
+/// Compact style chips for the greeting bar above the composer.
 class _GreetingComposerBar extends StatelessWidget {
   const _GreetingComposerBar({
     required this.busy,
@@ -8507,7 +8497,7 @@ class _GreetingComposerBar extends StatelessWidget {
                 ),
               ),
             IconButton(
-              tooltip: 'Dismiss for today',
+              tooltip: 'Turn off greeting bar',
               onPressed: busy ? null : onDismiss,
               visualDensity: VisualDensity.compact,
               iconSize: 18,

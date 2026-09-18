@@ -529,12 +529,13 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
 
   /// Splits [text] so bundled Kolobok smileys render as art instead of glyphs.
   ///
-  /// The character is swapped for an equal-length run of spaces, never removed:
-  /// every offset in the message — selection, copy, reply quoting,
+  /// The character is swapped for an equal-length run of U+200B, never
+  /// removed: every offset in the message — selection, copy, reply quoting,
   /// `markupToPlain` — keeps referring to the original Unicode, so the message
   /// format and the wire payload are untouched. A transparent colour would not
   /// work here: colour-emoji fonts carry their own colours and ignore the text
-  /// colour, so the glyph has to be replaced outright.
+  /// colour, so the glyph has to be replaced outright. U+0020 cannot be used:
+  /// a long space run does not wrap and overflows the window.
   ///
   /// `letterSpacing` widens that run to roughly the em an emoji would occupy,
   /// and the painter then sizes the art to whatever box the layout produced.
@@ -557,7 +558,9 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     final buffer = StringBuffer();
     var offset = base;
 
-    for (final grapheme in text.characters) {
+    final graphemes = text.characters.toList();
+    for (var i = 0; i < graphemes.length; i++) {
+      final grapheme = graphemes[i];
       final file = kolobokFileForEmoji(grapheme);
       if (file == null || !cache.isReady(file, light: light)) {
         buffer.write(grapheme);
@@ -568,11 +571,22 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
         spans.add(TextSpan(text: buffer.toString(), style: style));
         buffer.clear();
       }
+      var extraEm = 0.0;
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+        // Trailing gap so the next letter (or smiley) is not painted under
+        // the face. Art stays left-aligned in [smileyAdvanceEm], so the
+        // distance from preceding text does not change.
+        extraEm = linuxKolobokPairExtraEm;
+      }
       spans.add(
         TextSpan(
-          text: ' ' * grapheme.length,
+          text: kKolobokPlaceholderUnit * grapheme.length,
           style: style.copyWith(
-            letterSpacing: _smileyAdvanceFor(grapheme.length, style),
+            letterSpacing: _smileyAdvanceFor(
+              grapheme.length,
+              style,
+              extraEm: extraEm,
+            ),
           ),
         ),
       );
@@ -585,27 +599,18 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     return spans;
   }
 
-  /// Space the art occupies per smiley, in em. Wider than the 1em an emoji
-  /// glyph takes so inline smileys read a bit larger than surrounding text
-  /// (see [smileyOvershoot]). Android/Linux keep overshoot at 1.0, so reserve
-  /// a touch more width so consecutive smileys do not kiss.
-  static double get smileyAdvanceEm {
-    if (!kIsWeb &&
-        (defaultTargetPlatform == TargetPlatform.android ||
-            defaultTargetPlatform == TargetPlatform.linux)) {
-      return 1.65;
-    }
-    return 1.5;
-  }
-
   /// Extra `letterSpacing` that widens a [count]-space run to
-  /// [smileyAdvanceEm]. A space is about 0.28em in the fonts in use.
-  static double _smileyAdvanceFor(int count, TextStyle style) {
-    const spaceEm = 0.28;
+  /// [smileyAdvanceEm] (+ [extraEm] between consecutive smileys).
+  static double _smileyAdvanceFor(
+    int count,
+    TextStyle style, {
+    double extraEm = 0,
+  }) {
+    const placeholderEm = 0.0;
     final em = style.fontSize ?? 15.0;
-    final target = smileyAdvanceEm * em;
-    final spaces = spaceEm * em * count;
-    return ((target - spaces) / count).clamp(0.0, double.infinity);
+    final target = (smileyAdvanceEm + extraEm) * em;
+    final intrinsic = placeholderEm * em * count;
+    return ((target - intrinsic) / count).clamp(0.0, double.infinity);
   }
 
   /// Applies [request] to the current web selection and hands the full desired
@@ -735,7 +740,10 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     // via CSS (web_select_cursor), so no glyph rebuild is needed anywhere.
     _ensureWebPainter(maxW, hovering: false);
     final painter = _webPainter!;
-    final size = Size(painter.width, painter.height);
+    final size = Size(
+      painter.width > maxW ? maxW : painter.width,
+      painter.height,
+    );
 
     final dragging = widget.dragging?.call() ?? false;
     return MouseRegion(
@@ -761,7 +769,8 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
       onHover: (event) {
         _setHoveringLink(_linkAt(event.localPosition) != null);
       },
-      child: SizedBox(
+      child: ClipRect(
+        child: SizedBox(
         width: size.width,
         height: size.height,
         child: Listener(
@@ -869,6 +878,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
             ),
           ),
         ),
+        ),
       ),
     );
   }
@@ -962,13 +972,12 @@ class _KolobokSpan {
   final String file;
 }
 
-/// How far past the reserved box the art may reach. Inline smileys should read
-/// a little larger than surrounding text; the art is mostly transparent at the
-/// edges, so modest overflow does not collide with neighbouring glyphs.
+/// How far past the reserved box the art may reach. On web the art is mostly
+/// transparent at the edges, so modest overflow does not collide with glyphs.
 ///
-/// On Android/Linux the colour-emoji / line metrics leave less slack —
-/// overshoot paints over neighbouring letters and stacked smileys, so stay
-/// at 1.0.
+/// Android line metrics leave less slack — overshoot paints over neighbouring
+/// letters and stacked smileys, so stay at 1.0. Linux sizes against the font
+/// ([linuxKolobokInlineEm]) instead of this multiplier.
 double get smileyOvershoot {
   if (!kIsWeb &&
       (defaultTargetPlatform == TargetPlatform.android ||
@@ -976,6 +985,110 @@ double get smileyOvershoot {
     return 1.0;
   }
   return 1.4;
+}
+
+/// Painted inline Kolobok size on Linux, as a multiple of the larger of
+/// fontSize and the glyph slot. 1.8× is 1.5× the previous 1.2 inline size.
+const double linuxKolobokInlineEm = 1.8;
+
+/// Extra width, in em, after every Kolobok. Art is sized to
+/// ~[linuxKolobokInlineEm] × line height (~2.43em) while the face is painted
+/// in the left [smileyAdvanceEm] (2.1em), so text before the smiley stays
+/// tight and the following letter / smiley is not covered.
+const double linuxKolobokPairExtraEm = 0.55;
+
+/// Space the art occupies per smiley, in em. Wider than the 1em an emoji
+/// glyph takes so inline smileys read a bit larger than surrounding text
+/// (see [smileyOvershoot]). Linux keeps extra width so a lone smiley next
+/// to letters stays tight; pair runs add [linuxKolobokPairExtraEm].
+double get smileyAdvanceEm {
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+    return 2.1;
+  }
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+    return 1.65;
+  }
+  return 1.5;
+}
+
+/// Left-aligned paint box of [smileyAdvanceEm] inside a possibly wider
+/// layout [slot] (the extra is the pair/follow gap, and must not shift the face).
+Rect kolobokArtSlot(Rect slot, double fontSize) {
+  final artWidth = smileyAdvanceEm * fontSize;
+  if (slot.width <= artWidth + 0.5) return slot;
+  return Rect.fromLTWH(slot.left, slot.top, artWidth, slot.height);
+}
+
+/// Destination rect for Kolobok art. Never paints past [artSlot.right] so a
+/// following letter stays visible; extra size hangs to the left.
+Rect kolobokDestRect({
+  required Rect artSlot,
+  required Offset center,
+  required double width,
+  required double height,
+}) {
+  var dest = Rect.fromCenter(center: center, width: width, height: height);
+  if (dest.right > artSlot.right) {
+    dest = dest.shift(Offset(artSlot.right - dest.right, 0));
+  }
+  return dest;
+}
+
+/// Scale that maps a decoded Kolobok frame into the inline slot.
+///
+/// Linux sizes to [linuxKolobokInlineEm] × max(fontSize, slot) so the face
+/// sits just above a capital letter even when space-glyph boxes are tight.
+/// Other platforms contain in [slot] then apply [smileyOvershoot].
+double kolobokPaintScale({
+  required Rect slot,
+  required int imageWidth,
+  required int imageHeight,
+  required double fontSize,
+}) {
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+    final longest = math.max(imageWidth, imageHeight).toDouble();
+    if (longest <= 0) return 0;
+    final slotSide = math.min(slot.width, slot.height);
+    final target = math.max(fontSize, slotSide) * linuxKolobokInlineEm;
+    return target / longest;
+  }
+  return math.min(slot.width / imageWidth, slot.height / imageHeight) *
+      smileyOvershoot;
+}
+
+/// Where to place a Kolobok so it sits on the same midline as capital letters.
+///
+/// Space-glyph [slot]s include descent, so [Rect.center] sits too low.
+/// [baseline] is the line baseline in the same coordinates as [slot];
+/// [letterMidY] is an already-computed cap/caret midline when baseline is
+/// unknown (composer).
+Offset kolobokPaintCenter({
+  required Rect slot,
+  required double destHeight,
+  required double fontSize,
+  double? baseline,
+  double? letterMidY,
+}) {
+  // Cap-height is ~0.7em; the visual center of a capital is ~0.35em above
+  // the baseline. Fall back to a modest raise from the slot center.
+  final midY = letterMidY ??
+      (baseline != null
+          ? baseline - fontSize * 0.35
+          : slot.center.dy - fontSize * 0.12);
+  // Pack art has a sprout above the face; raise the bitmap so the ball,
+  // not the geometric center, matches the letters.
+  return Offset(slot.center.dx, midY - destHeight * 0.06);
+}
+
+ui.LineMetrics? kolobokLineAt(List<ui.LineMetrics> lines, Rect slot) {
+  for (final line in lines) {
+    final top = line.baseline - line.ascent;
+    final bottom = line.baseline + line.descent;
+    if (slot.center.dy >= top - 0.5 && slot.center.dy <= bottom + 0.5) {
+      return line;
+    }
+  }
+  return null;
 }
 
 class _WebMessageTextPainter extends CustomPainter {
@@ -1018,6 +1131,10 @@ class _WebMessageTextPainter extends CustomPainter {
     if (kolobokSpans.isEmpty) return;
     final cache = KolobokImageCache.instance;
     final paint = Paint()..filterQuality = FilterQuality.high;
+    final fontSize = textPainter.textScaler.scale(
+      textPainter.text?.style?.fontSize ?? 15.0,
+    );
+    final lines = textPainter.computeLineMetrics();
     for (final span in kolobokSpans) {
       if (span.end > textPainter.plainText.length) continue;
       final image = cache.frameFor(span.file, light: light);
@@ -1034,16 +1151,25 @@ class _WebMessageTextPainter extends CustomPainter {
       );
       for (final box in boxes) {
         final rect = box.toRect();
-        // Contain, then allow the documented overshoot.
-        final scale = math.min(
-              rect.width / image.width,
-              rect.height / image.height,
-            ) *
-            smileyOvershoot;
-        final dest = Rect.fromCenter(
-          center: rect.center,
-          width: image.width * scale,
-          height: image.height * scale,
+        final artSlot = kolobokArtSlot(rect, fontSize);
+        final scale = kolobokPaintScale(
+          slot: artSlot,
+          imageWidth: image.width,
+          imageHeight: image.height,
+          fontSize: fontSize,
+        );
+        final destH = image.height * scale;
+        final destW = image.width * scale;
+        final dest = kolobokDestRect(
+          artSlot: artSlot,
+          center: kolobokPaintCenter(
+            slot: artSlot,
+            destHeight: destH,
+            fontSize: fontSize,
+            baseline: kolobokLineAt(lines, rect)?.baseline,
+          ),
+          width: destW,
+          height: destH,
         );
         // No white halo when smileys sit in text — the disc reads as a
         // background chip next to letters. Standalone KolobokSmiley keeps it.

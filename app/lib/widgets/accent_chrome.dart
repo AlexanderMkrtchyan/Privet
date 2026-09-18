@@ -2,11 +2,10 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/scheduler.dart';
 
 import '../theme.dart';
 
-/// Lines longer than this get long larva whiskers + pointer wind.
+/// Lines longer than this get the longer larva whiskers.
 const double kAccentLongLinePx = 300;
 
 /// Soft-halo G: one layer + taper (light).
@@ -16,78 +15,8 @@ const double _kLarvaHairMax = 11.0;
 const double _kLarvaStroke = 0.5;
 const double _kLarvaJitter = 1.1;
 
-/// Traveling wave packet along a long larva edge.
-const double _kWaveWidthPx = 45;
-const double _kWaveSpeedPx = 220; // px / second
-const double _kWaveSigma = _kWaveWidthPx / 2.6;
-const int _kMaxWaves = 4;
-
 bool _isSpecial(AccentStyle style) =>
     style == AccentStyle.tape || style == AccentStyle.larva;
-
-class _LarvaWave {
-  _LarvaWave({required this.originAlong, required this.t0Ms});
-  final double originAlong;
-  final double t0Ms;
-}
-
-/// Shared wave clock — notifies painters without rebuilding widgets.
-class _LarvaAnim extends ChangeNotifier {
-  final List<_LarvaWave> waves = [];
-  double timeMs = 0;
-  double? lastSpawnAlong;
-  double lastSpawnMs = -1e9;
-
-  bool get active => waves.isNotEmpty;
-
-  void tick(Duration elapsed) {
-    timeMs = elapsed.inMilliseconds.toDouble();
-    waves.removeWhere((w) => timeMs - w.t0Ms > 3000);
-    notifyListeners();
-  }
-
-  void spawn(double along) {
-    final t0 = timeMs;
-    if (lastSpawnAlong != null &&
-        (along - lastSpawnAlong!).abs() < 10 &&
-        t0 - lastSpawnMs < 90) {
-      return;
-    }
-    waves.add(_LarvaWave(originAlong: along, t0Ms: t0));
-    if (waves.length > _kMaxWaves) waves.removeAt(0);
-    lastSpawnAlong = along;
-    lastSpawnMs = t0;
-    notifyListeners();
-  }
-
-  void clearSpawnMark() {
-    lastSpawnAlong = null;
-  }
-
-  void reset() {
-    waves.clear();
-    lastSpawnAlong = null;
-    timeMs = 0;
-    notifyListeners();
-  }
-}
-
-double _larvaWaveAmp(double along, List<_LarvaWave> waves, double nowMs) {
-  if (waves.isEmpty) return 0;
-  var best = 0.0;
-  for (final w in waves) {
-    final t = (nowMs - w.t0Ms) / 1000.0;
-    if (t < 0 || t > 2.8) continue;
-    final front = _kWaveSpeedPx * t;
-    final x = (along - w.originAlong).abs() - front;
-    // Cheap reject outside ~2σ of the moving front.
-    if (x.abs() > _kWaveWidthPx) continue;
-    final g = math.exp(-(x * x) / (2 * _kWaveSigma * _kWaveSigma));
-    final shim = math.sin(x * 0.22 - t * 14);
-    best = math.max(best, g * (0.85 + 0.15 * shim));
-  }
-  return best;
-}
 
 double _hairLen(int i, {required bool long}) {
   final lo = long ? _kLarvaHairMin : 3.0;
@@ -95,10 +24,8 @@ double _hairLen(int i, {required bool long}) {
   return lo + (i % 7) * ((hi - lo) / 7);
 }
 
-Color _larvaHairColor(int i, double amp, {double alphaScale = 1}) {
-  final base = _larvaHairs[i % _larvaHairs.length];
-  final a = (1.0 - math.min(0.48, amp * 0.55)) * alphaScale;
-  return base.withValues(alpha: a);
+Color _larvaHairColor(int i, {double alphaScale = 1}) {
+  return _larvaHairs[i % _larvaHairs.length].withValues(alpha: alphaScale);
 }
 
 /// Soft-halo G stroke: thick base + thin tip (one layer).
@@ -153,7 +80,6 @@ const _larvaHairs = [
   Color(0xFFFFFBE8),
 ];
 
-
 /// Inbox↔chat splitter or header↔body rule with tape / larva treatment.
 ///
 /// Rebuilds from [PrivetTheme.revision] so accent switches never leave a
@@ -170,7 +96,7 @@ class AccentSplitLine extends StatelessWidget {
   /// Cross-axis size for tape stripes (larva uses a wider fluff gutter).
   final double thickness;
 
-  /// Soft-halo G whiskers (L≈11 + wave) need room on both sides.
+  /// Soft-halo G whiskers (L≈11) need room on both sides.
   static const double larvaGutter = 30;
 
   @override
@@ -185,9 +111,7 @@ class AccentSplitLine extends StatelessWidget {
               ? Container(width: 1, color: line)
               : Container(height: 1, color: line);
         }
-        // Soft-halo L≈12 (+ wave stretch) needs a wide gutter on both sides.
-        final band =
-            style == AccentStyle.larva ? larvaGutter : thickness;
+        final band = style == AccentStyle.larva ? larvaGutter : thickness;
         return SizedBox(
           width: axis == Axis.vertical ? band : null,
           height: axis == Axis.horizontal ? band : null,
@@ -202,7 +126,7 @@ class AccentSplitLine extends StatelessWidget {
   }
 }
 
-class _AccentLinePaint extends StatefulWidget {
+class _AccentLinePaint extends StatelessWidget {
   const _AccentLinePaint({
     super.key,
     required this.axis,
@@ -213,72 +137,15 @@ class _AccentLinePaint extends StatefulWidget {
   final AccentStyle style;
 
   @override
-  State<_AccentLinePaint> createState() => _AccentLinePaintState();
-}
-
-class _AccentLinePaintState extends State<_AccentLinePaint>
-    with SingleTickerProviderStateMixin {
-  final _LarvaAnim _anim = _LarvaAnim();
-  late final Ticker _ticker;
-
-  @override
-  void initState() {
-    super.initState();
-    _ticker = createTicker((elapsed) {
-      _anim.tick(elapsed);
-      if (!_anim.active) _ticker.stop();
-    });
-  }
-
-  @override
-  void didUpdateWidget(covariant _AccentLinePaint old) {
-    super.didUpdateWidget(old);
-    if (old.style != widget.style) {
-      _anim.reset();
-      _ticker.stop();
-    }
-  }
-
-  @override
-  void dispose() {
-    _ticker.dispose();
-    _anim.dispose();
-    super.dispose();
-  }
-
-  void _spawnAlong(double along) {
-    if (!_ticker.isActive) {
-      _anim.timeMs = 0;
-      _ticker.start();
-    }
-    _anim.spawn(along);
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final paint = CustomPaint(
-      painter: _SplitLinePainter(
-        style: widget.style,
-        axis: widget.axis,
-        anim: _anim,
+    return ClipRect(
+      child: CustomPaint(
+        painter: _SplitLinePainter(
+          style: style,
+          axis: axis,
+        ),
+        child: const SizedBox.expand(),
       ),
-      child: const SizedBox.expand(),
-    );
-
-    if (widget.style != AccentStyle.larva) {
-      return ClipRect(child: paint);
-    }
-
-    return MouseRegion(
-      onHover: (e) {
-        final box = context.findRenderObject() as RenderBox?;
-        if (box == null || !box.hasSize) return;
-        final local = box.globalToLocal(e.position);
-        final along = widget.axis == Axis.vertical ? local.dy : local.dx;
-        _spawnAlong(along);
-      },
-      onExit: (_) => _anim.clearSpawnMark(),
-      child: ClipRect(child: paint),
     );
   }
 }
@@ -287,12 +154,10 @@ class _SplitLinePainter extends CustomPainter {
   _SplitLinePainter({
     required this.style,
     required this.axis,
-    required this.anim,
-  }) : super(repaint: anim);
+  });
 
   final AccentStyle style;
   final Axis axis;
-  final _LarvaAnim anim;
 
   static const _black = Color(0xFF111111);
   static const _yellow = Color(0xFFF0D000);
@@ -377,9 +242,6 @@ class _SplitLinePainter extends CustomPainter {
     final hair = Paint()
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
-    final waves = anim.waves;
-    final timeMs = anim.timeMs;
-    final live = waves.isNotEmpty;
 
     for (var i = 0; i < n; i++) {
       final s = length * (i / n);
@@ -392,23 +254,7 @@ class _SplitLinePainter extends CustomPainter {
         if (nrm == 0) continue;
         nx /= nrm;
         ny /= nrm;
-        var L = _hairLen(i, long: true);
-        var amp = 0.0;
-        if (live) {
-          amp = _larvaWaveAmp(s, waves, timeMs);
-          if (amp > 0.02) {
-            final tx = -ny;
-            final ty = nx;
-            nx += tx * amp * 0.95;
-            ny += ty * amp * 0.95;
-            final n2 = math.sqrt(nx * nx + ny * ny);
-            nx /= n2;
-            ny /= n2;
-            L *= 1 + amp * 0.35;
-          }
-        }
-        final tip = _larvaHairColor(i, amp);
-        final base = _larvaHairColor(i, amp, alphaScale: 0.45);
+        final L = _hairLen(i, long: true);
         _drawSoftHair(
           canvas,
           hair,
@@ -416,9 +262,9 @@ class _SplitLinePainter extends CustomPainter {
           nx: nx,
           ny: ny,
           L: L,
-          stroke: _kLarvaStroke * (1 - amp * 0.22),
-          color: tip,
-          baseColor: base,
+          stroke: _kLarvaStroke,
+          color: _larvaHairColor(i),
+          baseColor: _larvaHairColor(i, alphaScale: 0.45),
           taper: true,
         );
       }
@@ -427,7 +273,7 @@ class _SplitLinePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _SplitLinePainter old) =>
-      old.style != style || old.axis != axis || old.anim != anim;
+      old.style != style || old.axis != axis;
 }
 
 /// Wraps a control / bubble with tape border or larva fluff.
@@ -485,37 +331,9 @@ class _AccentChromeFrameBody extends StatefulWidget {
   State<_AccentChromeFrameBody> createState() => _AccentChromeFrameBodyState();
 }
 
-class _AccentChromeFrameBodyState extends State<_AccentChromeFrameBody>
-    with SingleTickerProviderStateMixin {
-  final _LarvaAnim _anim = _LarvaAnim();
-  late final Ticker _ticker;
+class _AccentChromeFrameBodyState extends State<_AccentChromeFrameBody> {
   Size _size = Size.zero;
-  List<({Offset pos, double nx, double ny, double s})> _samples = const [];
-
-  @override
-  void initState() {
-    super.initState();
-    _ticker = createTicker((elapsed) {
-      _anim.tick(elapsed);
-      if (!_anim.active) _ticker.stop();
-    });
-  }
-
-  @override
-  void didUpdateWidget(covariant _AccentChromeFrameBody old) {
-    super.didUpdateWidget(old);
-    if (old.style != widget.style) {
-      _anim.reset();
-      _ticker.stop();
-    }
-  }
-
-  @override
-  void dispose() {
-    _ticker.dispose();
-    _anim.dispose();
-    super.dispose();
-  }
+  List<({Offset pos, double nx, double ny})> _samples = const [];
 
   bool get _long {
     if (widget.forceLong != null) return widget.forceLong!;
@@ -549,35 +367,14 @@ class _AccentChromeFrameBodyState extends State<_AccentChromeFrameBody>
     _samples = _sampleRRectAlong(rrect, spacing: spacing);
   }
 
-  void _spawnNear(Offset local) {
-    if (_samples.isEmpty) return;
-    var best = _samples.first;
-    var bestD = (best.pos - local).distance;
-    for (final s in _samples) {
-      final d = (s.pos - local).distance;
-      if (d < bestD) {
-        bestD = d;
-        best = s;
-      }
-    }
-    if (bestD > 18) return;
-
-    if (!_ticker.isActive) {
-      _anim.timeMs = 0;
-      _ticker.start();
-    }
-    _anim.spawn(best.s);
-  }
-
   @override
   Widget build(BuildContext context) {
     final style = widget.style;
-    final frame = CustomPaint(
+    return CustomPaint(
       foregroundPainter: _FrameChromePainter(
         style: style,
         radius: widget.radius,
         long: _long,
-        anim: _anim,
         bandWidth: widget.bandWidth ?? (style == AccentStyle.tape ? 3.0 : 1.4),
         samples: _samples,
       ),
@@ -585,19 +382,6 @@ class _AccentChromeFrameBodyState extends State<_AccentChromeFrameBody>
         onChange: _syncSize,
         child: widget.child,
       ),
-    );
-
-    if (style != AccentStyle.larva) return frame;
-
-    return MouseRegion(
-      onHover: (e) {
-        if (!_long) return;
-        final box = context.findRenderObject() as RenderBox?;
-        if (box == null || !box.hasSize) return;
-        _spawnNear(box.globalToLocal(e.position));
-      },
-      onExit: (_) => _anim.clearSpawnMark(),
-      child: frame,
     );
   }
 }
@@ -643,17 +427,15 @@ class _FrameChromePainter extends CustomPainter {
     required this.style,
     required this.radius,
     required this.long,
-    required this.anim,
     required this.bandWidth,
     required this.samples,
-  }) : super(repaint: anim);
+  });
 
   final AccentStyle style;
   final double radius;
   final bool long;
-  final _LarvaAnim anim;
   final double bandWidth;
-  final List<({Offset pos, double nx, double ny, double s})> samples;
+  final List<({Offset pos, double nx, double ny})> samples;
 
   static const _black = Color(0xFF111111);
   static const _yellow = Color(0xFFF0D000);
@@ -733,9 +515,6 @@ class _FrameChromePainter extends CustomPainter {
     final hair = Paint()
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
-    final waves = anim.waves;
-    final timeMs = anim.timeMs;
-    final live = long && waves.isNotEmpty;
     // Short bubbles: single stroke (no taper) — many on screen at once.
     final taper = long;
 
@@ -750,23 +529,7 @@ class _FrameChromePainter extends CustomPainter {
       if (nrm == 0) continue;
       nx /= nrm;
       ny /= nrm;
-      var L = _hairLen(i, long: long);
-      var amp = 0.0;
-      if (live) {
-        amp = _larvaWaveAmp(s.s, waves, timeMs);
-        if (amp > 0.02) {
-          final tx = -ny;
-          final ty = nx;
-          nx += tx * amp * 0.95;
-          ny += ty * amp * 0.95;
-          final n2 = math.sqrt(nx * nx + ny * ny);
-          nx /= n2;
-          ny /= n2;
-          L *= 1 + amp * 0.35;
-        }
-      }
-      final tip = _larvaHairColor(i, amp);
-      final base = _larvaHairColor(i, amp, alphaScale: 0.45);
+      final L = _hairLen(i, long: long);
       _drawSoftHair(
         canvas,
         hair,
@@ -774,9 +537,9 @@ class _FrameChromePainter extends CustomPainter {
         nx: nx,
         ny: ny,
         L: L,
-        stroke: _kLarvaStroke * (1 - amp * 0.22),
-        color: tip,
-        baseColor: base,
+        stroke: _kLarvaStroke,
+        color: _larvaHairColor(i),
+        baseColor: _larvaHairColor(i, alphaScale: 0.45),
         taper: taper,
       );
     }
@@ -788,16 +551,14 @@ class _FrameChromePainter extends CustomPainter {
       old.long != long ||
       old.radius != radius ||
       old.bandWidth != bandWidth ||
-      old.anim != anim ||
       old.samples.length != samples.length;
 }
 
-List<({Offset pos, double nx, double ny, double s})> _sampleRRectAlong(
+List<({Offset pos, double nx, double ny})> _sampleRRectAlong(
   RRect rrect, {
   required double spacing,
 }) {
-  final out = <({Offset pos, double nx, double ny, double s})>[];
-  var along = 0.0;
+  final out = <({Offset pos, double nx, double ny})>[];
 
   void line(Offset a, Offset b, double nx, double ny) {
     final len = (b - a).distance;
@@ -808,10 +569,8 @@ List<({Offset pos, double nx, double ny, double s})> _sampleRRectAlong(
         pos: Offset.lerp(a, b, t)!,
         nx: nx,
         ny: ny,
-        s: along + len * t,
       ));
     }
-    along += len;
   }
 
   void arc(Offset c, double r, double a0, double a1) {
@@ -824,10 +583,8 @@ List<({Offset pos, double nx, double ny, double s})> _sampleRRectAlong(
         pos: Offset(c.dx + r * math.cos(a), c.dy + r * math.sin(a)),
         nx: math.cos(a),
         ny: math.sin(a),
-        s: along + arcLen * (i / n),
       ));
     }
-    along += arcLen;
   }
 
   final left = rrect.left;
@@ -849,4 +606,3 @@ List<({Offset pos, double nx, double ny, double s})> _sampleRRectAlong(
   arc(Offset(left + tl, top + tl), tl, math.pi, math.pi * 1.5);
   return out;
 }
-
