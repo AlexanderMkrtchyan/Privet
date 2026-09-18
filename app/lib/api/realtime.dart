@@ -2,7 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:web_socket_channel/web_socket_channel.dart';
+
+import 'realtime_channel_stub.dart'
+    if (dart.library.io) 'realtime_channel_io.dart';
 
 typedef WsHandler = void Function(Map<String, dynamic> event);
 
@@ -48,7 +52,7 @@ class RealtimeClient {
     try {
       await _channel?.sink.close();
     } catch (_) {}
-    _channel = WebSocketChannel.connect(Uri.parse(url));
+    _channel = connectRealtimeChannel(Uri.parse(url));
     _authSent = false;
     _sub = _channel!.stream.listen(
       (raw) {
@@ -70,7 +74,13 @@ class RealtimeClient {
 
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
     _lastInboundAt = DateTime.now();
+    // Native sockets carry an OS-level pingInterval (see realtime_channel_io)
+    // which closes a half-open link on its own, so no app-level traffic is
+    // needed there. The browser owns keepalive on web, so the ping/pong
+    // watchdog covers that platform (server answers `ping` with `pong`).
+    if (!kIsWeb) return;
     _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
       if (_manualDisconnect || _authToken == null || !_authSent) return;
       final last = _lastInboundAt;
