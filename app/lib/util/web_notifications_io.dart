@@ -92,7 +92,8 @@ Future<bool> _initAndroidNotifications() async {
 Future<bool> _initWindowsNotifications() async {
   if (!_windowsNotifySupported) return false;
   if (_windowsReady) return true;
-  if (_windowsFailed) return false;
+  // Do not permanently latch failures — WinRT/COM can recover after long
+  // idle in the tray, and a sticky [_windowsFailed] would silence toasts.
   try {
     // WinToast needs a Start Menu shortcut + AppUserModelID; requireCreate
     // makes one when missing so toasts actually appear.
@@ -101,6 +102,7 @@ Future<bool> _initWindowsNotifications() async {
       shortcutPolicy: ShortcutPolicy.requireCreate,
     );
     _windowsReady = true;
+    _windowsFailed = false;
     return true;
   } catch (e, st) {
     _windowsFailed = true;
@@ -214,7 +216,8 @@ Future<void> _showWindowsNotification({
   final previous = _windowsByTag.remove(id);
   if (previous != null) {
     try {
-      await previous.close();
+      // After long idle, close() can hang — never block the new toast on it.
+      await previous.close().timeout(const Duration(milliseconds: 400));
     } catch (_) {}
   }
   if (onClick != null) {
@@ -240,6 +243,8 @@ Future<void> _showWindowsNotification({
     await notification.show();
   } catch (e, st) {
     debugPrint('windows notification failed: $e\n$st');
+    // Next message retries setup instead of staying silent forever.
+    _windowsReady = false;
   }
 }
 

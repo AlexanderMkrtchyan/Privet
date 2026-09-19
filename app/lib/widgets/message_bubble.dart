@@ -1485,7 +1485,7 @@ class _BigEmojiState extends State<_BigEmoji>
     // Kolobok playback is a separate concern from the entrance bounce. Tying
     // them together silently froze every big smiley on Android/Linux to its
     // first frame, which is exactly the "sticker looks broken" report.
-    const emojiAnimate = true;
+    final emojiAnimate = !privetLowResource;
     final gap = tightEmoji ? 12.0 : 4.0;
     final child = graphemes.length <= 1
         ? PrivetEmoji(

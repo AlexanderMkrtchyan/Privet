@@ -10,7 +10,7 @@ import { loadEnvFile } from './env.js';
 import { migrate, uploadsDir } from './db.js';
 import { getDueReminders, updateReminder } from './db/reminders.js';
 import { memberIds } from './db/chat.js';
-import { broadcastToUsers } from './ws/hub.js';
+import { broadcastToUsers, startSocketHeartbeat } from './ws/hub.js';
 
 loadEnvFile();
 import { registerRoutes } from './routes/api.js';
@@ -56,6 +56,7 @@ app.addContentTypeParser(
 
 await registerRoutes(app);
 registerWebsocket(app);
+startSocketHeartbeat();
 
 // Old invite links were /?invite=handle; chat moved to /app/ after landing split.
 app.addHook('onRequest', async (request, reply) => {

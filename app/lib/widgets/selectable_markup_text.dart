@@ -156,6 +156,9 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
   /// as glyphs. Rebuilt with the span.
   List<_KolobokSpan> _kolobokSpans = const [];
 
+  /// Extra top/bottom inset so oversized Kolobok paint is not ClipRect-sheared.
+  double _webSmileyPad = 0;
+
   /// Visible text with markup stripped — selection offsets live in this space.
   String _plainText = '';
 
@@ -680,7 +683,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     if (painter == null) return 0;
     final pos = Offset(
       local.dx.clamp(0.0, painter.width),
-      local.dy.clamp(0.0, painter.height),
+      (local.dy - _webSmileyPad).clamp(0.0, painter.height),
     );
     return painter
         .getPositionForOffset(pos)
@@ -747,6 +750,13 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     );
 
     final dragging = widget.dragging?.call() ?? false;
+    // Kolobok art is taller than the glyph slot. Without vertical room,
+    // ClipRect shears faces off at the chin (the "cut off at the bottom" bug).
+    final smileyPad = _kolobokSpans.isEmpty
+        ? 0.0
+        : _inlineSmileyVerticalPad(painter);
+    _webSmileyPad = smileyPad;
+    final hostSize = Size(size.width, size.height + smileyPad * 2);
     return MouseRegion(
       cursor: dragging
           ? MouseCursor.defer
@@ -772,8 +782,8 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
       },
       child: ClipRect(
         child: SizedBox(
-        width: size.width,
-        height: size.height,
+        width: hostSize.width,
+        height: hostSize.height,
         child: Listener(
           behavior: HitTestBehavior.opaque,
           onPointerDown: (event) {
@@ -866,12 +876,13 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
           },
           child: CustomPaint(
             key: _hostKey,
-            size: size,
+            size: hostSize,
             painter: _WebMessageTextPainter(
               textPainter: painter,
               getSelection: () => _webSel,
               kolobokSpans: _kolobokSpans,
               light: PrivetTheme.isLight,
+              verticalPad: smileyPad,
               repaint: Listenable.merge([
                 _webSelRepaint,
                 KolobokImageCache.instance,
@@ -986,6 +997,21 @@ double get smileyOvershoot {
     return 1.0;
   }
   return 1.4;
+}
+
+/// Extra top/bottom inset so painted Kolobok art is not clipped by [ClipRect].
+double _inlineSmileyVerticalPad(TextPainter painter) {
+  final fontSize = painter.textScaler.scale(
+    painter.text?.style?.fontSize ?? 15.0,
+  );
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+    return fontSize * (linuxKolobokInlineEm - 1.0) * 0.55;
+  }
+  final overshoot = smileyOvershoot;
+  if (overshoot <= 1.0) {
+    return fontSize * 0.18;
+  }
+  return fontSize * (overshoot - 1.0) * 0.55;
 }
 
 /// Painted inline Kolobok size on Linux, as a multiple of the larger of
@@ -1119,6 +1145,7 @@ class _WebMessageTextPainter extends CustomPainter {
     required this.getSelection,
     required this.kolobokSpans,
     required this.light,
+    this.verticalPad = 0,
     required Listenable repaint,
   }) : super(repaint: repaint);
 
@@ -1126,9 +1153,14 @@ class _WebMessageTextPainter extends CustomPainter {
   final ValueGetter<TextSelection> getSelection;
   final List<_KolobokSpan> kolobokSpans;
   final bool light;
+  final double verticalPad;
 
   @override
   void paint(Canvas canvas, Size size) {
+    canvas.save();
+    if (verticalPad != 0) {
+      canvas.translate(0, verticalPad);
+    }
     final selection = getSelection();
     if (selection.isValid && !selection.isCollapsed) {
       final boxes = textPainter.getBoxesForSelection(selection);
@@ -1142,6 +1174,7 @@ class _WebMessageTextPainter extends CustomPainter {
     }
     textPainter.paint(canvas, Offset.zero);
     _paintSmileys(canvas);
+    canvas.restore();
   }
 
   /// Draws each bundled smiley over the space its glyph would have occupied.
@@ -1211,7 +1244,8 @@ class _WebMessageTextPainter extends CustomPainter {
   bool shouldRepaint(covariant _WebMessageTextPainter oldDelegate) {
     return oldDelegate.textPainter != textPainter ||
         oldDelegate.kolobokSpans != kolobokSpans ||
-        oldDelegate.light != light;
+        oldDelegate.light != light ||
+        oldDelegate.verticalPad != verticalPad;
   }
 }
 

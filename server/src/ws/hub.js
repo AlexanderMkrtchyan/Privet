@@ -31,6 +31,11 @@ export function bindSocket(userId, socket) {
   socketsByUser.get(userId).add(socket);
   // Newest connection becomes primary so the tab you just opened owns the ding.
   primarySocketByUser.set(userId, socket);
+  // Protocol ping/pong — clears half-open sockets after long idle (Windows tray).
+  socket.isAlive = true;
+  socket.on('pong', () => {
+    socket.isAlive = true;
+  });
   socket.on('close', () => unbindSocket(userId, socket));
 }
 
@@ -162,4 +167,36 @@ export function socketStats() {
     };
   }
   return out;
+}
+
+/** Drop half-open sockets so presence + FCM stay accurate after long idle. */
+export function startSocketHeartbeat({ intervalMs = 30000 } = {}) {
+  if (globalThis.__privetWsHeartbeat) return;
+  globalThis.__privetWsHeartbeat = setInterval(() => {
+    for (const set of socketsByUser.values()) {
+      for (const socket of [...set]) {
+        if (socket.isAlive === false) {
+          try {
+            socket.terminate();
+          } catch {
+            /* ignore */
+          }
+          continue;
+        }
+        socket.isAlive = false;
+        try {
+          socket.ping();
+        } catch {
+          try {
+            socket.terminate();
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+  }, intervalMs);
+  if (typeof globalThis.__privetWsHeartbeat.unref === 'function') {
+    globalThis.__privetWsHeartbeat.unref();
+  }
 }
