@@ -1020,8 +1020,15 @@ Rect kolobokArtSlot(Rect slot, double fontSize) {
   return Rect.fromLTWH(slot.left, slot.top, artWidth, slot.height);
 }
 
-/// Destination rect for Kolobok art. Never paints past [artSlot.right] so a
-/// following letter stays visible; extra size hangs to the left.
+/// Destination rect for Kolobok art, kept inside [artSlot] horizontally.
+///
+/// Inline smileys are painted *over* the text layer, so anything that leaves
+/// the reserved box covers a neighbouring glyph — with the pack's wide artwork
+/// (≈3/4 of the files are wider than tall) the overshoot used to land on the
+/// preceding letter. The art may still be taller than the line box (that is the
+/// documented [smileyOvershoot] look), but it never crosses into neighbouring
+/// characters: when it is wider than the box the overflow is pushed to the
+/// right, where the next character's own advance starts anyway.
 Rect kolobokDestRect({
   required Rect artSlot,
   required Offset center,
@@ -1029,8 +1036,14 @@ Rect kolobokDestRect({
   required double height,
 }) {
   var dest = Rect.fromCenter(center: center, width: width, height: height);
-  if (dest.right > artSlot.right) {
-    dest = dest.shift(Offset(artSlot.right - dest.right, 0));
+  if (dest.width <= artSlot.width) {
+    var dx = 0.0;
+    if (dest.right > artSlot.right) dx = artSlot.right - dest.right;
+    if (dest.left + dx < artSlot.left) dx = artSlot.left - dest.left;
+    return dest.shift(Offset(dx, 0));
+  }
+  if (dest.left < artSlot.left) {
+    dest = dest.shift(Offset(artSlot.left - dest.left, 0));
   }
   return dest;
 }
@@ -1040,21 +1053,29 @@ Rect kolobokDestRect({
 /// Linux sizes to [linuxKolobokInlineEm] × max(fontSize, slot) so the face
 /// sits just above a capital letter even when space-glyph boxes are tight.
 /// Other platforms contain in [slot] then apply [smileyOvershoot].
+///
+/// The result is always clamped so the frame's width fits [slot]; without that
+/// a wide frame (pack art runs up to ~2.5:1) overshoots sideways and lands on
+/// the letters around it.
 double kolobokPaintScale({
   required Rect slot,
   required int imageWidth,
   required int imageHeight,
   required double fontSize,
 }) {
+  if (imageWidth <= 0 || imageHeight <= 0) return 0;
+  final double scale;
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
     final longest = math.max(imageWidth, imageHeight).toDouble();
-    if (longest <= 0) return 0;
     final slotSide = math.min(slot.width, slot.height);
     final target = math.max(fontSize, slotSide) * linuxKolobokInlineEm;
-    return target / longest;
+    scale = target / longest;
+  } else {
+    scale = math.min(slot.width / imageWidth, slot.height / imageHeight) *
+        smileyOvershoot;
   }
-  return math.min(slot.width / imageWidth, slot.height / imageHeight) *
-      smileyOvershoot;
+  final maxByWidth = slot.width / imageWidth;
+  return math.min(scale, maxByWidth);
 }
 
 /// Where to place a Kolobok so it sits on the same midline as capital letters.
