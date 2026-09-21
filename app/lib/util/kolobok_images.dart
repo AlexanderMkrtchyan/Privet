@@ -1,9 +1,7 @@
 import 'dart:async';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart' show rootBundle;
 
 import 'kolobok_smileys.dart';
@@ -72,7 +70,12 @@ class KolobokImageCache extends ChangeNotifier {
 
   int _listenerCount = 0;
   bool _ticking = false;
-  Duration _lastTick = Duration.zero;
+  Timer? _timer;
+
+  /// ~30 fps clock. A Dart [Timer] keeps smileys moving even when Windows
+  /// merged-thread / idle vsync stops scheduling frames (caret + typing use
+  /// the same approach).
+  static const Duration _tickPeriod = Duration(milliseconds: 33);
 
   @override
   void addListener(VoidCallback listener) {
@@ -85,32 +88,27 @@ class KolobokImageCache extends ChangeNotifier {
   void removeListener(VoidCallback listener) {
     super.removeListener(listener);
     _listenerCount = (_listenerCount - 1).clamp(0, 1 << 30);
-    if (_listenerCount == 0) _ticking = false;
+    if (_listenerCount == 0) _stopTicking();
   }
 
   void _ensureTicking() {
     if (_ticking || _listenerCount == 0) return;
     _ticking = true;
-    _lastTick = Duration.zero;
-    SchedulerBinding.instance.scheduleFrameCallback(_onTick);
+    _timer?.cancel();
+    _timer = Timer.periodic(_tickPeriod, (_) {
+      if (!_ticking || _listenerCount == 0) {
+        _stopTicking();
+        return;
+      }
+      _clockMs += _tickPeriod.inMilliseconds;
+      notifyListeners();
+    });
   }
 
-  void _onTick(Duration timestamp) {
-    if (!_ticking || _listenerCount == 0) {
-      _ticking = false;
-      return;
-    }
-    if (_lastTick != Duration.zero) {
-      final delta = timestamp - _lastTick;
-      // Cap a hitch so a long pause does not jump the animation.
-      final ms = delta.inMilliseconds.clamp(0, 50);
-      if (ms > 0) {
-        _clockMs += ms;
-        notifyListeners();
-      }
-    }
-    _lastTick = timestamp;
-    SchedulerBinding.instance.scheduleFrameCallback(_onTick);
+  void _stopTicking() {
+    _ticking = false;
+    _timer?.cancel();
+    _timer = null;
   }
 
   /// The frame that should be painted right now, or null while decoding.
@@ -291,13 +289,21 @@ class KolobokImageCache extends ChangeNotifier {
     final recorder = ui.PictureRecorder();
     final canvas = ui.Canvas(recorder);
     if (previous != null) {
-      canvas.drawImage(previous, ui.Offset.zero, ui.Paint());
-    }
-    if (clearPrevious && previous != null) {
-      canvas.drawRect(
-        previousRect,
-        ui.Paint()..blendMode = ui.BlendMode.clear,
-      );
+      if (clearPrevious) {
+        // Avoid BlendMode.clear — Impeller on Windows often no-ops or faults
+        // on it, which aborted the whole multi-frame decode and left smileys
+        // stuck on frame 0. Redraw the previous canvas in three strips around
+        // the disposed rect instead.
+        _drawExceptRect(
+          canvas,
+          previous,
+          canvasWidth.toDouble(),
+          canvasHeight.toDouble(),
+          previousRect,
+        );
+      } else {
+        canvas.drawImage(previous, ui.Offset.zero, ui.Paint());
+      }
     }
     final src = ui.Rect.fromLTWH(
       0,
@@ -315,6 +321,40 @@ class KolobokImageCache extends ChangeNotifier {
     final image = await picture.toImage(canvasWidth, canvasHeight);
     picture.dispose();
     return image;
+  }
+
+  /// Paints [image] covering the canvas except [hole] (dispose-to-background).
+  void _drawExceptRect(
+    ui.Canvas canvas,
+    ui.Image image,
+    double width,
+    double height,
+    ui.Rect hole,
+  ) {
+    final paint = ui.Paint();
+    final clips = <ui.Rect>[
+      ui.Rect.fromLTRB(0, 0, width, hole.top.clamp(0, height)),
+      ui.Rect.fromLTRB(0, hole.bottom.clamp(0, height), width, height),
+      ui.Rect.fromLTRB(
+        0,
+        hole.top.clamp(0, height),
+        hole.left.clamp(0, width),
+        hole.bottom.clamp(0, height),
+      ),
+      ui.Rect.fromLTRB(
+        hole.right.clamp(0, width),
+        hole.top.clamp(0, height),
+        width,
+        hole.bottom.clamp(0, height),
+      ),
+    ];
+    for (final clip in clips) {
+      if (clip.width <= 0 || clip.height <= 0) continue;
+      canvas.save();
+      canvas.clipRect(clip);
+      canvas.drawImage(image, ui.Offset.zero, paint);
+      canvas.restore();
+    }
   }
 
   /// Warms [files] so the first paint of a chat already has its art.

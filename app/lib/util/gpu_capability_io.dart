@@ -13,9 +13,22 @@ Future<bool> hasCapableGpu() async {
 }
 
 Future<bool> _probe() async {
-  // Explicit software GL force → weak.
-  final alwaysSoft = Platform.environment['LIBGL_ALWAYS_SOFTWARE'];
-  if (alwaysSoft == '1' || alwaysSoft == 'true') return false;
+  // Windows / Apple / Android: Impeller or the platform compositor owns the
+  // GPU path. Never auto-strip motion there — LIBGL_* and /dev/dri probes are
+  // Linux-only signals and must not flip "Low RAM & CPU" on a Windows box
+  // (that freezes caret blink, typing dots, and big emoji together).
+  if (Platform.isWindows ||
+      Platform.isMacOS ||
+      Platform.isIOS ||
+      Platform.isAndroid) {
+    return true;
+  }
+
+  // Explicit software GL force → weak (Linux Mesa override).
+  if (Platform.isLinux) {
+    final alwaysSoft = Platform.environment['LIBGL_ALWAYS_SOFTWARE'];
+    if (alwaysSoft == '1' || alwaysSoft == 'true') return false;
+  }
 
   // Discrete NVIDIA / AMD device nodes — capable (e.g. RTX 3060).
   if (await _exists('/dev/nvidia0') ||
@@ -23,12 +36,6 @@ Future<bool> _probe() async {
       (await _exists('/dev/dri/by-path') && await _hasAmdOrNvidiaDri())) {
     return true;
   }
-
-  // Apple Silicon / macOS desktop — Metal is fine.
-  if (Platform.isMacOS || Platform.isIOS) return true;
-
-  // Android typically has a GPU; don't strip motion.
-  if (Platform.isAndroid) return true;
 
   // Linux without known discrete nodes: ask GL once.
   if (Platform.isLinux) {

@@ -19,6 +19,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   flutter::DartProject project(L"data");
 
+  // Flutter 3.35+ merges the Windows UI + platform threads by default. That
+  // starves vsync / Dart timers so caret blink, typing dots, and Kolobok
+  // stickers freeze on the first frame while Linux/Android keep moving.
+  // Opt back out until the engine run-loop regressions are gone.
+  // https://github.com/flutter/flutter/issues/175135
+  project.set_ui_thread_policy(
+      flutter::UIThreadPolicy::RunOnSeparateThread);
+
   std::vector<std::string> command_line_arguments =
       GetCommandLineArguments();
 

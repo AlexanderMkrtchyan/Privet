@@ -1,7 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
-import '../util/agent_debug_log.dart';
 import '../util/low_resource.dart';
 
 /// Teams-style “someone is typing” row: pill bubble + bouncing dots.
@@ -18,9 +19,14 @@ class TypingIndicatorBubble extends StatefulWidget {
   State<TypingIndicatorBubble> createState() => _TypingIndicatorBubbleState();
 }
 
-class _TypingIndicatorBubbleState extends State<TypingIndicatorBubble>
-    with SingleTickerProviderStateMixin {
-  AnimationController? _controller;
+class _TypingIndicatorBubbleState extends State<TypingIndicatorBubble> {
+  /// Same period as the old AnimationController; advanced by a Dart [Timer]
+  /// so Windows merged-thread / idle-vsync stalls cannot freeze the dots.
+  static const Duration _loop = Duration(milliseconds: 1200);
+  static const Duration _tick = Duration(milliseconds: 32);
+
+  Timer? _timer;
+  double _t = 0.5;
 
   @override
   void initState() {
@@ -41,7 +47,7 @@ class _TypingIndicatorBubbleState extends State<TypingIndicatorBubble>
   @override
   void dispose() {
     privetLowResourceListenable.removeListener(_onLowResourceChanged);
-    _controller?.dispose();
+    _stop();
     super.dispose();
   }
 
@@ -52,36 +58,29 @@ class _TypingIndicatorBubbleState extends State<TypingIndicatorBubble>
   }
 
   void _applyReduceMotion(bool reduce) {
-    if (!reduce && _controller == null) {
-      _controller = AnimationController(
-        vsync: this,
-        duration: const Duration(milliseconds: 1200),
-      )..repeat();
-      // #region agent log
-      agentDebugLog(
-        hypothesisId: 'H5',
-        location: 'typing_indicator.dart:_applyReduceMotion',
-        message: 'typing AnimationController.repeat started',
-      );
-      // #endregion
+    if (!reduce && _timer == null) {
+      _timer = Timer.periodic(_tick, (_) {
+        if (!mounted) return;
+        setState(() {
+          _t = (_t + _tick.inMilliseconds / _loop.inMilliseconds) % 1.0;
+        });
+      });
       if (mounted) setState(() {});
-    } else if (reduce && _controller != null) {
-      _controller!.dispose();
-      _controller = null;
-      // #region agent log
-      agentDebugLog(
-        hypothesisId: 'H5',
-        location: 'typing_indicator.dart:_applyReduceMotion',
-        message: 'typing AnimationController stopped',
-      );
-      // #endregion
+    } else if (reduce && _timer != null) {
+      _stop();
       if (mounted) setState(() {});
     }
   }
 
+  void _stop() {
+    _timer?.cancel();
+    _timer = null;
+    _t = 0.5;
+  }
+
   @override
   Widget build(BuildContext context) {
-    final anim = _controller;
+    final animating = _timer != null;
     // Repaint boundary keeps the bouncing dots' per-frame repaint inside this
     // row instead of the whole message list layer.
     return RepaintBoundary(
@@ -118,12 +117,7 @@ class _TypingIndicatorBubbleState extends State<TypingIndicatorBubble>
                   ),
                   border: Border.all(color: PrivetTheme.line),
                 ),
-                child: anim == null
-                    ? const _TypingDots(t: 0.5)
-                    : AnimatedBuilder(
-                        animation: anim,
-                        builder: (context, _) => _TypingDots(t: anim.value),
-                      ),
+                child: _TypingDots(t: animating ? _t : 0.5),
               ),
             ],
           ),
