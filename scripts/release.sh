@@ -5,9 +5,8 @@
 #   3. Deploy web + downloads (incl. Android APK) to production.
 #   4. Commit release files, tag vX.Y.Z, push branch + tag to GitHub.
 #
-# The tag push triggers .github/workflows/release.yml, which compiles the
-# Windows installer with the bumped version automatically (it reads the
-# version straight from app/pubspec.yaml).
+# The tag push triggers .github/workflows/release.yml, which builds ONLY the
+# Windows .exe installer (Linux/Android stay local — see release.yml).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -95,5 +94,5 @@ echo "=== Done: Privet ${NEW_FULL} ==="
 echo "Tag pushed:            ${TAG}"
 echo "Production web:        https://messenger.banderdog.com/app/?v=${STAMP}"
 echo "Production Android:    https://messenger.banderdog.com/downloads/privet-android-${NEW_VERSION}.apk"
-echo "GitHub Release (Windows .exe) will be published by CI automatically."
+echo "GitHub CI will build/publish Windows .exe only (no Linux/Android on CI)."
 echo "Note: app/lib, app/pubspec.yaml, server/, scripts/ and .github/ changes are committed with the release so Linux fixes always reach GitHub."

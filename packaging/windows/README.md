@@ -22,7 +22,8 @@ Outputs:
 
 The installer is **unsigned**; Windows SmartScreen may show a warning until Authenticode signing is configured.
 
-CI builds this on `windows-latest` via `.github/workflows/release.yml`.
+CI builds **only** this Windows installer on `windows-latest` via
+`.github/workflows/release.yml` (Linux/Android are built locally, not in CI).
 
 ## In-app updates
 
