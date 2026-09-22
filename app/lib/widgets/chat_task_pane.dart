@@ -3726,6 +3726,10 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
     _ctrl.setFormatRuns(
       applyFormatToSelection(_ctrl.formatRuns, start, end, desired),
     );
+    // Color picks: collapse so the new character color is visible immediately.
+    if (background != null) {
+      _ctrl.selection = TextSelection.collapsed(offset: end);
+    }
   }
 
   void _clearFormat() {
@@ -3886,7 +3890,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog> {
                     ),
                   ),
                   _toolbarButton(
-                    tooltip: 'Highlight',
+                    tooltip: 'Color',
                     enabled: hasSelection,
                     onTap: () => _pickHighlight(context),
                     child: Icon(
@@ -4189,34 +4193,42 @@ class _TaskRowState extends State<_TaskRow> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (widget.reorderIndex != null)
-                    ReorderableDragStartListener(
-                      index: widget.reorderIndex!,
-                      child: MouseRegion(
-                        cursor: SystemMouseCursors.grab,
-                        child: Tooltip(
-                          message: 'Drag to reorder',
-                          child: Padding(
-                            padding: const EdgeInsets.only(top: 4, right: 2),
-                            child: Icon(
-                              Icons.drag_indicator_rounded,
-                              size: 20,
-                              color: PrivetTheme.mist.withValues(alpha: 0.7),
+              // Whole header toggles expand/collapse (not just the chevron).
+              // Interactive children (drag, checkbox, chips, actions, body text)
+              // keep their own handlers and win the tap arena.
+              MouseRegion(
+                cursor: _hasNested
+                    ? SystemMouseCursors.click
+                    : MouseCursor.defer,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _hasNested ? _toggleExpanded : null,
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (widget.reorderIndex != null)
+                        ReorderableDragStartListener(
+                          index: widget.reorderIndex!,
+                          child: MouseRegion(
+                            cursor: SystemMouseCursors.grab,
+                            child: Tooltip(
+                              message: 'Drag to reorder',
+                              child: Padding(
+                                padding:
+                                    const EdgeInsets.only(top: 4, right: 2),
+                                child: Icon(
+                                  Icons.drag_indicator_rounded,
+                                  size: 20,
+                                  color: PrivetTheme.mist
+                                      .withValues(alpha: 0.7),
+                                ),
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                    ),
-                  if (_hasNested)
-                    MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: Tooltip(
-                        message: _expanded ? 'Collapse' : 'Expand',
-                        child: GestureDetector(
-                          onTap: _toggleExpanded,
+                      if (_hasNested)
+                        Tooltip(
+                          message: _expanded ? 'Collapse' : 'Expand',
                           child: Padding(
                             padding: const EdgeInsets.only(top: 4),
                             child: AnimatedRotation(
@@ -4229,186 +4241,197 @@ class _TaskRowState extends State<_TaskRow> {
                               ),
                             ),
                           ),
-                        ),
-                      ),
-                    )
-                  else
-                    const SizedBox(width: 22),
-                  _NumberBadge(number: widget.number),
-                  const SizedBox(width: 8),
-                  if (widget.onToggle != null)
-                    MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: Tooltip(
-                        message: item.status == 'review'
-                            ? 'In review · tap to reopen'
-                            : 'Mark as done',
-                        child: GestureDetector(
-                          onTap: widget.onToggle,
-                          child: Padding(
-                            padding: const EdgeInsets.only(top: 2),
-                            child: Icon(
-                              checked
-                                  ? Icons.check_box_rounded
-                                  : Icons.check_box_outline_blank_rounded,
-                              color: checkColor,
-                              size: 22,
+                        )
+                      else
+                        const SizedBox(width: 22),
+                      _NumberBadge(number: widget.number),
+                      const SizedBox(width: 8),
+                      if (widget.onToggle != null)
+                        MouseRegion(
+                          cursor: SystemMouseCursors.click,
+                          child: Tooltip(
+                            message: item.status == 'review'
+                                ? 'In review · tap to reopen'
+                                : 'Mark as done',
+                            child: GestureDetector(
+                              onTap: widget.onToggle,
+                              child: Padding(
+                                padding: const EdgeInsets.only(top: 2),
+                                child: Icon(
+                                  checked
+                                      ? Icons.check_box_rounded
+                                      : Icons.check_box_outline_blank_rounded,
+                                  color: checkColor,
+                                  size: 22,
+                                ),
+                              ),
                             ),
                           ),
+                        )
+                      else
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Icon(
+                            Icons.check_box_rounded,
+                            color: PrivetTheme.signal.withValues(alpha: 0.5),
+                            size: 22,
+                          ),
                         ),
-                      ),
-                    )
-                  else
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Icon(
-                        Icons.check_box_rounded,
-                        color: PrivetTheme.signal.withValues(alpha: 0.5),
-                        size: 22,
-                      ),
-                    ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Expanded(
-                              child: Align(
-                                alignment: Alignment.centerLeft,
-                                child: LayoutBuilder(
-                                  builder: (context, constraints) =>
-                                      SelectableMarkupText(
-                                    text: item.body,
-                                    baseStyle: GoogleFonts.ibmPlexSans(
-                                      fontSize: widget.taskFontSize,
-                                      color: PrivetTheme.paper,
+                            Row(
+                              children: [
+                                Expanded(
+                                  // Absorb taps so selecting / formatting the
+                                  // body does not also expand/collapse.
+                                  child: GestureDetector(
+                                    onTap: () {},
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: LayoutBuilder(
+                                        builder: (context, constraints) =>
+                                            SelectableMarkupText(
+                                          text: item.body,
+                                          baseStyle: GoogleFonts.ibmPlexSans(
+                                            fontSize: widget.taskFontSize,
+                                            color: PrivetTheme.paper,
+                                          ),
+                                          maxWidth: constraints.maxWidth,
+                                          onFormat: widget.onFormatBody,
+                                        ),
+                                      ),
                                     ),
-                                    maxWidth: constraints.maxWidth,
-                                    onFormat: widget.onFormatBody,
                                   ),
                                 ),
+                                if (widget.progressLabel != null)
+                                  Padding(
+                                    padding: const EdgeInsets.only(left: 6),
+                                    child: Text(
+                                      widget.progressLabel!,
+                                      style: GoogleFonts.syne(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700,
+                                        color: PrivetTheme.signal,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.only(top: 3),
+                              child: Row(
+                                children: [
+                                  _TaskMetaChip(
+                                    label: _taskStatusLabel(item.status),
+                                    color: statusColor,
+                                    onTap: widget.onSetStatus != null
+                                        ? () => _openTaskMenu(
+                                              context: context,
+                                              item: item,
+                                              editable: !isHistory,
+                                              onSetStatus: widget.onSetStatus,
+                                              onSetPriority:
+                                                  widget.onSetPriority,
+                                              onAssign: widget.onAssign,
+                                              onShowDetails:
+                                                  widget.onShowDetails,
+                                            )
+                                        : null,
+                                    small: true,
+                                  ),
+                                  const SizedBox(width: 5),
+                                  _TaskMetaChip(
+                                    label: _taskPriorityLabel(item.priority),
+                                    color: _taskPriorityColor(item.priority),
+                                    icon: _taskPriorityIcon(item.priority),
+                                    onTap: () => _openTaskMenu(
+                                      context: context,
+                                      item: item,
+                                      editable: !isHistory,
+                                      onSetStatus: widget.onSetStatus,
+                                      onSetPriority: widget.onSetPriority,
+                                      onAssign: widget.onAssign,
+                                      onShowDetails: widget.onShowDetails,
+                                      onRestore: isHistory
+                                          ? widget.onRestore
+                                          : null,
+                                    ),
+                                    small: true,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text.rich(
+                                      TextSpan(
+                                        children: [
+                                          TextSpan(
+                                            text:
+                                                'Created ${_fmtTaskDate(item.createdAt)}',
+                                          ),
+                                          if (item.createdBy != null) ...[
+                                            const TextSpan(text: ' · '),
+                                            TextSpan(
+                                              text:
+                                                  'by ${item.createdBy!.displayName}',
+                                            ),
+                                          ],
+                                          if (item.assignedTo != null) ...[
+                                            const TextSpan(text: ' → '),
+                                            TextSpan(
+                                              text: item
+                                                  .assignedTo!.displayName,
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                      style: GoogleFonts.ibmPlexSans(
+                                        fontSize: 11,
+                                        color: PrivetTheme.mist
+                                            .withValues(alpha: 0.55),
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                      maxLines: 1,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
-                            if (widget.progressLabel != null)
-                              Padding(
-                                padding: const EdgeInsets.only(left: 6),
-                                child: Text(
-                                  widget.progressLabel!,
-                                  style: GoogleFonts.syne(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w700,
-                                    color: PrivetTheme.signal,
-                                  ),
-                                ),
-                              ),
                           ],
                         ),
-                        Padding(
-                          padding: const EdgeInsets.only(top: 3),
-                          child: Row(
-                            children: [
-                              _TaskMetaChip(
-                                label: _taskStatusLabel(item.status),
-                                color: statusColor,
-                                onTap: widget.onSetStatus != null
-                                    ? () => _openTaskMenu(
-                                          context: context,
-                                          item: item,
-                                          editable: !isHistory,
-                                          onSetStatus: widget.onSetStatus,
-                                          onSetPriority: widget.onSetPriority,
-                                          onAssign: widget.onAssign,
-                                          onShowDetails: widget.onShowDetails,
-                                        )
-                                    : null,
-                                small: true,
-                              ),
-                              const SizedBox(width: 5),
-                              _TaskMetaChip(
-                                label: _taskPriorityLabel(item.priority),
-                                color: _taskPriorityColor(item.priority),
-                                icon: _taskPriorityIcon(item.priority),
-                                onTap: () => _openTaskMenu(
-                                  context: context,
-                                  item: item,
-                                  editable: !isHistory,
-                                  onSetStatus: widget.onSetStatus,
-                                  onSetPriority: widget.onSetPriority,
-                                  onAssign: widget.onAssign,
-                                  onShowDetails: widget.onShowDetails,
-                                  onRestore: isHistory
-                                      ? widget.onRestore
-                                      : null,
-                                ),
-                                small: true,
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text.rich(
-                                  TextSpan(
-                                    children: [
-                                      TextSpan(
-                                        text:
-                                            'Created ${_fmtTaskDate(item.createdAt)}',
-                                      ),
-                                      if (item.createdBy != null) ...[
-                                        const TextSpan(text: ' · '),
-                                        TextSpan(
-                                          text:
-                                              'by ${item.createdBy!.displayName}',
-                                        ),
-                                      ],
-                                      if (item.assignedTo != null) ...[
-                                        const TextSpan(text: ' → '),
-                                        TextSpan(
-                                          text: item.assignedTo!.displayName,
-                                        ),
-                                      ],
-                                    ],
-                                  ),
-                                  style: GoogleFonts.ibmPlexSans(
-                                    fontSize: 11,
-                                    color: PrivetTheme.mist
-                                        .withValues(alpha: 0.55),
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                  maxLines: 1,
-                                ),
-                              ),
-                            ],
-                          ),
+                      ),
+                      _TaskRowActions(
+                        onAttach: !isHistory ? widget.onAttach : null,
+                        attachDisabled: media.length >= 10,
+                        pinned: item.pinned,
+                        onPin: widget.onPin,
+                        onEdit: widget.onSaveBody != null
+                            ? _openEditDialog
+                            : null,
+                        onDelete: widget.onDelete,
+                        onMore: () => _openTaskMenu(
+                          context: context,
+                          item: item,
+                          editable: !isHistory,
+                          onSetStatus: widget.onSetStatus,
+                          onSetPriority: widget.onSetPriority,
+                          onAssign: widget.onAssign,
+                          onShowDetails: widget.onShowDetails,
+                          onAttach: !isHistory ? widget.onAttach : null,
+                          attachDisabled: media.length >= 10,
+                          onEdit: widget.onSaveBody != null
+                              ? _openEditDialog
+                              : null,
+                          onDelete: widget.onDelete,
+                          onRestore: isHistory ? widget.onRestore : null,
                         ),
-                      ],
-                    ),
+                        onRestore: widget.onRestore,
+                        history: isHistory,
+                      ),
+                    ],
                   ),
-                  _TaskRowActions(
-                    onAttach: !isHistory ? widget.onAttach : null,
-                    attachDisabled: media.length >= 10,
-                    pinned: item.pinned,
-                    onPin: widget.onPin,
-                    onEdit: widget.onSaveBody != null ? _openEditDialog : null,
-                    onDelete: widget.onDelete,
-                    onMore: () => _openTaskMenu(
-                      context: context,
-                      item: item,
-                      editable: !isHistory,
-                      onSetStatus: widget.onSetStatus,
-                      onSetPriority: widget.onSetPriority,
-                      onAssign: widget.onAssign,
-                      onShowDetails: widget.onShowDetails,
-                      onAttach: !isHistory ? widget.onAttach : null,
-                      attachDisabled: media.length >= 10,
-                      onEdit:
-                          widget.onSaveBody != null ? _openEditDialog : null,
-                      onDelete: widget.onDelete,
-                      onRestore: isHistory ? widget.onRestore : null,
-                    ),
-                    onRestore: widget.onRestore,
-                    history: isHistory,
-                  ),
-                ],
+                ),
               ),
               if (_expanded && media.isNotEmpty)
                 Padding(

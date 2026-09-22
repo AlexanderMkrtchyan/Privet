@@ -46,7 +46,7 @@ function serverApiKey() {
 
 /**
  * @param {string} prompt
- * @param {{ apiKey?: string, model?: string, baseUrl?: string, maxTokens?: number, temperature?: number }} [opts]
+ * @param {{ apiKey?: string, model?: string, baseUrl?: string, maxTokens?: number, temperature?: number, json?: boolean }} [opts]
  */
 export async function generateOpenAiCompatText(prompt, opts = {}) {
   const userKey = opts.apiKey?.trim() || '';
@@ -83,46 +83,93 @@ export async function generateOpenAiCompatText(prompt, opts = {}) {
       ? opts.temperature
       : 0.4;
 
-  const res = await fetch(`${base}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are Privet AI, a private messenger assistant. Be concise.',
-        },
-        { role: 'user', content: prompt },
-      ],
-      temperature,
-      max_tokens: maxTokens,
-    }),
-  });
+  const systemContent = opts.json
+    ? 'You are Privet AI. Reply with a single valid JSON object only — no markdown fences, no preamble.'
+    : 'You are Privet AI, a private messenger assistant. Be concise.';
 
-  const raw = await res.text();
-  if (!res.ok) {
-    const err = new Error(`AI provider ${res.status}: ${raw.slice(0, 280)}`);
-    err.status = res.status;
-    throw err;
-  }
+  const post = (jsonMode) =>
+    fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: systemContent,
+          },
+          { role: 'user', content: prompt },
+        ],
+        temperature,
+        max_tokens: maxTokens,
+        ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+      }),
+    });
 
-  let json;
-  try {
-    json = JSON.parse(raw);
-  } catch {
-    throw new Error('AI provider returned invalid JSON');
-  }
+  let res = await post(!!opts.json);
+  // Some OpenAI-compatible hosts reject response_format — the prompt still asks for JSON.
+  if (opts.json && res.status === 400) res = await post(false);
 
-  const text = json?.choices?.[0]?.message?.content;
-  if (!text?.trim()) {
-    throw new Error('AI provider returned empty text');
+  const readBody = async (response) => {
+    const raw = await response.text();
+    if (!response.ok) {
+      const err = new Error(`AI provider ${response.status}: ${raw.slice(0, 280)}`);
+      err.status = response.status;
+      throw err;
+    }
+    let json;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      throw new Error('AI provider returned invalid JSON');
+    }
+    return extractCompatMessageText(json);
+  };
+
+  let text = await readBody(res);
+  // DeepSeek / some compat models occasionally return empty content on the
+  // first try (especially longer prompts). One plain retry usually recovers.
+  if (!text) {
+    res = await post(false);
+    text = await readBody(res);
   }
-  return text.trim();
+  if (!text) {
+    throw new Error('Coach came back empty-handed — try again');
+  }
+  return text;
+}
+
+/**
+ * Pull assistant text from OpenAI-compat chat.completions payloads.
+ * Handles string content, multipart content arrays, and a few vendor quirks.
+ * @param {any} json
+ * @returns {string}
+ */
+function extractCompatMessageText(json) {
+  const msg = json?.choices?.[0]?.message;
+  if (!msg || typeof msg !== 'object') return '';
+  const content = msg.content;
+  if (typeof content === 'string' && content.trim()) return content.trim();
+  if (Array.isArray(content)) {
+    const joined = content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (part && typeof part.text === 'string') return part.text;
+        if (part && typeof part.content === 'string') return part.content;
+        return '';
+      })
+      .join('');
+    if (joined.trim()) return joined.trim();
+  }
+  // Rare: some gateways put the final answer in a sibling field.
+  for (const key of ['output_text', 'result', 'answer']) {
+    const v = msg[key];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return '';
 }
 
 /** True when server env has an OpenAI-compatible key (DeepSeek or OPENAI_COMPAT_*). */

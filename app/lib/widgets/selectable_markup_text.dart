@@ -16,6 +16,18 @@ import '../util/rich_text_markup.dart';
 import '../util/web_select_cursor.dart';
 import 'message_font_picker.dart';
 
+/// Pull a selection/highlight rect in so the tint hugs glyph ink instead of
+/// the full line metrics (which stick out above/below characters).
+Rect privetTightInkRect(Rect r, {double verticalInset = 1.75}) {
+  if (r.height <= verticalInset * 2 + 2) return r;
+  return Rect.fromLTRB(
+    r.left,
+    r.top + verticalInset,
+    r.right,
+    r.bottom - verticalInset,
+  );
+}
+
 /// Shared, host-agnostic selection state for [SelectableMarkupText].
 ///
 /// Messages (chat list) and tasks (task pane) both render through
@@ -633,7 +645,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     final end = sel.end.clamp(0, parsed.plainText.length);
     if (end <= start) return;
     final cur = selectionFormat(parsed.runs, start, end);
-    // Colors.transparent means "remove the highlight".
+    // Colors.transparent means "remove the text color".
     final bg = background == Colors.transparent
         ? null
         : (background ?? cur.background);
@@ -945,7 +957,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
       return;
     }
 
-    // Mouseup: force a frame so the green highlight is visible immediately
+    // Mouseup: force a frame so the selection highlight is visible immediately
     // (without needing to leave the text / end hover).
     if (mounted) setState(() {});
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -960,7 +972,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
 
   @override
   Widget build(BuildContext context) {
-    // Desktop / wide web: custom TextPainter selection (green highlight).
+    // Desktop / wide web: custom TextPainter selection (theme signal tint).
     // Mobile / compact: tap only — no drag-select (matches typical mobile
     // messengers).
     return _buildWebBody(
@@ -1161,19 +1173,27 @@ class _WebMessageTextPainter extends CustomPainter {
     if (verticalPad != 0) {
       canvas.translate(0, verticalPad);
     }
+    // Paint glyphs first, then the theme selection tint on top.
+    // Boxes are tight + slightly inset so the tint stays inside the characters.
+    textPainter.paint(canvas, Offset.zero);
+    _paintSmileys(canvas);
     final selection = getSelection();
     if (selection.isValid && !selection.isCollapsed) {
-      final boxes = textPainter.getBoxesForSelection(selection);
+      final boxes = textPainter.getBoxesForSelection(
+        selection,
+        boxHeightStyle: ui.BoxHeightStyle.tight,
+        boxWidthStyle: ui.BoxWidthStyle.tight,
+      );
       final paint = Paint()..color = PrivetTheme.signal.withValues(alpha: 0.45);
       for (final box in boxes) {
+        final rect = privetTightInkRect(box.toRect());
+        if (rect.width <= 0 || rect.height <= 0) continue;
         canvas.drawRRect(
-          RRect.fromRectAndRadius(box.toRect(), const Radius.circular(2)),
+          RRect.fromRectAndRadius(rect, const Radius.circular(2)),
           paint,
         );
       }
     }
-    textPainter.paint(canvas, Offset.zero);
-    _paintSmileys(canvas);
     canvas.restore();
   }
 
@@ -1442,7 +1462,7 @@ class MarkupSelectionBar extends StatelessWidget {
                 onTap: () => onFormat!(italic: true),
               ),
               action(
-                tooltip: 'Highlight',
+                tooltip: 'Color',
                 onTap: pickHighlight,
                 child: Icon(
                   Icons.border_color_rounded,

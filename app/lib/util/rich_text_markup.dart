@@ -8,25 +8,60 @@ import 'package:google_fonts/google_fonts.dart';
 /// Tag set (lower-case):
 ///
 ///   [b]bold[/b]                [i]italic[/i]
-///   [bg]highlight[/bg]         [bg=#RRGGBB]highlight[/bg]
+///   [bg]colored[/bg]           [bg=#RRGGBB]colored[/bg]  (character color)
 ///   [font=monospace]…[/font]   font family (see [kMessageFonts])
 ///
 /// The composer keeps formatting as [FormatRun]s over the raw text and
 /// serializes to this markup on send; message bubbles parse it back into styled
 /// [TextSpan]s. Escapes: `\[` renders a literal `[`, `\\` renders `\`.
 
-/// Default highlight color (yellow), used by the plain `[bg]` tag.
-const Color kDefaultHighlight = Color(0xFFFFEB3B);
+/// Default text-color for a plain `[bg]` tag — same seed as [PrivetTheme.defaultAccent].
+const Color kDefaultHighlight = Color(0xFFB6F24A);
 
-/// Palette offered by the Highlight/Redact pickers.
+/// Palette offered by the text-color pickers — solid accent seeds plus black /
+/// white and the special yellow / fluffy (larva) accents.
 const List<Color> kHighlightColors = [
-  Color(0xFFFFEB3B), // yellow
-  Color(0xFF7BD86E), // green
-  Color(0xFF4FC3F7), // blue
-  Color(0xFFFFB74D), // orange
-  Color(0xFFF48FB1), // pink
-  Color(0xFFBA68C8), // purple
+  Color(0xFF16181B), // Black
+  Color(0xFFFFFFFF), // White
+  Color(0xFFB6F24A), // Signal
+  Color(0xFF10B981), // Emerald
+  Color(0xFF06B6D4), // Cyan
+  Color(0xFF3B82F6), // Azure
+  Color(0xFF8B5CF6), // Violet
+  Color(0xFFD946A6), // Magenta
+  Color(0xFFF43F5E), // Rose
+  Color(0xFFF59E0B), // Amber
+  Color(0xFFF0D000), // Yellow
+  Color(0xFFE6D392), // Fluffy (Larva)
+  Color(0xFF39FF14), // Hacker
 ];
+
+/// Human labels for [kHighlightColors] (ARGB32 → name). Unknown colors fall
+/// back to a `#RRGGBB` hex in the picker.
+const Map<int, String> kHighlightColorLabels = {
+  0xFF16181B: 'Black',
+  0xFFFFFFFF: 'White',
+  0xFFB6F24A: 'Signal',
+  0xFF10B981: 'Emerald',
+  0xFF06B6D4: 'Cyan',
+  0xFF3B82F6: 'Azure',
+  0xFF8B5CF6: 'Violet',
+  0xFFD946A6: 'Magenta',
+  0xFFF43F5E: 'Rose',
+  0xFFF59E0B: 'Amber',
+  0xFFF0D000: 'Yellow',
+  0xFFE6D392: 'Fluffy',
+  0xFF39FF14: 'Hacker',
+};
+
+String highlightColorLabel(Color color) {
+  final key = color.toARGB32();
+  final named = kHighlightColorLabels[key];
+  if (named != null) return named;
+  final hex =
+      (key & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase();
+  return '#$hex';
+}
 
 /// Font families offered by the message font picker, in display order.
 ///
@@ -152,11 +187,9 @@ class TextFormat {
     if (bold) s = s.copyWith(fontWeight: FontWeight.w700);
     if (italic) s = s.copyWith(fontStyle: FontStyle.italic);
     if (background != null) {
-      // Light highlighter fills need dark text to stay readable on dark chat.
-      s = s.copyWith(
-        backgroundColor: background,
-        color: const Color(0xFF16181B),
-      );
+      // Stored as [bg=#…] in markup; rendered as character color (not a
+      // highlighter fill behind the glyphs).
+      s = s.copyWith(color: background);
     }
     final family = fontFamily;
     if (family != null && family.isNotEmpty) {
@@ -443,7 +476,34 @@ String _openFor(String name, TextFormat f) {
 
 const List<String> _tagOrder = ['b', 'i', 'bg', 'font'];
 
+/// Active tags for [f], always nested in [_tagOrder] (outer → inner).
+List<String> _activeTags(TextFormat f) {
+  final tags = <String>[];
+  for (final name in _tagOrder) {
+    if (_hasAttr(f, name)) tags.add(name);
+  }
+  return tags;
+}
+
+/// Whether [a] and [b] share the same value for [name] (booleans need only
+/// presence; [bg]/[font] compare their attribute values).
+bool _sameAttrValue(TextFormat a, TextFormat b, String name) {
+  switch (name) {
+    case 'bg':
+      return a.background == b.background;
+    case 'font':
+      return a.fontFamily == b.fontFamily;
+    default:
+      return true;
+  }
+}
+
 /// Serializes [plain] + [runs] into the stored markup form.
+///
+/// Tags always nest in [_tagOrder]. When an outer attribute ends while an
+/// inner one continues (e.g. bold ends mid-highlight), the inner tags are
+/// closed and reopened so the markup stays well-formed — otherwise the
+/// parser treats stray `[/b]` / `[/bg]` as literal text.
 String serializeMarkup(String plain, List<FormatRun> runs) {
   final normalized = _normalize(runs);
   if (normalized.isEmpty) return escapeMarkupText(plain);
@@ -457,31 +517,39 @@ String serializeMarkup(String plain, List<FormatRun> runs) {
 
   final out = StringBuffer();
   TextFormat prev = TextFormat.empty;
+  var prevTags = <String>[];
   for (var i = 0; i < pts.length - 1; i++) {
     final a = pts[i];
     final b = pts[i + 1];
     if (b <= a) continue;
     final cur = _formatCovering(normalized, a, b);
+    final curTags = _activeTags(cur);
 
     if (cur != prev) {
-      // Close attributes that are going away, then open new ones.
-      for (final name in _tagOrder.reversed) {
-        if (_hasAttr(prev, name) && !_hasAttr(cur, name)) {
-          out.write('[/$name]');
-        }
+      // Longest common outer prefix (same tag + same value).
+      var common = 0;
+      while (common < prevTags.length && common < curTags.length) {
+        final name = prevTags[common];
+        if (name != curTags[common]) break;
+        if (!_sameAttrValue(prev, cur, name)) break;
+        common++;
       }
-      for (final name in _tagOrder) {
-        if (!_hasAttr(prev, name) && _hasAttr(cur, name)) {
-          out.write(_openFor(name, cur));
-        }
+      // Close from innermost of prev down past the common prefix.
+      for (var t = prevTags.length - 1; t >= common; t--) {
+        out.write('[/${prevTags[t]}]');
+      }
+      // Open new inner tags for cur.
+      for (var t = common; t < curTags.length; t++) {
+        out.write(_openFor(curTags[t], cur));
       }
     }
     out.write(escapeMarkupText(plain.substring(a, b)));
     prev = cur;
+    prevTags = curTags;
   }
   // Close any remaining open tags.
-  for (final name in _tagOrder.reversed) {
-    if (_hasAttr(prev, name)) out.write('[/$name]');
+  for (var t = prevTags.length - 1; t >= 0; t--) {
+    out.write('[/${prevTags[t]}]');
   }
   return out.toString();
 }

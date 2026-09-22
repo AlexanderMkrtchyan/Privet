@@ -61,7 +61,7 @@ export function serverAiStatus() {
 /**
  * Prefer a user-supplied key when present; otherwise OpenAI-compat env then Gemini.
  * @param {string} prompt
- * @param {{ apiKey?: string | null, model?: string | null, baseUrl?: string | null, maxTokens?: number, temperature?: number, disableThinking?: boolean }} [opts]
+ * @param {{ apiKey?: string | null, model?: string | null, baseUrl?: string | null, maxTokens?: number, temperature?: number, disableThinking?: boolean, json?: boolean }} [opts]
  * @returns {Promise<{ text: string, provider: string, model: string }>}
  */
 export async function generateText(prompt, opts = {}) {
@@ -99,6 +99,7 @@ export async function generateText(prompt, opts = {}) {
       baseUrl,
       maxTokens: opts.maxTokens,
       temperature: opts.temperature,
+      json: opts.json,
     });
     return { text, provider: 'openai', model: modelOverride };
   }
@@ -123,6 +124,7 @@ export async function generateText(prompt, opts = {}) {
         baseUrl: baseUrl || undefined,
         maxTokens: opts.maxTokens,
         temperature: opts.temperature,
+        json: opts.json,
       });
       return { text, provider: 'openai', model };
     } catch (err) {
@@ -157,6 +159,7 @@ export async function generateText(prompt, opts = {}) {
           baseUrl: baseUrl || undefined,
           maxTokens: opts.maxTokens,
           temperature: opts.temperature,
+          json: opts.json,
         });
         return { text, provider: 'openai', model };
       }

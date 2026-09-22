@@ -204,9 +204,6 @@ class GreetingPools {
     String? englishCategory,
     List<String> avoid = const [],
   }) {
-    final hi = (firstName != null && firstName.isNotEmpty)
-        ? 'Hi, $firstName,'
-        : 'Hi there,';
     final avoidSet = {
       for (final a in avoid) a.toLowerCase().trim(),
     }..removeWhere((s) => s.isEmpty);
@@ -214,30 +211,66 @@ class GreetingPools {
     final resolved =
         style == GreetingStyle.random ? GreetingStyle.sayHi : style;
 
-    switch (resolved) {
+    // Say hi: greet by name, then a random offline category body.
+    if (resolved == GreetingStyle.sayHi) {
+      final hi = (firstName != null && firstName.isNotEmpty)
+          ? 'Hi, $firstName'
+          : 'Hi there';
+      final extras = GreetingStyleX.concrete;
+      final contentStyle = extras[_rng.nextInt(extras.length)];
+      final body = _composeBody(
+        style: contentStyle,
+        philosopher: contentStyle == GreetingStyle.philosophy
+            ? (philosopher ?? GreetingStyleX.pickPhilosopher())
+            : philosopher,
+        jokeCategory: contentStyle == GreetingStyle.joke ? jokeCategory : null,
+        englishCategory:
+            contentStyle == GreetingStyle.english ? englishCategory : null,
+        avoidSet: avoidSet,
+      );
+      if (body.isEmpty) return '$hi.';
+      if (body.contains('\n')) return '$hi,\n\n$body';
+      return '$hi, $body';
+    }
+
+    // Category chips: content only — no “Hi, Name”.
+    return _composeBody(
+      style: resolved,
+      philosopher: philosopher,
+      jokeCategory: jokeCategory,
+      englishCategory: englishCategory,
+      avoidSet: avoidSet,
+    );
+  }
+
+  /// Body text for a category style (no greeting prefix).
+  String _composeBody({
+    required GreetingStyle style,
+    String? philosopher,
+    String? jokeCategory,
+    String? englishCategory,
+    required Set<String> avoidSet,
+  }) {
+    switch (style) {
       case GreetingStyle.sayHi:
       case GreetingStyle.random:
-        return hi.endsWith(',') ? '${hi.substring(0, hi.length - 1)}.' : '$hi.';
+        return '';
       case GreetingStyle.joke:
         final pool = _jokePoolFor(jokeCategory);
-        if (pool.isEmpty) return hi;
-        final joke = _pickFresh(pool, avoidSet);
-        return '$hi $joke';
+        if (pool.isEmpty) return '';
+        return _pickFresh(pool, avoidSet);
       case GreetingStyle.warm:
-        final line = _pickFresh(warm, avoidSet);
-        return '$hi $line';
+        return _pickFresh(warm, avoidSet);
       case GreetingStyle.punchy:
-        final line = _pickFresh(punchy, avoidSet);
-        return '$hi $line';
+        return _pickFresh(punchy, avoidSet);
       case GreetingStyle.english:
         final pool = _englishPoolFor(englishCategory);
-        if (pool.isEmpty) return hi;
+        if (pool.isEmpty) return '';
         final line = _pickFresh(pool, avoidSet);
-        return '$hi\n[English lesson]\n$line';
+        return '[Grammar]\n$line';
       case GreetingStyle.work:
-        if (work.isEmpty) return hi;
+        if (work.isEmpty) return '';
         final pick = _pick(work);
-        // Prefer unused text when possible.
         final candidates = work.where((w) {
           final low = w.text.toLowerCase();
           for (final a in avoidSet) {
@@ -250,29 +283,26 @@ class GreetingPools {
         final who = w.author.isNotEmpty && w.author != 'Unknown'
             ? w.author
             : null;
-        return who == null
-            ? '$hi\n\n"${w.text}"'
-            : '$hi\n\n"${w.text}"\n— $who';
+        return who == null ? '"${w.text}"' : '"${w.text}"\n— $who';
       case GreetingStyle.philosophy:
         final name = (philosopher != null && philosopher.trim().isNotEmpty)
             ? philosopher.trim()
             : GreetingStyleX.pickPhilosopher();
         final pool = philosophy[name] ?? const <String>[];
         if (pool.isEmpty) {
-          // Fallback: any philosopher with quotes.
           final nonempty = philosophy.entries
               .where((e) => e.value.isNotEmpty)
               .toList();
-          if (nonempty.isEmpty) return hi;
+          if (nonempty.isEmpty) return '';
           final entry = _pick(nonempty);
           final q = _pickFresh(entry.value, avoidSet);
-          return '$hi\n\n"$q"\n— ${entry.key}';
+          return '"$q"\n— ${entry.key}';
         }
         final q = _pickFresh(pool, avoidSet);
-        return '$hi\n\n"$q"\n— $name';
+        return '"$q"\n— $name';
       case GreetingStyle.ai:
         // AI path is handled by the network caller.
-        return hi;
+        return '';
     }
   }
 }

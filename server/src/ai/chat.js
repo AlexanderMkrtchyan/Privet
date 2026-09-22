@@ -60,6 +60,20 @@ export function parseAiInput(input) {
     const name = rest.slice('greet-draft'.length).trim();
     return { type: 'greet_draft', name: name || null };
   }
+  // English trainer — pre-send grammar check (text after the command line).
+  if (/^english-check(\s|$)/.test(lower)) {
+    return {
+      type: 'english_check',
+      text: rest.slice('english-check'.length).trim(),
+    };
+  }
+  // English trainer — CEFR level review (JSON payload after the command line).
+  if (/^english-level(\s|$)/.test(lower)) {
+    return {
+      type: 'english_level',
+      payload: rest.slice('english-level'.length).trim(),
+    };
+  }
   return { type: 'ask', question: rest };
 }
 
@@ -183,6 +197,97 @@ function assertRateLimit(userId) {
   lastCallByUser.set(userId, now);
 }
 
+/** @type {Map<string, number>} */
+const lastTrainerCallByUser = new Map();
+// Pre-send checks run on every English message, so they get a shorter gap.
+const TRAINER_MIN_GAP_MS = 1200;
+
+function assertTrainerRateLimit(userId) {
+  const now = Date.now();
+  const prev = lastTrainerCallByUser.get(userId) ?? 0;
+  if (now - prev < TRAINER_MIN_GAP_MS) {
+    throw new Error('Slow down — the coach is still catching its breath');
+  }
+  lastTrainerCallByUser.set(userId, now);
+}
+
+const TRAINER_ISSUE_TYPES =
+  'tense | article | preposition | agreement | word_order | word_choice | spelling | plural | punctuation | capitalization | missing_word | extra_word | other';
+
+export function englishCheckPrompt(text) {
+  return `You are "Coach", a witty, warm personal English trainer inside a chat app.
+The user is a non-native speaker practising English by chatting. Check the message below BEFORE they send it.
+
+Return ONLY a JSON object, no markdown, with exactly these keys:
+{
+  "corrected": string,      // ORIGINAL with ONLY the listed issue fixes applied — same words, tone, slang, emoji, line breaks; do NOT paraphrase
+  "issues": [               // [] when the message is fine
+    {
+      "wrong": string,      // exact substring copied from the ORIGINAL message (shortest span that shows the error)
+      "right": string,      // replacement for that span
+      "type": string,       // one of: ${TRAINER_ISSUE_TYPES}
+      "severity": "major" | "minor",
+      "why": string,        // plain-English rule, max 18 words, no jargon soup
+      "example": string     // one short NEW correct sentence using the same rule
+    }
+  ],
+  "natural": string,        // optional freer native-sounding rewrite; "" if already natural. NEVER put this rewrite in "corrected"
+  "quip": string,           // one playful coach line, max 14 words, kind (tease the mistake, never the person)
+  "cefr": "A1" | "A2" | "B1" | "B2" | "C1" | "C2"  // level this single message shows
+}
+
+Rules:
+- This is casual chat. Do NOT flag: missing final period, lowercase first letter of a message, emoji, common chat shorthand (lol, btw, u, ok, pls), contractions, informal tone.
+- DO flag real grammar, spelling, word choice, articles, prepositions, tenses, agreement, word order — even in casual text.
+- Lowercase "i" as a pronoun is severity "minor". Spelling slips and missing commas are "minor". Anything that breaks grammar or meaning is "major".
+- Never invent issues. If unsure, leave it out. Names, brands, code, URLs and non-English words are not errors.
+- One issue per distinct mistake. "wrong" must appear verbatim in the original.
+- "corrected" is a surgical edit: apply each issue's right-text into the original. Keep question shape, "bro", emoji, line breaks. Put any nicer rephrase only in "natural".
+- If there are no issues, "corrected" equals the original exactly.
+
+Message:
+<<<
+${text}
+>>>`;
+}
+
+export function englishLevelPrompt(payload) {
+  return `You are "Coach", a witty but honest personal English trainer.
+Grade the user's written English on the CEFR scale (A1, A2, B1, B2, C1, C2 — C2 means fluent / near-native) from their recent chat messages below.
+Judge grammar accuracy, vocabulary range, sentence complexity, and naturalness. Casual chat style is fine — do not punish shorthand or missing periods.
+Each sample shows the original text and how many mistakes the checker found. Weigh recent samples a bit more.
+
+Return ONLY a JSON object, no markdown, with exactly these keys:
+{
+  "level": "A1" | "A2" | "B1" | "B2" | "C1" | "C2",
+  "progress": number,          // 0–100: how far through that level they are (80+ means close to the next)
+  "title": string,             // a funny 2–4 word nickname for their current style, e.g. "Article Assassin in Training"
+  "verdict": string,           // 2 short sentences: honest summary with a little humour
+  "strengths": [string],       // 2–3 items, each max 12 words
+  "weaknesses": [string],      // 2–3 items, each max 12 words, name the concrete rule
+  "nextGoal": string,          // one concrete thing to master to reach the next level, max 20 words
+  "drills": [                  // exactly 3 quick exercises targeting their weaknesses
+    { "prompt": string, "answer": string, "tip": string }  // prompt is a fill-in-the-gap or fix-this sentence; tip max 14 words
+  ]
+}
+
+Data (JSON):
+${payload}`;
+}
+
+function clampTrainerText(text, max) {
+  const s = String(text || '').trim();
+  return s.length > max ? s.slice(0, max) : s;
+}
+
+/** Soft cap for one pre-send check — longer replies need a bigger token budget. */
+const TRAINER_CHECK_MAX_CHARS = 6000;
+
+function trainerCheckMaxTokens(bodyLen) {
+  // Base JSON + corrected copy of the message + a handful of issue objects.
+  return Math.min(3600, 1400 + Math.ceil(bodyLen / 2));
+}
+
 /**
  * @param {{ conversationId: string, userId: string, input: string, since?: string | null, apiKey?: string | null, model?: string | null, baseUrl?: string | null }} params
  */
@@ -201,6 +306,41 @@ export async function runPrivetAi({
   }
   if (parsed.type === 'help') {
     return { text: HELP_TEXT, meta: { kind: 'help' } };
+  }
+
+  if (parsed.type === 'english_check' || parsed.type === 'english_level') {
+    assertTrainerRateLimit(userId);
+    const isCheck = parsed.type === 'english_check';
+    const rawBody = String(
+      (isCheck ? parsed.text : parsed.payload) || '',
+    ).trim();
+    if (!rawBody) throw new Error('Nothing to review');
+    if (isCheck && rawBody.length > TRAINER_CHECK_MAX_CHARS) {
+      throw new Error(
+        `Message too long for Coach (max ${TRAINER_CHECK_MAX_CHARS} characters) — shorten it or turn Coach off`,
+      );
+    }
+    const body = isCheck
+      ? rawBody
+      : clampTrainerText(rawBody, 24000);
+    const { text, provider, model: usedModel } = await generateText(
+      isCheck ? englishCheckPrompt(body) : englishLevelPrompt(body),
+      {
+        apiKey,
+        model,
+        baseUrl,
+        maxTokens: isCheck ? trainerCheckMaxTokens(body.length) : 1400,
+        temperature: isCheck ? 0.2 : 0.5,
+        disableThinking: true,
+        // Prompt already demands JSON. response_format breaks some DeepSeek
+        // models while greet (no json mode) still works with the same key.
+        json: false,
+      },
+    );
+    return {
+      text,
+      meta: { kind: parsed.type, messageCount: 0, provider, model: usedModel },
+    };
   }
 
   assertRateLimit(userId);

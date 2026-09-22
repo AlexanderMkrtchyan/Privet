@@ -222,15 +222,15 @@ class _FontPickerOverlay extends StatelessWidget {
   }
 }
 
-/// Opens the highlight-color popup anchored to the global rect of the calling
+/// Opens the text-color popup anchored to the global rect of the calling
 /// button/bar. Resolves with the picked color (or [Colors.transparent] for
-/// "Remove highlight") or null when dismissed.
+/// "Remove color") or null when dismissed.
 ///
 /// Unlike Flutter's built-in `showMenu` — whose flip-above math lets the menu
 /// overlap the anchor button and the text below it — this renders as its own
 /// top-level [OverlayEntry] (like [showMessageFontPicker]) and is placed above
 /// the anchor when it fits on screen, else below, so it never covers the bar
-/// or the highlighted selection.
+/// or the colored selection.
 Future<Color?> showMessageHighlightPicker(
   BuildContext context, {
   required Rect anchor,
@@ -282,7 +282,7 @@ class _HighlightPickerOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final rows = 1 + kHighlightColors.length; // "Remove highlight" + colors
+    final rows = 1 + kHighlightColors.length; // "Remove color" + colors
     final menuHeight = _itemHeight * rows + 1; // + divider
     // Keep the menu on-screen: cap its height and scroll on small windows.
     final height = menuHeight < screenSize.height - 16
@@ -388,13 +388,11 @@ class _HighlightPickerOverlay extends StatelessWidget {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  isRemove
-                      ? 'Remove highlight'
-                      : '#${(color.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}',
+                  isRemove ? 'Remove color' : highlightColorLabel(color),
                   style: GoogleFonts.ibmPlexSans(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
-                    color: isRemove ? PrivetTheme.paper : PrivetTheme.paper,
+                    color: PrivetTheme.paper,
                   ),
                 ),
               ),

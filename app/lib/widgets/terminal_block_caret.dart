@@ -53,6 +53,8 @@ class _TerminalBlockCaretState extends State<TerminalBlockCaret> {
       PrivetTheme.accentOptions.map((o) => o.seed).toList(growable: false);
 
   Color get _color {
+    // Rainbow idle cycle is a flourish — skip under Low RAM & CPU / a11y.
+    // Blink itself always runs (see [_ensureBlink]); a 600ms Timer is cheap.
     if (!_cycleColors || _animationsDisabled) return PrivetTheme.signal;
     final colors = _palette;
     if (colors.isEmpty) return PrivetTheme.signal;
@@ -153,7 +155,10 @@ class _TerminalBlockCaretState extends State<TerminalBlockCaret> {
   }
 
   void _ensureBlink() {
-    if (!_shouldShow || _animationsDisabled) {
+    // Always blink when focused — do not gate on MediaQuery.disableAnimations
+    // / Low RAM & CPU. A periodic Timer + one setState is negligible; freezing
+    // the caret made the composer feel dead on weak GPUs.
+    if (!_shouldShow) {
       _stopBlink();
       return;
     }
@@ -170,7 +175,7 @@ class _TerminalBlockCaretState extends State<TerminalBlockCaret> {
       setState(() {
         _lit = !_lit;
         // Rainbow only after idle — each lit flash steps the accent list.
-        if (_lit && _cycleColors) {
+        if (_lit && _cycleColors && !_animationsDisabled) {
           final n = _palette.length;
           if (n > 0) _colorIndex = (_colorIndex + 1) % n;
         }
@@ -187,8 +192,9 @@ class _TerminalBlockCaretState extends State<TerminalBlockCaret> {
 
   @override
   Widget build(BuildContext context) {
+    // Read so we rebuild when Low RAM & CPU flips (color cycle on/off).
     final _ = MediaQuery.disableAnimationsOf(context);
-    final visible = _shouldShow && (_lit || _animationsDisabled);
+    final visible = _shouldShow && _lit;
     return CustomPaint(
       key: _paintKey,
       painter: _TerminalBlockCaretPainter(

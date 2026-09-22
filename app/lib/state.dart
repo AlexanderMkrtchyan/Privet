@@ -20,6 +20,7 @@ import 'util/ai_turn.dart';
 import 'util/display_capture.dart';
 import 'util/display_rate.dart';
 import 'util/emoticon_expand.dart';
+import 'util/english_trainer.dart';
 import 'util/custom_shortcodes.dart';
 import 'util/gpu_capability.dart';
 import 'util/greeting_style.dart';
@@ -2456,12 +2457,18 @@ class PrivetState extends ChangeNotifier {
   /// until the user turns it back on — no day-roll or idle auto-show.
   bool greetingButtonEnabled = true;
 
+  /// English personal trainer: grammar check before each English send.
+  bool englishTrainerEnabled = false;
+
+  /// Device-local trainer progress (streaks, XP, mistakes, last grade).
+  TrainerStats trainerStats = TrainerStats();
+
   /// Recent greeting drafts by style(+philosopher) so regenerate stays fresh.
   final Map<String, List<String>> _recentGreetingDrafts = {};
   static const int _maxRecentGreetingDrafts = 6;
 
   /// Local-only greeting names keyed by peer user id (device-local).
-  /// Used by the Hi button so drafts say "Hi, Geoffrey," instead of their handle.
+  /// Used by Say hi so drafts address “Hi, Geoffrey,” instead of their handle.
   final Map<String, String> _contactGreetingNames = {};
 
   /// Auto-fix common typos, red-underline misspelled words, and use the native
@@ -2894,6 +2901,10 @@ class PrivetState extends ChangeNotifier {
     greetingButtonEnabled =
         prefs.getBool('privet_greeting_button_enabled') ?? true;
     _loadContactGreetingNames(prefs);
+    englishTrainerEnabled =
+        prefs.getBool('privet_english_trainer_enabled') ?? false;
+    trainerStats =
+        TrainerStats.decode(prefs.getString('privet_english_trainer_stats'));
     if (greetingButtonEnabled) {
       unawaited(GreetingPools.load());
     }
@@ -3030,6 +3041,107 @@ class PrivetState extends ChangeNotifier {
     if (value) unawaited(GreetingPools.load());
     final prefs = await _prefs();
     await prefs.setBool('privet_greeting_button_enabled', value);
+  }
+
+  bool get trainerAiAvailable => aiActive || serverAiConfigured;
+
+  Future<void> setEnglishTrainerEnabled(bool value) async {
+    if (englishTrainerEnabled == value) return;
+    englishTrainerEnabled = value;
+    notifySession();
+    _bump(chatTick);
+    final prefs = await _prefs();
+    await prefs.setBool('privet_english_trainer_enabled', value);
+  }
+
+  Future<void> _saveTrainerStats() async {
+    final prefs = await _prefs();
+    await prefs.setString('privet_english_trainer_stats', trainerStats.encode());
+  }
+
+  Future<String> _trainerAi(String input) async {
+    final chatId = activeConversationId;
+    if (chatId == null) throw StateError('Open a chat first');
+    if (!trainerAiAvailable) {
+      throw StateError(
+        'AI is not configured. Add a DeepSeek key in Profile & settings.',
+      );
+    }
+    try {
+      final res = await _api.aiChat(
+        chatId,
+        input: input,
+        apiKey: aiApiKey.isEmpty ? null : aiApiKey,
+        model: aiModel.trim().isEmpty ? null : aiModel.trim(),
+        baseUrl: aiBaseUrl.isEmpty ? null : aiBaseUrl,
+      );
+      return (res['text'] as String?) ?? '';
+    } on ApiException catch (e) {
+      final msg = e.message;
+      if (msg.toLowerCase().contains('empty text') ||
+          msg.toLowerCase().contains('empty-handed')) {
+        throw StateError('Coach came back empty-handed — try again');
+      }
+      throw StateError(msg);
+    }
+  }
+
+  /// Pre-send grammar check. Throws [StateError] with a user-facing message.
+  Future<TrainerCheck> checkEnglish(String text) async {
+    final raw = await _trainerAi('# english-check\n$text');
+    if (raw.trim().isEmpty) {
+      throw StateError('Coach came back empty-handed — try again');
+    }
+    final check = TrainerCheck.parse(text, raw);
+    if (check == null) {
+      throw StateError('The coach mumbled something unreadable');
+    }
+    return check;
+  }
+
+  Future<TrainerReward> recordTrainerCheck(
+    TrainerCheck check, {
+    bool retry = false,
+  }) async {
+    final reward = trainerStats.recordCheck(check, retry: retry);
+    notifySession();
+    await _saveTrainerStats();
+    return reward;
+  }
+
+  Future<int> recordTrainerOutcome(TrainerOutcome outcome) async {
+    final xp = trainerStats.recordOutcome(outcome);
+    if (xp > 0) {
+      notifySession();
+      await _saveTrainerStats();
+    }
+    return xp;
+  }
+
+  /// "Review my English level" — CEFR grade from recent checked messages.
+  Future<TrainerLevelReport> reviewEnglishLevel() async {
+    if (trainerStats.samples.length < TrainerStats.minSamplesForReview) {
+      throw StateError(
+        'Send at least ${TrainerStats.minSamplesForReview} English messages '
+        'with the trainer on first',
+      );
+    }
+    final raw =
+        await _trainerAi('# english-level\n${trainerStats.levelReviewPayload()}');
+    final report = TrainerLevelReport.parse(raw);
+    if (report == null) {
+      throw StateError('The coach lost the grading sheet — try again');
+    }
+    trainerStats.recordReport(report);
+    notifySession();
+    await _saveTrainerStats();
+    return report;
+  }
+
+  Future<void> resetTrainerStats() async {
+    trainerStats = TrainerStats();
+    notifySession();
+    await _saveTrainerStats();
   }
 
   /// First token of a display name ("Alex Kim" → "Alex").

@@ -2,7 +2,7 @@ import 'dart:math';
 
 /// Manner for the greeting draft above the composer.
 enum GreetingStyle {
-  /// Plain "Hi, Name." — no quote, no AI.
+  /// "Hi, Name," plus a random offline category (joke / philosophy / …).
   sayHi,
 
   /// @nodoc keep old name as alias for regenerate compatibility in older state.
@@ -48,12 +48,10 @@ const List<String> kGreetingJokeCategories = [
 /// English mode ids (match keys in greeting_pools.json → english).
 const List<String> kGreetingEnglishCategories = [
   'geoffrey',
-  'lesson',
 ];
 
 String greetingEnglishCategoryLabel(String id) => switch (id) {
-      'geoffrey' => 'Geoffrey English',
-      'lesson' => 'Lesson',
+      'geoffrey' => 'Grammar',
       _ => id.isEmpty
           ? id
           : '${id[0].toUpperCase()}${id.substring(1)}',
@@ -98,14 +96,15 @@ extension GreetingStyleX on GreetingStyle {
 
   String get tooltip => switch (this) {
         GreetingStyle.sayHi || GreetingStyle.random =>
-          'Just “Hi, Name.” — nothing else',
-        GreetingStyle.joke => 'Pick a joke type or Random (offline)',
-        GreetingStyle.philosophy => 'Pick a thinker or Random (offline quotes)',
-        GreetingStyle.work => 'Greeting with a work/craft quote (offline)',
-        GreetingStyle.warm => 'Warm, friendly greeting (offline)',
-        GreetingStyle.punchy => 'Short energetic greeting (offline)',
+          '“Hi, Name,” plus a random joke / quote / line',
+        GreetingStyle.joke => 'Joke only — no Hi (pick type or Random)',
+        GreetingStyle.philosophy =>
+          'Quote only — no Hi (pick a thinker or Random)',
+        GreetingStyle.work => 'Work/craft quote only — no Hi (offline)',
+        GreetingStyle.warm => 'Warm line only — no Hi (offline)',
+        GreetingStyle.punchy => 'Short punchy line only — no Hi (offline)',
         GreetingStyle.english =>
-          'Pick Geoffrey English (drill) or Lesson (rule + explain + example)',
+          'Grammar drill only — no Hi (offline rules + examples)',
         GreetingStyle.ai =>
           'AI writes something encouraging & fun from recent chat',
       };

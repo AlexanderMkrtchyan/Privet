@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:ui' show BoxHeightStyle, BoxWidthStyle;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart'
@@ -32,6 +33,7 @@ import '../util/call_history.dart';
 import '../util/camera_capture.dart';
 import '../util/composer_autocomplete.dart';
 import '../util/emoticon_expand.dart';
+import '../util/english_trainer.dart';
 import '../util/greeting_style.dart';
 import '../util/composer_autocorrect.dart';
 import '../util/composer_media_attach.dart';
@@ -58,8 +60,10 @@ import '../widgets/composer_autocomplete_popup.dart';
 import '../widgets/composer_spell_layer.dart';
 import '../widgets/composer_autocorrect_controller.dart';
 import '../widgets/composer_kolobok_overlay.dart';
+import '../widgets/composer_selection_overlay.dart';
 import '../widgets/composer_voice_bar.dart';
 import '../widgets/custom_shortcodes_editor.dart';
+import '../widgets/english_trainer_ui.dart';
 import '../widgets/kolobok_plain_text.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/message_font_picker.dart';
@@ -2347,6 +2351,29 @@ class InboxPane extends StatelessWidget {
                         ),
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
+                          title: const Text('English personal trainer'),
+                          subtitle: Text(
+                            'AI checks English messages when you press Enter '
+                            'and shows your mistakes. Stats and level review: '
+                            'greeting bar → English → Coach dashboard.',
+                            style: TextStyle(
+                              color: PrivetTheme.mist,
+                              fontSize: 12,
+                            ),
+                          ),
+                          value: state.englishTrainerEnabled,
+                          activeThumbColor: PrivetTheme.onAccent,
+                          activeTrackColor: PrivetTheme.signal,
+                          onChanged: state.trainerAiAvailable ||
+                                  state.englishTrainerEnabled
+                              ? (v) {
+                                  state.setEnglishTrainerEnabled(v);
+                                  setSheet(() {});
+                                }
+                              : null,
+                        ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
                           title: const Text('Autocorrect'),
                           subtitle: Text(
                             'Fix common typos and underline misspelled words',
@@ -3246,6 +3273,19 @@ class _ConversationPaneState extends State<ConversationPane>
   /// Style currently spinning (null when idle).
   GreetingStyle? _greetingBusyStyle;
 
+  /// English trainer is checking the composer text before send.
+  bool _trainerChecking = false;
+
+  /// User chose "Edit myself" — the next check is a retry of the same message.
+  bool _trainerRetry = false;
+
+  /// In-flight send — blocks double Enter from aborting the coach mid-check.
+  bool _sendInFlight = false;
+
+  /// Text to send after the review dialog (fixed / native), bypassing races
+  /// with the composer controller.
+  String? _trainerSendOverride;
+
   /// Last text seen for autocorrect — skip re-check on fade paint ticks.
   String _lastAutocorrectText = '';
 
@@ -3496,6 +3536,12 @@ class _ConversationPaneState extends State<ConversationPane>
       desired,
     );
     _controller.setFormatRuns(runs);
+    // Color picks: collapse the range so the new character color is visible
+    // immediately (no leftover selection tint over the glyphs).
+    if (background != null) {
+      _controller.selection = TextSelection.collapsed(offset: end);
+      _dismissComposerFormatBar();
+    }
     _lastAutocorrectText = _controller.text;
     widget.state.notifyTyping();
   }
@@ -5721,6 +5767,16 @@ class _ConversationPaneState extends State<ConversationPane>
                   ),
                 ),
               ),
+            if (_trainerChecking)
+              Padding(
+                padding: EdgeInsets.fromLTRB(
+                  compact ? 10 : 14,
+                  0,
+                  compact ? 10 : 14,
+                  4,
+                ),
+                child: const _TrainerCheckingBanner(),
+              ),
             if (_shouldShowGreetingChip(state, chat))
               Padding(
                 padding: EdgeInsets.fromLTRB(
@@ -5736,10 +5792,14 @@ class _ConversationPaneState extends State<ConversationPane>
                     lastStyle: _lastGreetingStyle,
                     aiAvailable:
                         state.aiActive || state.serverAiConfigured,
+                    trainerEnabled: state.englishTrainerEnabled,
+                    trainerStats: state.trainerStats,
+                    trainerChecking: _trainerChecking,
+                    onToggleTrainer: _toggleEnglishTrainer,
+                    onOpenTrainer: () =>
+                        showTrainerDashboard(context, widget.state),
                     onStyle: _onGreetingStyleTap,
-                    onRegenerate: _lastGreetingStyle == null ||
-                            _lastGreetingStyle == GreetingStyle.sayHi ||
-                            _lastGreetingStyle == GreetingStyle.random
+                    onRegenerate: _lastGreetingStyle == null
                         ? null
                         : () => _onGreetingStyleTap(
                               _lastGreetingStyle!,
@@ -6284,38 +6344,59 @@ class _ConversationPaneState extends State<ConversationPane>
     final caretWidth =
         state.terminalCursorEnabled ? fontSize * 0.55 : 2.0;
     // Kolobok overlay paints pack art over hidden Unicode glyphs in the field.
+    // Selection tint is painted by [ComposerSelectionOverlay] (tight + inset)
+    // so it stays consistent with message-body selection.
     final field = Stack(
       children: [
-        TextField(
-          key: _composerFieldKey,
-          controller: _controller,
-          focusNode: _composerFocus,
-          showCursor: false,
-          cursorColor: PrivetTheme.signal,
-          cursorHeight: caretHeight,
-          cursorWidth: caretWidth,
-          minLines: 1,
-          maxLines: compact ? 5 : 6,
-          keyboardType: TextInputType.multiline,
-          style: composerStyle,
-          textInputAction: TextInputAction.newline,
-          // Mobile (Android/iOS) gets the native keyboard suggestion strip +
-          // autocorrect, like Teams. Desktop/web keep the in-app autocorrect and
-          // red-underline spelling overlay. Both honor the Settings toggles.
-          autocorrect: state.autocorrectEnabled && _nativeComposerSuggestions,
-          enableSuggestions:
-              state.autocompleteEnabled && _nativeComposerSuggestions,
-          contextMenuBuilder: kIsWeb
-              ? (context, editableTextState) =>
-                  const SizedBox.shrink()
-              : _composerContextMenu,
-          onTapOutside: _onComposerTapOutside,
-          onChanged: (value) {
-            if (_editingMessage != null) return;
-            state.notifyTypingIfComposing(value);
-          },
-          onTap: _onComposerTap,
-          decoration: decoration,
+        Theme(
+          data: Theme.of(context).copyWith(
+            textSelectionTheme: TextSelectionThemeData(
+              cursorColor: PrivetTheme.signal,
+              selectionColor: const Color(0x00000000),
+              selectionHandleColor: PrivetTheme.signal,
+            ),
+          ),
+          child: TextField(
+            key: _composerFieldKey,
+            controller: _controller,
+            focusNode: _composerFocus,
+            showCursor: false,
+            cursorColor: PrivetTheme.signal,
+            cursorHeight: caretHeight,
+            cursorWidth: caretWidth,
+            selectionHeightStyle: BoxHeightStyle.tight,
+            selectionWidthStyle: BoxWidthStyle.tight,
+            minLines: 1,
+            maxLines: compact ? 5 : 6,
+            keyboardType: TextInputType.multiline,
+            style: composerStyle,
+            textInputAction: TextInputAction.newline,
+            // Mobile (Android/iOS) gets the native keyboard suggestion strip +
+            // autocorrect, like Teams. Desktop/web keep the in-app autocorrect and
+            // red-underline spelling overlay. Both honor the Settings toggles.
+            autocorrect: state.autocorrectEnabled && _nativeComposerSuggestions,
+            enableSuggestions:
+                state.autocompleteEnabled && _nativeComposerSuggestions,
+            contextMenuBuilder: kIsWeb
+                ? (context, editableTextState) =>
+                    const SizedBox.shrink()
+                : _composerContextMenu,
+            onTapOutside: _onComposerTapOutside,
+            onChanged: (value) {
+              if (_editingMessage != null) return;
+              state.notifyTypingIfComposing(value);
+            },
+            onTap: _onComposerTap,
+            decoration: decoration,
+          ),
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: ComposerSelectionOverlay(
+              fieldKey: _composerFieldKey,
+              controller: _controller,
+            ),
+          ),
         ),
         Positioned.fill(
           child: IgnorePointer(
@@ -7566,6 +7647,36 @@ class _ConversationPaneState extends State<ConversationPane>
     return state.shouldShowGreetingButton();
   }
 
+  Future<void> _toggleEnglishTrainer() async {
+    final state = widget.state;
+    final next = !state.englishTrainerEnabled;
+    if (next && !state.trainerAiAvailable) {
+      _trainerToast(
+        TrainerToast(
+          icon: Icons.sports_rounded,
+          color: PrivetTheme.danger,
+          title: 'The coach needs AI',
+          subtitle: 'Add a DeepSeek key in Profile & settings first.',
+        ),
+      );
+      return;
+    }
+    await state.setEnglishTrainerEnabled(next);
+    _trainerRetry = false;
+    if (!mounted) return;
+    setState(() {});
+    _trainerToast(
+      TrainerToast(
+        icon: next ? Icons.sports_rounded : Icons.bedtime_rounded,
+        color: next ? PrivetTheme.signal : PrivetTheme.mist,
+        title: next ? 'Personal trainer on' : 'Personal trainer off',
+        subtitle: next
+            ? 'English messages get checked when you press Enter.'
+            : 'The coach is taking a nap. Your stats are saved.',
+      ),
+    );
+  }
+
   Future<void> _onGreetingChipDismiss() async {
     await widget.state.setGreetingButtonEnabled(false);
     if (mounted) {
@@ -7609,7 +7720,7 @@ class _ConversationPaneState extends State<ConversationPane>
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(
-                    'Only you see this. Say hi will open with “Hi, $preview,”',
+                    'Only you see this. Say hi starts with “Hi, $preview,” then a random line',
                     style: TextStyle(color: PrivetTheme.mist, fontSize: 13),
                   ),
                   const SizedBox(height: 12),
@@ -7777,14 +7888,310 @@ class _ConversationPaneState extends State<ConversationPane>
     });
   }
 
+  void _trainerToast(
+    Widget content, {
+    SnackBarAction? action,
+    Duration duration = const Duration(milliseconds: 2600),
+  }) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: content,
+          action: action,
+          duration: duration,
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: PrivetTheme.panelElevated,
+          width: PrivetTheme.isCompact(context) ? null : 460,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: BorderSide(color: PrivetTheme.line),
+          ),
+        ),
+      );
+  }
+
+  void _toastTrainerReward(TrainerReward reward, TrainerCheck check) {
+    final stats = widget.state.trainerStats;
+    if (reward.rankUp != null) {
+      _trainerToast(
+        TrainerToast(
+          icon: Icons.military_tech_rounded,
+          color: PrivetTheme.signal,
+          title: 'Rank up: ${reward.rankUp}!',
+          subtitle: '${stats.xp} XP total — the coach salutes you.',
+          xp: reward.xp,
+          streak: reward.streak,
+        ),
+        duration: const Duration(seconds: 4),
+      );
+      return;
+    }
+    if (reward.milestone != null) {
+      _trainerToast(
+        TrainerToast(
+          icon: Icons.local_fire_department_rounded,
+          color: const Color(0xFFFFB547),
+          title: trainerMilestoneLine(reward.milestone!),
+          subtitle: 'Best streak: ${stats.bestStreak}',
+          xp: reward.xp,
+          streak: reward.streak,
+        ),
+        duration: const Duration(seconds: 4),
+      );
+      return;
+    }
+    if (check.issues.isNotEmpty) {
+      final first = check.issues.first;
+      _trainerToast(
+        TrainerToast(
+          icon: Icons.tips_and_updates_rounded,
+          color: const Color(0xFFFFB547),
+          title: reward.selfFix
+              ? trainerSelfFixLine()
+              : check.issues.length == 1
+                  ? 'Sent · one tiny nitpick'
+                  : 'Sent · ${check.issues.length} tiny nitpicks',
+          subtitle: '${first.wrong} → ${first.right}',
+          xp: reward.xp,
+          streak: reward.streak,
+        ),
+        duration: const Duration(seconds: 5),
+        action: SnackBarAction(
+          label: 'Why?',
+          textColor: PrivetTheme.signal,
+          onPressed: () => showTrainerReviewDialog(
+            context,
+            check: check,
+            stats: widget.state.trainerStats,
+            readOnly: true,
+          ),
+        ),
+      );
+      return;
+    }
+    _trainerToast(
+      TrainerToast(
+        icon: reward.selfFix
+            ? Icons.handyman_rounded
+            : Icons.check_circle_rounded,
+        color: const Color(0xFF5BD68A),
+        title: reward.selfFix ? trainerSelfFixLine() : trainerCleanLine(),
+        subtitle: check.natural.isEmpty ? null : 'Native vibe: ${check.natural}',
+        xp: reward.xp,
+        streak: reward.streak,
+      ),
+      duration: Duration(milliseconds: check.natural.isEmpty ? 2200 : 4500),
+    );
+  }
+
+  void _setComposerPlainText(String text) {
+    _controller.clearMarks();
+    _controller.clearFormatRuns();
+    _controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    _lastAutocorrectText = text;
+    _syncComposerHasContent();
+  }
+
+  /// English trainer gate. Returns false when the send must stop (still
+  /// checking, coach failed, or the user went back to edit).
+  /// Failures never soft-send — turn Coach off in the greeting bar to skip.
+  Future<bool> _passEnglishTrainer() async {
+    final state = widget.state;
+    _trainerSendOverride = null;
+    if (!state.englishTrainerEnabled) return true;
+    if (_draftVoice != null || _draftMedia.isNotEmpty) return true;
+    if (_trainerChecking) {
+      _trainerToast(
+        TrainerToast(
+          icon: Icons.hourglass_top_rounded,
+          color: PrivetTheme.mist,
+          title: 'Coach is still reading…',
+          subtitle: 'One moment — then tap send again if needed',
+        ),
+      );
+      return false;
+    }
+    final text = _controller.text;
+    if (!shouldTrainerCheck(text)) return true;
+    final trimmed = text.trim();
+    if (trimmed.length > kTrainerMaxChars) {
+      _trainerToast(
+        TrainerToast(
+          icon: Icons.sports_rounded,
+          color: PrivetTheme.mist,
+          title: 'Message too long for Coach',
+          subtitle:
+              'Max $kTrainerMaxChars characters — shorten it or turn Coach off to send',
+        ),
+        duration: const Duration(seconds: 5),
+      );
+      return false;
+    }
+    final chatId = state.activeConversationId;
+    final retry = _trainerRetry;
+    final snapshot = text;
+    setState(() => _trainerChecking = true);
+    TrainerCheck? check;
+    String? failure;
+    try {
+      check = await _runEnglishCheck(text.trim());
+    } catch (e) {
+      failure = e is StateError ? e.message : e.toString();
+    }
+    if (!mounted) return false;
+    setState(() => _trainerChecking = false);
+    // Chat switched while the coach was reading.
+    if (state.activeConversationId != chatId) {
+      _trainerToast(
+        TrainerToast(
+          icon: Icons.sports_rounded,
+          color: PrivetTheme.mist,
+          title: 'Chat changed — not sent',
+          subtitle: 'Switch back and tap send to try again',
+        ),
+      );
+      return false;
+    }
+    // Ignore whitespace-only drift; real edits cancel the send.
+    if (_controller.text.trim() != snapshot.trim()) {
+      _trainerToast(
+        TrainerToast(
+          icon: Icons.edit_rounded,
+          color: PrivetTheme.mist,
+          title: 'You edited while Coach was reading',
+          subtitle: 'Tap send again to check the new text',
+        ),
+      );
+      return false;
+    }
+    if (check == null) {
+      _trainerToast(
+        TrainerToast(
+          icon: Icons.sports_rounded,
+          color: PrivetTheme.mist,
+          title: 'Coach couldn\'t check — not sent',
+          subtitle: failure == null || failure.isEmpty
+              ? 'Tap send to try again, or turn Coach off in the greeting bar'
+              : '$failure — tap send to retry, or turn Coach off',
+        ),
+        duration: const Duration(seconds: 5),
+      );
+      return false;
+    }
+    final reward = await state.recordTrainerCheck(check, retry: retry);
+    if (!mounted) return false;
+    if (!check.hasMajor) {
+      _trainerRetry = false;
+      _toastTrainerReward(reward, check);
+      return true;
+    }
+    final outcome = await showTrainerReviewDialog(
+      context,
+      check: check,
+      stats: state.trainerStats,
+    );
+    if (!mounted) return false;
+    switch (outcome) {
+      case TrainerOutcome.sentFixed:
+        _trainerRetry = false;
+        final xp = await state.recordTrainerOutcome(TrainerOutcome.sentFixed);
+        _trainerSendOverride = check.corrected;
+        _setComposerPlainText(check.corrected);
+        _trainerToast(
+          TrainerToast(
+            icon: Icons.auto_fix_high_rounded,
+            color: const Color(0xFF5BD68A),
+            title: 'Sending Coach’s version',
+            subtitle: 'Next time, try fixing it yourself for +8 XP',
+            xp: xp,
+          ),
+        );
+        return true;
+      case TrainerOutcome.sentNatural:
+        _trainerRetry = false;
+        final xp = await state.recordTrainerOutcome(TrainerOutcome.sentNatural);
+        final native = check.natural.trim().isNotEmpty
+            ? check.natural.trim()
+            : check.corrected;
+        _trainerSendOverride = native;
+        _setComposerPlainText(native);
+        _trainerToast(
+          TrainerToast(
+            icon: Icons.record_voice_over_rounded,
+            color: PrivetTheme.signal,
+            title: 'Sending the native vibe',
+            subtitle: 'Casual rewrite — still your message',
+            xp: xp,
+          ),
+        );
+        return true;
+      case TrainerOutcome.sentMine:
+        _trainerRetry = false;
+        return true;
+      case TrainerOutcome.edit:
+      case null:
+        _trainerRetry = true;
+        _composerFocus.requestFocus();
+        return false;
+    }
+  }
+
+  /// One AI grammar check. Timeout scales with message length.
+  Future<TrainerCheck> _runEnglishCheck(String text) async {
+    final seconds = (22 + (text.length / 100).ceil()).clamp(22, 50);
+    Future<TrainerCheck> once() => widget.state
+        .checkEnglish(text)
+        .timeout(
+          Duration(seconds: seconds),
+          onTimeout: () => throw StateError('Coach took too long'),
+        );
+
+    try {
+      return await once();
+    } catch (e) {
+      if (!_isRetryableCoachFailure(e)) rethrow;
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      return await once();
+    }
+  }
+
+  bool _isRetryableCoachFailure(Object e) {
+    final msg = (e is StateError ? e.message : e.toString()).toLowerCase();
+    return msg.contains('catching its breath') ||
+        msg.contains('wait a few seconds') ||
+        msg.contains('empty-handed') ||
+        msg.contains('empty text') ||
+        msg.contains('429') ||
+        msg.contains('503');
+  }
+
   Future<void> _send() async {
+    if (_sendInFlight) return;
     if (_editingMessage != null) {
       await _commitEditMessage();
       return;
     }
+    _sendInFlight = true;
+    try {
+      if (!await _passEnglishTrainer()) return;
+      if (!mounted) return;
+      await _sendAfterTrainer();
+    } finally {
+      _sendInFlight = false;
+    }
+  }
+
+  Future<void> _sendAfterTrainer() async {
     final drafts = List<PickedBytes>.from(_draftMedia);
     final voice = _draftVoice;
-    final text = _controller.markupText;
+    final override = _trainerSendOverride;
+    _trainerSendOverride = null;
+    final text = override ?? _controller.markupText;
     final reply = _replyingTo;
     final replyToId = reply?.id;
     final snippet = _replySnippet?.trim();
@@ -8342,6 +8749,11 @@ class _GreetingComposerBar extends StatelessWidget {
     required this.busyStyle,
     required this.lastStyle,
     required this.aiAvailable,
+    required this.trainerEnabled,
+    required this.trainerStats,
+    required this.trainerChecking,
+    required this.onToggleTrainer,
+    required this.onOpenTrainer,
     required this.onStyle,
     required this.onRegenerate,
     required this.onDismiss,
@@ -8354,6 +8766,13 @@ class _GreetingComposerBar extends StatelessWidget {
   final GreetingStyle? busyStyle;
   final GreetingStyle? lastStyle;
   final bool aiAvailable;
+
+  /// English personal trainer (toggle lives in the English menu).
+  final bool trainerEnabled;
+  final TrainerStats trainerStats;
+  final bool trainerChecking;
+  final VoidCallback onToggleTrainer;
+  final VoidCallback onOpenTrainer;
   final void Function(
     GreetingStyle style, {
     String? philosopher,
@@ -8449,6 +8868,20 @@ class _GreetingComposerBar extends StatelessWidget {
                             GreetingStyle.english,
                             englishCategory: category,
                           ),
+                          extras: [
+                            (
+                              label: 'Personal trainer',
+                              icon: Icons.sports_rounded,
+                              toggled: trainerEnabled,
+                              onTap: onToggleTrainer,
+                            ),
+                            (
+                              label: 'Coach dashboard',
+                              icon: Icons.insights_rounded,
+                              toggled: null,
+                              onTap: onOpenTrainer,
+                            ),
+                          ],
                         )
                       else
                         _GreetingStyleChip(
@@ -8466,6 +8899,14 @@ class _GreetingComposerBar extends StatelessWidget {
                         ),
                       if (!(style == GreetingStyle.ai && !aiAvailable))
                         const SizedBox(width: 4),
+                      if (style == GreetingStyle.english && trainerEnabled) ...[
+                        _TrainerCoachChip(
+                          stats: trainerStats,
+                          checking: trainerChecking,
+                          onTap: onOpenTrainer,
+                        ),
+                        const SizedBox(width: 4),
+                      ],
                     ],
                     if (onRegenerate != null)
                       _GreetingStyleChip(
@@ -8525,6 +8966,7 @@ class _GreetingDropdownChip extends StatefulWidget {
     required this.enabled,
     required this.items,
     required this.onPick,
+    this.extras = const [],
   });
 
   final String label;
@@ -8535,6 +8977,10 @@ class _GreetingDropdownChip extends StatefulWidget {
 
   /// Specific picks; `id` is what [onPick] receives (null = Random).
   final List<({String id, String label})> items;
+
+  /// Action rows under the picks; non-null `toggled` renders a switch.
+  final List<
+      ({String label, IconData icon, bool? toggled, VoidCallback onTap})> extras;
 
   /// `null` means Random from the pool.
   final ValueChanged<String?> onPick;
@@ -8573,8 +9019,9 @@ class _GreetingDropdownChipState extends State<_GreetingDropdownChip> {
     final anchor = box.localToGlobal(Offset.zero) & box.size;
     final screen = MediaQuery.sizeOf(context);
     // Random + divider + all items (same math as the font picker).
-    final entries = 1 + widget.items.length;
-    final menuHeight = _itemHeight * entries + 8;
+    final entries = 1 + widget.items.length + widget.extras.length;
+    final menuHeight =
+        _itemHeight * entries + 8 + (widget.extras.isEmpty ? 0 : 1);
     final height = menuHeight < screen.height - 16
         ? menuHeight
         : screen.height - 16;
@@ -8653,6 +9100,25 @@ class _GreetingDropdownChipState extends State<_GreetingDropdownChip> {
                             ),
                           ),
                         ),
+                        if (widget.extras.isNotEmpty)
+                          Divider(
+                            height: 1,
+                            thickness: 1,
+                            color: PrivetTheme.line,
+                          ),
+                        for (final extra in widget.extras)
+                          _GreetingMenuItem(
+                            label: extra.label,
+                            icon: extra.icon,
+                            toggled: extra.toggled,
+                            onTap: () {
+                              extra.onTap();
+                              WidgetsBinding.instance
+                                  .addPostFrameCallback((_) {
+                                if (mounted) _hideMenu();
+                              });
+                            },
+                          ),
                       ],
                     ),
                   ),
@@ -8742,11 +9208,15 @@ class _GreetingMenuItem extends StatelessWidget {
     required this.label,
     required this.onTap,
     this.icon,
+    this.toggled,
   });
 
   final String label;
   final VoidCallback onTap;
   final IconData? icon;
+
+  /// Non-null renders a compact on/off pill on the right.
+  final bool? toggled;
 
   static const double _itemHeight = 42;
 
@@ -8781,12 +9251,155 @@ class _GreetingMenuItem extends StatelessWidget {
                       ),
                     ),
                   ),
+                  if (toggled != null)
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      width: 30,
+                      height: 17,
+                      padding: const EdgeInsets.all(2),
+                      alignment: toggled!
+                          ? Alignment.centerRight
+                          : Alignment.centerLeft,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(10),
+                        color: toggled!
+                            ? PrivetTheme.signal
+                            : PrivetTheme.paper.withValues(alpha: 0.15),
+                      ),
+                      child: Container(
+                        width: 13,
+                        height: 13,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: toggled!
+                              ? PrivetTheme.onAccent
+                              : PrivetTheme.mist,
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Greeting bar chip while the English trainer is on — level, streak, opens
+/// the coach dashboard.
+class _TrainerCoachChip extends StatelessWidget {
+  const _TrainerCoachChip({
+    required this.stats,
+    required this.checking,
+    required this.onTap,
+  });
+
+  final TrainerStats stats;
+  final bool checking;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final level = stats.lastReport?.level.code;
+    return Tooltip(
+      message: 'English coach — ${stats.rank.title}, ${stats.xp} XP',
+      waitDuration: const Duration(milliseconds: 280),
+      preferBelow: false,
+      child: Material(
+        color: PrivetTheme.signal.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(10),
+          mouseCursor: SystemMouseCursors.click,
+          hoverColor: PrivetTheme.signal.withValues(alpha: 0.12),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (checking)
+                  SizedBox(
+                    width: 13,
+                    height: 13,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 1.8,
+                      color: PrivetTheme.signal,
+                    ),
+                  )
+                else
+                  Icon(
+                    Icons.sports_rounded,
+                    size: 15,
+                    color: PrivetTheme.signal,
+                  ),
+                const SizedBox(width: 5),
+                Text(
+                  level ?? 'Coach',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: PrivetTheme.signal,
+                  ),
+                ),
+                if (stats.streak > 0) ...[
+                  const SizedBox(width: 6),
+                  const Icon(
+                    Icons.local_fire_department_rounded,
+                    size: 14,
+                    color: Color(0xFFFFB547),
+                  ),
+                  Text(
+                    '${stats.streak}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFFFFB547),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Thin row above the composer while the coach reads the message.
+class _TrainerCheckingBanner extends StatelessWidget {
+  const _TrainerCheckingBanner();
+
+  static const _lines = [
+    'Coach is reading your message…',
+    'Checking tenses, articles, the usual suspects…',
+    'Coach is squinting at your prepositions…',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final line = _lines[DateTime.now().second % _lines.length];
+    return Row(
+      children: [
+        SizedBox(
+          width: 12,
+          height: 12,
+          child: CircularProgressIndicator(
+            strokeWidth: 1.8,
+            color: PrivetTheme.signal,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            line,
+            style: TextStyle(fontSize: 12, color: PrivetTheme.mist),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -9245,7 +9858,7 @@ class _ComposerFormatBarState extends State<_ComposerFormatBar> {
               ),
             ),
             _barButton(
-              tooltip: 'Highlight',
+              tooltip: 'Color',
               active: cur.background != null,
               onTap: _pickHighlight,
               child: Icon(
