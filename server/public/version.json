@@ -1,7 +1,7 @@
 {
   "app_name": "privet",
-  "version": "0.1.31",
-  "build_number": "16",
+  "version": "0.1.32",
+  "build_number": "17",
   "package_name": "privet",
   "windows_setup_url": "/downloads/Privet-Setup.exe",
   "linux_deb_url": "/downloads/privet-linux-amd64.deb",

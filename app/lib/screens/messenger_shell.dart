@@ -89,6 +89,7 @@ class _MessengerShellState extends State<MessengerShell> {
   /// spinner) for one frame so we never freeze an indeterminate indicator
   /// mid-arc while the inbox builds — that looked like a slideshow.
   bool _shellReady = false;
+
   /// Guards the "Send to…" sheet so sessionTick replays can't stack it.
   bool _sharePickerOpen = false;
 
@@ -299,103 +300,103 @@ class _MessengerShellState extends State<MessengerShell> {
     // re-paint the entire inbox every animation frame (Linux slideshow jank).
     return RepaintBoundary(
       child: Listener(
-      behavior: HitTestBehavior.translucent,
-      onPointerDown: (_) => state.noteUserPresence(),
-      onPointerSignal: (_) => state.noteUserPresence(),
-      child: Stack(
-        children: [
-          // Structure (inbox vs chat) only when the open conversation changes.
-          ListenableBuilder(
-            listenable: Listenable.merge([state.shellTick, state.callTick]),
-            builder: (context, _) {
-              final hasChat = state.activeConversationId != null;
-              final inCall =
-                  state.callSession != null || state.ringing != null;
-              if (wide) {
-                return Scaffold(
-                  body: Row(
-                    children: [
-                      SizedBox(
-                        width: 360,
-                        child: ListenableBuilder(
-                          // Typing lives inside InboxPane's own listener so
-                          // peer keystrokes don't rebuild the whole list.
-                          listenable: state.inboxTick,
-                          builder: (context, _) => InboxPane(state: state),
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (_) => state.noteUserPresence(),
+        onPointerSignal: (_) => state.noteUserPresence(),
+        child: Stack(
+          children: [
+            // Structure (inbox vs chat) only when the open conversation changes.
+            ListenableBuilder(
+              listenable: Listenable.merge([state.shellTick, state.callTick]),
+              builder: (context, _) {
+                final hasChat = state.activeConversationId != null;
+                final inCall =
+                    state.callSession != null || state.ringing != null;
+                if (wide) {
+                  return Scaffold(
+                    body: Row(
+                      children: [
+                        SizedBox(
+                          width: 360,
+                          child: ListenableBuilder(
+                            // Typing lives inside InboxPane's own listener so
+                            // peer keystrokes don't rebuild the whole list.
+                            listenable: state.inboxTick,
+                            builder: (context, _) => InboxPane(state: state),
+                          ),
                         ),
-                      ),
-                      const AccentSplitLine(axis: Axis.vertical),
-                      Expanded(
-                        child: hasChat
-                            ? ListenableBuilder(
-                                // Do not merge typingTick here — rebuilding the
-                                // full message ListView on every keystroke was
-                                // causing intermittent scroll jank on mobile.
-                                listenable: state.chatTick,
-                                builder: (context, _) => ConversationPane(
-                                  key: ValueKey(state.activeConversationId),
-                                  state: state,
-                                ),
-                              )
-                            : const _EmptyChat(),
-                      ),
-                    ],
+                        const AccentSplitLine(axis: Axis.vertical),
+                        Expanded(
+                          child: hasChat
+                              ? ListenableBuilder(
+                                  // Do not merge typingTick here — rebuilding the
+                                  // full message ListView on every keystroke was
+                                  // causing intermittent scroll jank on mobile.
+                                  listenable: state.chatTick,
+                                  builder: (context, _) => ConversationPane(
+                                    key: ValueKey(state.activeConversationId),
+                                    state: state,
+                                  ),
+                                )
+                              : const _EmptyChat(),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+                // Mobile: intercept the system back gesture / edge-swipe so it
+                // closes the open chat (or does nothing mid-call) instead of
+                // killing the app from the root route.
+                return PopScope(
+                  canPop: !hasChat && !inCall,
+                  onPopInvokedWithResult: (didPop, result) {
+                    if (didPop) return;
+                    if (inCall) return; // never exit during a call
+                    // Android: emoji panel mirrors the soft keyboard — system back
+                    // dismisses it first. ConversationPane's PopScope closes the
+                    // panel; skipping here avoids jumping to contacts in the same
+                    // gesture (both nested PopScopes receive the callback).
+                    if (!kIsWeb &&
+                        defaultTargetPlatform == TargetPlatform.android &&
+                        state.emojiPanelOpen) {
+                      return;
+                    }
+                    if (hasChat) {
+                      state.clearActiveConversation();
+                    }
+                  },
+                  child: Scaffold(
+                    body: hasChat
+                        ? ListenableBuilder(
+                            listenable: state.chatTick,
+                            builder: (context, _) => ConversationPane(
+                              key: ValueKey(state.activeConversationId),
+                              state: state,
+                              showBack: true,
+                            ),
+                          )
+                        : ListenableBuilder(
+                            listenable: state.inboxTick,
+                            builder: (context, _) => InboxPane(state: state),
+                          ),
                   ),
                 );
-              }
-              // Mobile: intercept the system back gesture / edge-swipe so it
-              // closes the open chat (or does nothing mid-call) instead of
-              // killing the app from the root route.
-              return PopScope(
-                canPop: !hasChat && !inCall,
-                onPopInvokedWithResult: (didPop, result) {
-                  if (didPop) return;
-                  if (inCall) return; // never exit during a call
-                  // Android: emoji panel mirrors the soft keyboard — system back
-                  // dismisses it first. ConversationPane's PopScope closes the
-                  // panel; skipping here avoids jumping to contacts in the same
-                  // gesture (both nested PopScopes receive the callback).
-                  if (!kIsWeb &&
-                      defaultTargetPlatform == TargetPlatform.android &&
-                      state.emojiPanelOpen) {
-                    return;
-                  }
-                  if (hasChat) {
-                    state.clearActiveConversation();
-                  }
-                },
-                child: Scaffold(
-                  body: hasChat
-                      ? ListenableBuilder(
-                          listenable: state.chatTick,
-                          builder: (context, _) => ConversationPane(
-                            key: ValueKey(state.activeConversationId),
-                            state: state,
-                            showBack: true,
-                          ),
-                        )
-                      : ListenableBuilder(
-                          listenable: state.inboxTick,
-                          builder: (context, _) => InboxPane(state: state),
-                        ),
-                ),
-              );
-            },
-          ),
-          ListenableBuilder(
-            listenable: state.callTick,
-            builder: (context, _) {
-              final inCall =
-                  state.callSession != null || state.ringing != null;
-              if (!inCall) return const SizedBox.shrink();
-              return Positioned.fill(child: CallOverlay(state: state));
-            },
-          ),
-          // Windows-only floating update card (no-op on Linux/web).
-          UpdateAvailableBanner.maybe(state: state),
-        ],
+              },
+            ),
+            ListenableBuilder(
+              listenable: state.callTick,
+              builder: (context, _) {
+                final inCall =
+                    state.callSession != null || state.ringing != null;
+                if (!inCall) return const SizedBox.shrink();
+                return Positioned.fill(child: CallOverlay(state: state));
+              },
+            ),
+            // Windows-only floating update card (no-op on Linux/web).
+            UpdateAvailableBanner.maybe(state: state),
+          ],
+        ),
       ),
-    ),
     );
   }
 }
@@ -517,7 +518,7 @@ class _SharePickerSheetState extends State<_SharePickerSheet> {
                         child: Text(
                           state.conversations.isEmpty
                               ? 'No chats yet — start one from the inbox, '
-                                  'then share again.'
+                                    'then share again.'
                               : 'No chats match “$_query”.',
                           textAlign: TextAlign.center,
                           style: TextStyle(color: PrivetTheme.mist),
@@ -538,7 +539,9 @@ class _SharePickerSheetState extends State<_SharePickerSheet> {
                               hue: c.peer?.avatarHue ?? (c.isGroup ? 90 : 160),
                               avatarUrl: c.peer?.avatarUrl == null
                                   ? null
-                                  : state.api.absoluteMediaUrl(c.peer!.avatarUrl),
+                                  : state.api.absoluteMediaUrl(
+                                      c.peer!.avatarUrl,
+                                    ),
                               online: peerOnline,
                             ),
                             title: Text(
@@ -580,10 +583,10 @@ class _SharePreview extends StatelessWidget {
       icon = mime.startsWith('video/')
           ? Icons.videocam
           : mime.startsWith('audio/')
-              ? Icons.audiotrack
-              : mime.startsWith('image/')
-                  ? Icons.image
-                  : Icons.insert_drive_file;
+          ? Icons.audiotrack
+          : mime.startsWith('image/')
+          ? Icons.image
+          : Icons.insert_drive_file;
     } else {
       icon = Icons.notes;
     }
@@ -656,9 +659,7 @@ class AiModelChip extends StatelessWidget {
         decoration: BoxDecoration(
           color: PrivetTheme.signal.withValues(alpha: 0.12),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: PrivetTheme.signal.withValues(alpha: 0.35),
-          ),
+          border: Border.all(color: PrivetTheme.signal.withValues(alpha: 0.35)),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -857,258 +858,260 @@ class InboxPane extends StatelessWidget {
                 // it off the parent shell so chat scroll isn't tied to it.
                 listenable: state.typingTick,
                 builder: (context, _) => ListView.builder(
-                itemCount: state.conversations.length,
-                itemBuilder: (context, i) {
-                  final c = state.conversations[i];
-                  final selected = c.id == state.activeConversationId;
-                  final peerOnline =
-                      c.peer != null && state.online.contains(c.peer!.id);
-                  // Inbox preview must hide markup tags (bold/font/highlight) —
-                  // message bodies now routinely carry `[font=…]` wrappers.
-                  final last = c.lastMessage;
-                  final lastPreview = last == null
-                      ? null
-                      : last.kind == 'task_event'
-                          ? TaskEventPayload.preview(last.body)
-                          : last.kind == 'call'
-                              ? CallHistoryPayload.preview(last.body)
-                              : last.body.contains('[')
-                                  ? markupToPlain(last.body)
-                                  : last.body;
-                  return Material(
-                    color: selected
-                        ? PrivetTheme.panelElevated
-                        : Colors.transparent,
-                    child: InkWell(
-                      onTap: () {
-                        if (c.id == state.activeConversationId) {
-                          // Same chat re-tapped — drop any open pane overlay
-                          // (tasks / payments / reminders / media) and show chat.
-                          state.reopenActiveConversation();
-                        } else {
-                          state.openConversation(c.id);
-                        }
-                      },
-                      mouseCursor: SystemMouseCursors.click,
-                      onSecondaryTapUp: (details) {
-                        _openConversationMenu(
-                          context,
-                          c,
-                          details.globalPosition,
-                        );
-                      },
-                      onLongPress: () {
-                        // Prefer the ink well's own box; fall back if not laid out yet.
-                        final box = context.findRenderObject();
-                        final Offset pos;
-                        if (box is RenderBox && box.hasSize) {
-                          pos = box.localToGlobal(const Offset(72, 36));
-                        } else {
-                          pos = const Offset(72, 120);
-                        }
-                        _openConversationMenu(context, c, pos);
-                      },
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
-                        ),
-                        child: Row(
-                          children: [
-                            PrivetAvatar(
-                              name: c.title,
-                              hue: c.peer?.avatarHue ?? (c.isGroup ? 90 : 160),
-                              avatarUrl: c.peer?.avatarUrl == null
-                                  ? null
-                                  : state.api.absoluteMediaUrl(
-                                      c.peer!.avatarUrl,
-                                    ),
-                              online: peerOnline,
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    children: [
-                                      Expanded(
-                                        child: Text(
-                                          c.title,
-                                          style: GoogleFonts.syne(
-                                            fontWeight: c.unreadCount > 0
-                                                ? FontWeight.w800
-                                                : FontWeight.w700,
-                                            fontSize: 16,
+                  itemCount: state.conversations.length,
+                  itemBuilder: (context, i) {
+                    final c = state.conversations[i];
+                    final selected = c.id == state.activeConversationId;
+                    final peerOnline =
+                        c.peer != null && state.online.contains(c.peer!.id);
+                    // Inbox preview must hide markup tags (bold/font/highlight) —
+                    // message bodies now routinely carry `[font=…]` wrappers.
+                    final last = c.lastMessage;
+                    final lastPreview = last == null
+                        ? null
+                        : last.kind == 'task_event'
+                        ? TaskEventPayload.preview(last.body)
+                        : last.kind == 'call'
+                        ? CallHistoryPayload.preview(last.body)
+                        : last.body.contains('[')
+                        ? markupToPlain(last.body)
+                        : last.body;
+                    return Material(
+                      color: selected
+                          ? PrivetTheme.panelElevated
+                          : Colors.transparent,
+                      child: InkWell(
+                        onTap: () {
+                          if (c.id == state.activeConversationId) {
+                            // Same chat re-tapped — drop any open pane overlay
+                            // (tasks / payments / reminders / media) and show chat.
+                            state.reopenActiveConversation();
+                          } else {
+                            state.openConversation(c.id);
+                          }
+                        },
+                        mouseCursor: SystemMouseCursors.click,
+                        onSecondaryTapUp: (details) {
+                          _openConversationMenu(
+                            context,
+                            c,
+                            details.globalPosition,
+                          );
+                        },
+                        onLongPress: () {
+                          // Prefer the ink well's own box; fall back if not laid out yet.
+                          final box = context.findRenderObject();
+                          final Offset pos;
+                          if (box is RenderBox && box.hasSize) {
+                            pos = box.localToGlobal(const Offset(72, 36));
+                          } else {
+                            pos = const Offset(72, 120);
+                          }
+                          _openConversationMenu(context, c, pos);
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 12,
+                          ),
+                          child: Row(
+                            children: [
+                              PrivetAvatar(
+                                name: c.title,
+                                hue:
+                                    c.peer?.avatarHue ?? (c.isGroup ? 90 : 160),
+                                avatarUrl: c.peer?.avatarUrl == null
+                                    ? null
+                                    : state.api.absoluteMediaUrl(
+                                        c.peer!.avatarUrl,
+                                      ),
+                                online: peerOnline,
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            c.title,
+                                            style: GoogleFonts.syne(
+                                              fontWeight: c.unreadCount > 0
+                                                  ? FontWeight.w800
+                                                  : FontWeight.w700,
+                                              fontSize: 16,
+                                            ),
                                           ),
                                         ),
-                                      ),
-                                      if (c.muted)
-                                        Padding(
-                                          padding: EdgeInsets.only(right: 4),
-                                          child: Icon(
-                                            Icons.notifications_off_outlined,
-                                            size: 14,
+                                        if (c.muted)
+                                          Padding(
+                                            padding: EdgeInsets.only(right: 4),
+                                            child: Icon(
+                                              Icons.notifications_off_outlined,
+                                              size: 14,
+                                              color: PrivetTheme.mist,
+                                            ),
+                                          ),
+                                        if (c.isGroup)
+                                          Icon(
+                                            Icons.groups_rounded,
+                                            size: 16,
                                             color: PrivetTheme.mist,
                                           ),
-                                        ),
-                                      if (c.isGroup)
-                                        Icon(
-                                          Icons.groups_rounded,
-                                          size: 16,
-                                          color: PrivetTheme.mist,
-                                        ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 2),
-                                  if (state.isTypingIn(c.id))
-                                    Text(
-                                      state.typingLabel(conversationId: c.id),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: PrivetTheme.signal,
-                                        fontSize: 13,
-                                        // Every subtitle line is a fixed 15.6px
-                                        // box (13px×1.2 / 12px×1.3) so swapping
-                                        // the typing indicator for the handle +
-                                        // preview never changes the row height.
-                                        height: 1.2,
-                                        fontWeight: FontWeight.w600,
-                                        fontStyle: FontStyle.italic,
-                                      ),
-                                    )
-                                  else if (c.peer != null &&
-                                      c.peer!.handle.isNotEmpty)
-                                    Text(
-                                      '@${c.peer!.handle}',
-                                      style: TextStyle(
-                                        color: PrivetTheme.signal,
-                                        fontSize: 12,
-                                        height: 1.3,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    )
-                                  else
-                                    KolobokPlainText(
-                                      lastPreview ?? 'No messages yet',
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: PrivetTheme.mist,
-                                        fontSize: 13,
-                                        height: 1.2,
-                                        fontWeight: c.unreadCount > 0
-                                            ? FontWeight.w600
-                                            : FontWeight.w400,
-                                      ),
+                                      ],
                                     ),
-                                  // Second line stays in the layout (hidden
-                                  // while typing) so the item keeps two lines
-                                  // worth of height at all times.
-                                  if (c.peer != null &&
-                                      c.peer!.handle.isNotEmpty)
-                                    Visibility(
-                                      visible: !state.isTypingIn(c.id),
-                                      maintainSize: true,
-                                      maintainState: true,
-                                      maintainAnimation: true,
-                                      child: KolobokPlainText(
-                                        lastPreview ?? 'No messages yet — say hi',
+                                    const SizedBox(height: 2),
+                                    if (state.isTypingIn(c.id))
+                                      Text(
+                                        state.typingLabel(conversationId: c.id),
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
-                                        style: c.lastMessage == null
-                                            ? TextStyle(
-                                                color: PrivetTheme.mist
-                                                    .withValues(alpha: 0.7),
-                                                fontSize: 12,
-                                                height: 1.3,
-                                                fontStyle: FontStyle.italic,
-                                              )
-                                            : TextStyle(
-                                                color: PrivetTheme.mist,
-                                                fontSize: 12,
-                                                height: 1.3,
-                                                fontWeight: c.unreadCount > 0
-                                                    ? FontWeight.w600
-                                                    : FontWeight.w400,
-                                              ),
+                                        style: TextStyle(
+                                          color: PrivetTheme.signal,
+                                          fontSize: 13,
+                                          // Every subtitle line is a fixed 15.6px
+                                          // box (13px×1.2 / 12px×1.3) so swapping
+                                          // the typing indicator for the handle +
+                                          // preview never changes the row height.
+                                          height: 1.2,
+                                          fontWeight: FontWeight.w600,
+                                          fontStyle: FontStyle.italic,
+                                        ),
+                                      )
+                                    else if (c.peer != null &&
+                                        c.peer!.handle.isNotEmpty)
+                                      Text(
+                                        '@${c.peer!.handle}',
+                                        style: TextStyle(
+                                          color: PrivetTheme.signal,
+                                          fontSize: 12,
+                                          height: 1.3,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      )
+                                    else
+                                      KolobokPlainText(
+                                        lastPreview ?? 'No messages yet',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: PrivetTheme.mist,
+                                          fontSize: 13,
+                                          height: 1.2,
+                                          fontWeight: c.unreadCount > 0
+                                              ? FontWeight.w600
+                                              : FontWeight.w400,
+                                        ),
+                                      ),
+                                    // Second line stays in the layout (hidden
+                                    // while typing) so the item keeps two lines
+                                    // worth of height at all times.
+                                    if (c.peer != null &&
+                                        c.peer!.handle.isNotEmpty)
+                                      Visibility(
+                                        visible: !state.isTypingIn(c.id),
+                                        maintainSize: true,
+                                        maintainState: true,
+                                        maintainAnimation: true,
+                                        child: KolobokPlainText(
+                                          lastPreview ??
+                                              'No messages yet — say hi',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: c.lastMessage == null
+                                              ? TextStyle(
+                                                  color: PrivetTheme.mist
+                                                      .withValues(alpha: 0.7),
+                                                  fontSize: 12,
+                                                  height: 1.3,
+                                                  fontStyle: FontStyle.italic,
+                                                )
+                                              : TextStyle(
+                                                  color: PrivetTheme.mist,
+                                                  fontSize: 12,
+                                                  height: 1.3,
+                                                  fontWeight: c.unreadCount > 0
+                                                      ? FontWeight.w600
+                                                      : FontWeight.w400,
+                                                ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  if (c.lastMessage != null)
+                                    Text(
+                                      DateFormat.jm().format(
+                                        c.lastMessage!.createdAt.toLocal(),
+                                      ),
+                                      style: TextStyle(
+                                        color: PrivetTheme.mist,
+                                        fontSize: 11,
+                                      ),
+                                    )
+                                  else if (c.pinned)
+                                    Icon(
+                                      Icons.push_pin_rounded,
+                                      size: 14,
+                                      color: PrivetTheme.mist.withValues(
+                                        alpha: 0.85,
                                       ),
                                     ),
+                                  if (c.unreadCount > 0) ...[
+                                    const SizedBox(height: 6),
+                                    Container(
+                                      constraints: const BoxConstraints(
+                                        minWidth: 20,
+                                        minHeight: 20,
+                                      ),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 6,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: c.muted
+                                            ? PrivetTheme.mist.withValues(
+                                                alpha: 0.45,
+                                              )
+                                            : PrivetTheme.signal,
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      alignment: Alignment.center,
+                                      child: Text(
+                                        c.unreadCount > 99
+                                            ? '99+'
+                                            : '${c.unreadCount}',
+                                        style: TextStyle(
+                                          color: PrivetTheme.onAccent,
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                  ] else if (c.pinned &&
+                                      c.lastMessage != null) ...[
+                                    const SizedBox(height: 6),
+                                    Icon(
+                                      Icons.push_pin_rounded,
+                                      size: 15,
+                                      color: PrivetTheme.mist.withValues(
+                                        alpha: 0.8,
+                                      ),
+                                    ),
+                                  ],
                                 ],
                               ),
-                            ),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                if (c.lastMessage != null)
-                                  Text(
-                                    DateFormat.jm().format(
-                                      c.lastMessage!.createdAt.toLocal(),
-                                    ),
-                                    style: TextStyle(
-                                      color: PrivetTheme.mist,
-                                      fontSize: 11,
-                                    ),
-                                  )
-                                else if (c.pinned)
-                                  Icon(
-                                    Icons.push_pin_rounded,
-                                    size: 14,
-                                    color: PrivetTheme.mist.withValues(
-                                      alpha: 0.85,
-                                    ),
-                                  ),
-                                if (c.unreadCount > 0) ...[
-                                  const SizedBox(height: 6),
-                                  Container(
-                                    constraints: const BoxConstraints(
-                                      minWidth: 20,
-                                      minHeight: 20,
-                                    ),
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 6,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: c.muted
-                                          ? PrivetTheme.mist.withValues(
-                                              alpha: 0.45,
-                                            )
-                                          : PrivetTheme.signal,
-                                      borderRadius: BorderRadius.circular(10),
-                                    ),
-                                    alignment: Alignment.center,
-                                    child: Text(
-                                      c.unreadCount > 99
-                                          ? '99+'
-                                          : '${c.unreadCount}',
-                                      style: TextStyle(
-                                        color: PrivetTheme.onAccent,
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                  ),
-                                ] else if (c.pinned &&
-                                    c.lastMessage != null) ...[
-                                  const SizedBox(height: 6),
-                                  Icon(
-                                    Icons.push_pin_rounded,
-                                    size: 15,
-                                    color: PrivetTheme.mist.withValues(
-                                      alpha: 0.8,
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                  );
-                },
-              ),
+                    );
+                  },
+                ),
               ),
             ),
           ],
@@ -1659,198 +1662,195 @@ class InboxPane extends StatelessWidget {
                 bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
               ),
               child: CustomScrollView(
-                  slivers: [
+                slivers: [
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                      child: Text(
+                        'Start a chat',
+                        style: GoogleFonts.syne(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                      child: TextField(
+                        controller: pasteCtrl,
+                        textInputAction: TextInputAction.go,
+                        onChanged: onQueryChanged,
+                        onSubmitted: (_) => onSubmitted(),
+                        decoration: InputDecoration(
+                          hintText: 'Search people, @handle, or invite link',
+                          prefixIcon: const Icon(Icons.search_rounded),
+                          suffixIcon: lookingUp
+                              ? const Padding(
+                                  padding: EdgeInsets.all(12),
+                                  child: SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  ),
+                                )
+                              : (pasteCtrl.text.isNotEmpty
+                                    ? IconButton(
+                                        tooltip: 'Clear',
+                                        onPressed: () {
+                                          pasteCtrl.clear();
+                                          onQueryChanged('');
+                                        },
+                                        icon: const Icon(Icons.close_rounded),
+                                      )
+                                    : null),
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (!filtering)
+                    SliverToBoxAdapter(
+                      child: ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: PrivetTheme.signal.withValues(
+                            alpha: 0.15,
+                          ),
+                          child: Icon(
+                            Icons.ios_share_rounded,
+                            color: PrivetTheme.signal,
+                          ),
+                        ),
+                        title: const Text('Share my invite link'),
+                        subtitle: const Text('Copy a one-tap join link'),
+                        onTap: () {
+                          Navigator.pop(sheetContext);
+                          _showInvite(context);
+                        },
+                      ),
+                    ),
+                  if (!filtering)
+                    const SliverToBoxAdapter(child: Divider(height: 1)),
+                  if (filtering && lookingUp && matches.isEmpty)
+                    const SliverToBoxAdapter(
+                      child: Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Center(child: CircularProgressIndicator()),
+                      ),
+                    )
+                  else if (filtering && resolveError != null && matches.isEmpty)
                     SliverToBoxAdapter(
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                        padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
                         child: Text(
-                          'Start a chat',
+                          resolveError!,
+                          style: GoogleFonts.ibmPlexSans(
+                            color: PrivetTheme.danger,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ),
+                    )
+                  else if (showEmpty)
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 24, 20, 12),
+                        child: Text(
+                          'No people match “${normalizePeopleQuery(queryText)}”',
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.ibmPlexSans(
+                            color: PrivetTheme.mist,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ),
+                    )
+                  else
+                    SliverList(
+                      delegate: SliverChildBuilderDelegate(
+                        (context, i) {
+                          final u = matches[i];
+                          final exact =
+                              resolved?.id == u.id ||
+                              u.handle.toLowerCase() ==
+                                  normalizePeopleQuery(queryText);
+                          return ListTile(
+                            leading: PrivetAvatar(
+                              name: u.displayName,
+                              hue: u.avatarHue,
+                              avatarUrl: u.avatarUrl == null
+                                  ? null
+                                  : state.api.absoluteMediaUrl(u.avatarUrl),
+                              online: state.online.contains(u.id),
+                            ),
+                            title: UserNameBlock.fromUser(u, titleSize: 15),
+                            subtitle: Text(
+                              filtering
+                                  ? '@${u.handle}'
+                                  : state.presenceLabel(u.id),
+                            ),
+                            trailing: exact && filtering
+                                ? TextButton(
+                                    onPressed: () => openPeer(u),
+                                    child: const Text('Chat'),
+                                  )
+                                : null,
+                            onTap: () => openPeer(u),
+                          );
+                        },
+                        childCount: matches.length,
+                        addAutomaticKeepAlives: false,
+                        addRepaintBoundaries: true,
+                      ),
+                    ),
+                  if (blocked.isNotEmpty) ...[
+                    const SliverToBoxAdapter(child: Divider(height: 1)),
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+                        child: Text(
+                          'Blocked',
                           style: GoogleFonts.syne(
-                            fontSize: 20,
+                            fontSize: 16,
                             fontWeight: FontWeight.w700,
                           ),
                         ),
                       ),
                     ),
-                    SliverToBoxAdapter(
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-                        child: TextField(
-                          controller: pasteCtrl,
-                          textInputAction: TextInputAction.go,
-                          onChanged: onQueryChanged,
-                          onSubmitted: (_) => onSubmitted(),
-                          decoration: InputDecoration(
-                            hintText: 'Search people, @handle, or invite link',
-                            prefixIcon: const Icon(Icons.search_rounded),
-                            suffixIcon: lookingUp
-                                ? const Padding(
-                                    padding: EdgeInsets.all(12),
-                                    child: SizedBox(
-                                      width: 20,
-                                      height: 20,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    ),
-                                  )
-                                : (pasteCtrl.text.isNotEmpty
-                                      ? IconButton(
-                                          tooltip: 'Clear',
-                                          onPressed: () {
-                                            pasteCtrl.clear();
-                                            onQueryChanged('');
-                                          },
-                                          icon: const Icon(Icons.close_rounded),
-                                        )
-                                      : null),
-                          ),
-                        ),
+                    SliverList(
+                      delegate: SliverChildBuilderDelegate(
+                        (context, i) {
+                          final u = blocked[i];
+                          return ListTile(
+                            leading: PrivetAvatar(
+                              name: u.displayName,
+                              hue: u.avatarHue,
+                              avatarUrl: u.avatarUrl == null
+                                  ? null
+                                  : state.api.absoluteMediaUrl(u.avatarUrl),
+                            ),
+                            title: Text(u.displayName),
+                            subtitle: Text('@${u.handle}'),
+                            trailing: TextButton(
+                              onPressed: () async {
+                                await state.unblockUser(u.id);
+                                if (sheetContext.mounted) {
+                                  Navigator.pop(sheetContext);
+                                }
+                              },
+                              child: const Text('Unblock'),
+                            ),
+                          );
+                        },
+                        childCount: blocked.length,
+                        addAutomaticKeepAlives: false,
                       ),
                     ),
-                    if (!filtering)
-                      SliverToBoxAdapter(
-                        child: ListTile(
-                          leading: CircleAvatar(
-                            backgroundColor: PrivetTheme.signal.withValues(
-                              alpha: 0.15,
-                            ),
-                            child: Icon(
-                              Icons.ios_share_rounded,
-                              color: PrivetTheme.signal,
-                            ),
-                          ),
-                          title: const Text('Share my invite link'),
-                          subtitle: const Text('Copy a one-tap join link'),
-                          onTap: () {
-                            Navigator.pop(sheetContext);
-                            _showInvite(context);
-                          },
-                        ),
-                      ),
-                    if (!filtering)
-                      const SliverToBoxAdapter(
-                        child: Divider(height: 1),
-                      ),
-                    if (filtering && lookingUp && matches.isEmpty)
-                      const SliverToBoxAdapter(
-                        child: Padding(
-                          padding: EdgeInsets.all(24),
-                          child: Center(child: CircularProgressIndicator()),
-                        ),
-                      )
-                    else if (filtering &&
-                        resolveError != null &&
-                        matches.isEmpty)
-                      SliverToBoxAdapter(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
-                          child: Text(
-                            resolveError!,
-                            style: GoogleFonts.ibmPlexSans(
-                              color: PrivetTheme.danger,
-                              fontSize: 14,
-                            ),
-                          ),
-                        ),
-                      )
-                    else if (showEmpty)
-                      SliverToBoxAdapter(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(20, 24, 20, 12),
-                          child: Text(
-                            'No people match “${normalizePeopleQuery(queryText)}”',
-                            textAlign: TextAlign.center,
-                            style: GoogleFonts.ibmPlexSans(
-                              color: PrivetTheme.mist,
-                              fontSize: 14,
-                            ),
-                          ),
-                        ),
-                      )
-                    else
-                      SliverList(
-                        delegate: SliverChildBuilderDelegate(
-                          (context, i) {
-                            final u = matches[i];
-                            final exact = resolved?.id == u.id ||
-                                u.handle.toLowerCase() ==
-                                    normalizePeopleQuery(queryText);
-                            return ListTile(
-                              leading: PrivetAvatar(
-                                name: u.displayName,
-                                hue: u.avatarHue,
-                                avatarUrl: u.avatarUrl == null
-                                    ? null
-                                    : state.api.absoluteMediaUrl(u.avatarUrl),
-                                online: state.online.contains(u.id),
-                              ),
-                              title: UserNameBlock.fromUser(u, titleSize: 15),
-                              subtitle: Text(
-                                filtering
-                                    ? '@${u.handle}'
-                                    : state.presenceLabel(u.id),
-                              ),
-                              trailing: exact && filtering
-                                  ? TextButton(
-                                      onPressed: () => openPeer(u),
-                                      child: const Text('Chat'),
-                                    )
-                                  : null,
-                              onTap: () => openPeer(u),
-                            );
-                          },
-                          childCount: matches.length,
-                          addAutomaticKeepAlives: false,
-                          addRepaintBoundaries: true,
-                        ),
-                      ),
-                    if (blocked.isNotEmpty) ...[
-                      const SliverToBoxAdapter(child: Divider(height: 1)),
-                      SliverToBoxAdapter(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
-                          child: Text(
-                            'Blocked',
-                            style: GoogleFonts.syne(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                      ),
-                      SliverList(
-                        delegate: SliverChildBuilderDelegate(
-                          (context, i) {
-                            final u = blocked[i];
-                            return ListTile(
-                              leading: PrivetAvatar(
-                                name: u.displayName,
-                                hue: u.avatarHue,
-                                avatarUrl: u.avatarUrl == null
-                                    ? null
-                                    : state.api.absoluteMediaUrl(u.avatarUrl),
-                              ),
-                              title: Text(u.displayName),
-                              subtitle: Text('@${u.handle}'),
-                              trailing: TextButton(
-                                onPressed: () async {
-                                  await state.unblockUser(u.id);
-                                  if (sheetContext.mounted) {
-                                    Navigator.pop(sheetContext);
-                                  }
-                                },
-                                child: const Text('Unblock'),
-                              ),
-                            );
-                          },
-                          childCount: blocked.length,
-                          addAutomaticKeepAlives: false,
-                        ),
-                      ),
-                    ],
                   ],
-                ),
+                ],
+              ),
             );
           },
         );
@@ -1902,10 +1902,7 @@ class InboxPane extends StatelessWidget {
         // (typing, presence, WS pings). Scope down to the ticks that
         // actually change what this sheet renders.
         return ListenableBuilder(
-          listenable: Listenable.merge([
-            state.sessionTick,
-            state.shellTick,
-          ]),
+          listenable: Listenable.merge([state.sessionTick, state.shellTick]),
           builder: (ctx, _) {
             return StatefulBuilder(
               builder: (ctx, setSheet) {
@@ -2364,7 +2361,8 @@ class InboxPane extends StatelessWidget {
                           value: state.englishTrainerEnabled,
                           activeThumbColor: PrivetTheme.onAccent,
                           activeTrackColor: PrivetTheme.signal,
-                          onChanged: state.trainerAiAvailable ||
+                          onChanged:
+                              state.trainerAiAvailable ||
                                   state.englishTrainerEnabled
                               ? (v) {
                                   state.setEnglishTrainerEnabled(v);
@@ -2629,7 +2627,9 @@ class InboxPane extends StatelessWidget {
                                 Navigator.pop(ctx);
                                 unawaited(DesktopTray.quit());
                               },
-                              icon: const Icon(Icons.power_settings_new_rounded),
+                              icon: const Icon(
+                                Icons.power_settings_new_rounded,
+                              ),
                               label: const Text('Quit Privet'),
                             ),
                           ),
@@ -2694,7 +2694,8 @@ class InboxPane extends StatelessWidget {
                                       height: 18,
                                       child: CircularProgressIndicator(
                                         strokeWidth: 2,
-                                        value: updateProgress > 0 &&
+                                        value:
+                                            updateProgress > 0 &&
                                                 updateProgress < 1
                                             ? updateProgress
                                             : null,
@@ -2870,110 +2871,113 @@ class InboxPane extends StatelessWidget {
               child: SizedBox(
                 height: sheetH,
                 child: Column(
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
-                        child: Text(
-                          'New group',
-                          style: GoogleFonts.syne(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w700,
-                          ),
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+                      child: Text(
+                        'New group',
+                        style: GoogleFonts.syne(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 20),
-                        child: TextField(
-                          controller: titleCtrl,
-                          decoration: const InputDecoration(
-                            hintText: 'Group name',
-                          ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: TextField(
+                        controller: titleCtrl,
+                        decoration: const InputDecoration(
+                          hintText: 'Group name',
                         ),
                       ),
-                      const SizedBox(height: 8),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 20),
-                        child: TextField(
-                          controller: searchCtrl,
-                          decoration: InputDecoration(
-                            hintText: 'Search people',
-                            prefixIcon: const Icon(Icons.search_rounded),
-                            suffixIcon: peopleQuery.isEmpty
-                                ? null
-                                : IconButton(
-                                    tooltip: 'Clear',
-                                    onPressed: () {
-                                      searchCtrl.clear();
-                                      setModal(() => peopleQuery = '');
-                                    },
-                                    icon: const Icon(Icons.close_rounded),
-                                  ),
-                          ),
-                          onChanged: (v) => setModal(() => peopleQuery = v),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Expanded(
-                        child: directory.isEmpty
-                            ? Center(
-                                child: Text(
-                                  peopleQuery.trim().isEmpty
-                                      ? 'No people yet'
-                                      : 'No people match “${normalizePeopleQuery(peopleQuery)}”',
-                                  style: GoogleFonts.ibmPlexSans(
-                                    color: PrivetTheme.mist,
-                                  ),
-                                ),
-                              )
-                            : ListView.builder(
-                          itemCount: directory.length,
-                          addAutomaticKeepAlives: false,
-                          itemBuilder: (context, i) {
-                            final u = directory[i];
-                            final on = selected.contains(u.id);
-                            return CheckboxListTile(
-                              value: on,
-                              onChanged: (v) {
-                                setModal(() {
-                                  if (v == true) {
-                                    selected.add(u.id);
-                                  } else {
-                                    selected.remove(u.id);
-                                  }
-                                });
-                              },
-                              secondary: PrivetAvatar(
-                                name: u.displayName,
-                                hue: u.avatarHue,
-                                online: state.online.contains(u.id),
-                              ),
-                              title: UserNameBlock.fromUser(u, titleSize: 15),
-                              subtitle: Text('@${u.handle}'),
-                            );
-                          },
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton(
-                            onPressed: selected.isEmpty
-                                ? null
-                                : () async {
-                                    Navigator.pop(context);
-                                    await state.createGroup(
-                                      title: titleCtrl.text.trim().isEmpty
-                                          ? 'Group chat'
-                                          : titleCtrl.text.trim(),
-                                      memberIds: selected.toList(),
-                                    );
+                    ),
+                    const SizedBox(height: 8),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: TextField(
+                        controller: searchCtrl,
+                        decoration: InputDecoration(
+                          hintText: 'Search people',
+                          prefixIcon: const Icon(Icons.search_rounded),
+                          suffixIcon: peopleQuery.isEmpty
+                              ? null
+                              : IconButton(
+                                  tooltip: 'Clear',
+                                  onPressed: () {
+                                    searchCtrl.clear();
+                                    setModal(() => peopleQuery = '');
                                   },
-                            child: const Text('Create group'),
-                          ),
+                                  icon: const Icon(Icons.close_rounded),
+                                ),
+                        ),
+                        onChanged: (v) => setModal(() => peopleQuery = v),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: directory.isEmpty
+                          ? Center(
+                              child: Text(
+                                peopleQuery.trim().isEmpty
+                                    ? 'No people yet'
+                                    : 'No people match “${normalizePeopleQuery(peopleQuery)}”',
+                                style: GoogleFonts.ibmPlexSans(
+                                  color: PrivetTheme.mist,
+                                ),
+                              ),
+                            )
+                          : ListView.builder(
+                              itemCount: directory.length,
+                              addAutomaticKeepAlives: false,
+                              itemBuilder: (context, i) {
+                                final u = directory[i];
+                                final on = selected.contains(u.id);
+                                return CheckboxListTile(
+                                  value: on,
+                                  onChanged: (v) {
+                                    setModal(() {
+                                      if (v == true) {
+                                        selected.add(u.id);
+                                      } else {
+                                        selected.remove(u.id);
+                                      }
+                                    });
+                                  },
+                                  secondary: PrivetAvatar(
+                                    name: u.displayName,
+                                    hue: u.avatarHue,
+                                    online: state.online.contains(u.id),
+                                  ),
+                                  title: UserNameBlock.fromUser(
+                                    u,
+                                    titleSize: 15,
+                                  ),
+                                  subtitle: Text('@${u.handle}'),
+                                );
+                              },
+                            ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: selected.isEmpty
+                              ? null
+                              : () async {
+                                  Navigator.pop(context);
+                                  await state.createGroup(
+                                    title: titleCtrl.text.trim().isEmpty
+                                        ? 'Group chat'
+                                        : titleCtrl.text.trim(),
+                                    memberIds: selected.toList(),
+                                  );
+                                },
+                          child: const Text('Create group'),
                         ),
                       ),
-                    ],
+                    ),
+                  ],
                 ),
               ),
             );
@@ -3238,13 +3242,16 @@ class _ConversationPaneState extends State<ConversationPane>
   List<String> _searchMatchIds = [];
   int _searchMatchIndex = 0;
   Timer? _searchDebounce;
+
   /// Message highlighted temporarily after tapping a reply quote.
   String? _focusedReplyId;
   Timer? _focusReplyTimer;
   final List<PickedBytes> _draftMedia = [];
   ChatMessage? _replyingTo;
+
   /// Own message currently being edited in the composer (no popup).
   ChatMessage? _editingMessage;
+
   /// Composer draft stashed while editing so Cancel restores it.
   String? _composerDraftBeforeEdit;
   List<ComposerSuggestion> _acSuggestions = [];
@@ -3276,6 +3283,9 @@ class _ConversationPaneState extends State<ConversationPane>
   /// English trainer is checking the composer text before send.
   bool _trainerChecking = false;
 
+  /// Sticky coach error / status — stays until the user taps X.
+  TrainerNotice? _trainerNotice;
+
   /// User chose "Edit myself" — the next check is a retry of the same message.
   bool _trainerRetry = false;
 
@@ -3295,6 +3305,7 @@ class _ConversationPaneState extends State<ConversationPane>
   ChatMediaFolderKind? _mediaFolder;
   bool _showTasks = false;
   int _tasksInitialTab = 0;
+
   /// Task to scroll to + highlight inside the Tasks pane (from tapping a
   /// task-change message). Cleared by ChatTaskPane once the reveal is done.
   String? _revealTaskId;
@@ -3302,6 +3313,7 @@ class _ConversationPaneState extends State<ConversationPane>
   String? _draftConversationId;
   int? _composerMediaAttachId;
   int? _composerTextAttachId;
+
   /// Optimistic until a real call/getUserMedia — never block chat open on
   /// enumerateDevices (Linux WebRTC ADM stall).
   MediaPermissionStatus _mediaPerms = const MediaPermissionStatus(
@@ -3338,8 +3350,9 @@ class _ConversationPaneState extends State<ConversationPane>
       });
       _syncComposerHasContent();
     });
-    _composerMediaAttachId =
-        registerComposerMediaAttach(_onAnnotatedImageFromLightbox);
+    _composerMediaAttachId = registerComposerMediaAttach(
+      _onAnnotatedImageFromLightbox,
+    );
     _composerTextAttachId = registerComposerTextAttach(_onSharedText);
     // Do NOT enumerateDevices / init WebRTC ADM on chat open — on Linux+NVIDIA
     // that stalls frame presentation for many seconds (isolate stays alive,
@@ -3662,11 +3675,13 @@ class _ConversationPaneState extends State<ConversationPane>
     if (appBytes != null) {
       if (!mounted) return;
       setState(() {
-        _draftMedia.add(PickedBytes(
-          bytes: appBytes,
-          filename: 'paste-png-${DateTime.now().millisecondsSinceEpoch}.png',
-          mimeType: 'image/png',
-        ));
+        _draftMedia.add(
+          PickedBytes(
+            bytes: appBytes,
+            filename: 'paste-png-${DateTime.now().millisecondsSinceEpoch}.png',
+            mimeType: 'image/png',
+          ),
+        );
         _syncEmojiPanel(false);
       });
       _syncComposerHasContent();
@@ -3839,7 +3854,8 @@ class _ConversationPaneState extends State<ConversationPane>
           break;
         }
       }
-      live ??= (snapshot.contains(issue.word) &&
+      live ??=
+          (snapshot.contains(issue.word) &&
               issue.start >= 0 &&
               issue.end <= snapshot.length &&
               snapshot.substring(issue.start, issue.end) == issue.word)
@@ -3873,11 +3889,7 @@ class _ConversationPaneState extends State<ConversationPane>
         editable = _composerEditableState();
       }
 
-      _controller.applySpellSuggestion(
-        live,
-        suggestion,
-        editable: editable,
-      );
+      _controller.applySpellSuggestion(live, suggestion, editable: editable);
       _lastAutocorrectText = _controller.text;
       _controller.setHoveredSpellIssue(null);
       widget.state.notifyTyping();
@@ -4119,8 +4131,8 @@ class _ConversationPaneState extends State<ConversationPane>
             color: typing
                 ? PrivetTheme.signal
                 : (chat?.peer?.handle.isNotEmpty == true
-                    ? PrivetTheme.signal
-                    : PrivetTheme.mist),
+                      ? PrivetTheme.signal
+                      : PrivetTheme.mist),
             fontSize: 12,
             fontWeight: FontWeight.w600,
             fontStyle: typing ? FontStyle.italic : FontStyle.normal,
@@ -4224,10 +4236,7 @@ class _ConversationPaneState extends State<ConversationPane>
                   },
                 ),
                 ListTile(
-                  leading: Icon(
-                    Icons.mouse_rounded,
-                    color: PrivetTheme.signal,
-                  ),
+                  leading: Icon(Icons.mouse_rounded, color: PrivetTheme.signal),
                   title: const Text('Remote control'),
                   subtitle: Text(
                     'Ask to control their desktop — they must use the Privet app',
@@ -4311,54 +4320,66 @@ class _ConversationPaneState extends State<ConversationPane>
     final board = state.taskBoardFor(convId);
     final tasksPinned = board.activeItems.any((t) => t.pinned);
     final reminders = state.remindersFor(convId).where((r) => !r.paid);
-    final pinnedPayment = reminders.where((r) => r.isPayment && r.pinned).firstOrNull;
-    final pinnedReminder = reminders.where((r) => !r.isPayment && r.pinned).firstOrNull;
+    final pinnedPayment = reminders
+        .where((r) => r.isPayment && r.pinned)
+        .firstOrNull;
+    final pinnedReminder = reminders
+        .where((r) => !r.isPayment && r.pinned)
+        .firstOrNull;
 
     final chips = <Widget>[];
 
     if (pinnedPayment != null) {
-      chips.add(Padding(
-        padding: const EdgeInsets.fromLTRB(0, 0, 4, 0),
-        child: ReminderHeaderChip(
-          reminder: pinnedPayment,
-          onTap: () => _toggleTasks(tab: 1),
-          onUnpin: () => state.toggleReminderPin(pinnedPayment),
+      chips.add(
+        Padding(
+          padding: const EdgeInsets.fromLTRB(0, 0, 4, 0),
+          child: ReminderHeaderChip(
+            reminder: pinnedPayment,
+            onTap: () => _toggleTasks(tab: 1),
+            onUnpin: () => state.toggleReminderPin(pinnedPayment),
+          ),
         ),
-      ));
+      );
     }
 
     if (pinnedReminder != null) {
-      chips.add(Padding(
-        padding: const EdgeInsets.fromLTRB(0, 0, 4, 0),
-        child: ReminderHeaderChip(
-          reminder: pinnedReminder,
-          onTap: () => _toggleTasks(tab: 2),
-          onUnpin: () => state.toggleReminderPin(pinnedReminder),
+      chips.add(
+        Padding(
+          padding: const EdgeInsets.fromLTRB(0, 0, 4, 0),
+          child: ReminderHeaderChip(
+            reminder: pinnedReminder,
+            onTap: () => _toggleTasks(tab: 2),
+            onUnpin: () => state.toggleReminderPin(pinnedReminder),
+          ),
         ),
-      ));
+      );
     }
 
     if (tasksPinned) {
       final pinned = board.pinnedTask;
-      chips.add(Padding(
-        padding: const EdgeInsets.fromLTRB(0, 0, 4, 0),
-        child: TaskHeaderChip(
-          board: board,
-          pinnedTask: pinned,
-          active: _showTasks && _tasksInitialTab == 0,
-          onTap: () => _toggleTasks(tab: 0),
-          onUnpin: () => state.unpinTasksFromHeader(convId),
+      chips.add(
+        Padding(
+          padding: const EdgeInsets.fromLTRB(0, 0, 4, 0),
+          child: TaskHeaderChip(
+            board: board,
+            pinnedTask: pinned,
+            active: _showTasks && _tasksInitialTab == 0,
+            onTap: () => _toggleTasks(tab: 0),
+            onUnpin: () => state.unpinTasksFromHeader(convId),
+          ),
         ),
-      ));
+      );
     }
 
-    chips.add(_CallActionButton(
-      tooltip: 'Search in chat',
-      icon: _searchOpen ? Icons.search_off_rounded : Icons.search_rounded,
-      active: true,
-      enabled: true,
-      onPressed: _toggleSearch,
-    ));
+    chips.add(
+      _CallActionButton(
+        tooltip: 'Search in chat',
+        icon: _searchOpen ? Icons.search_off_rounded : Icons.search_rounded,
+        active: true,
+        enabled: true,
+        onPressed: _toggleSearch,
+      ),
+    );
 
     // Tasks chip opens the task pane directly. Payments / reminders stay
     // reachable inside the task pane's ⋮ menu so tasks own the header.
@@ -4564,7 +4585,8 @@ class _ConversationPaneState extends State<ConversationPane>
     final int cursor;
     if (sel.isValid && sel.isCollapsed) {
       cursor = sel.baseOffset;
-    } else if (text.isNotEmpty && _looksLikeWordBoundary(text[text.length - 1])) {
+    } else if (text.isNotEmpty &&
+        _looksLikeWordBoundary(text[text.length - 1])) {
       cursor = text.length;
     } else {
       return;
@@ -4602,7 +4624,8 @@ class _ConversationPaneState extends State<ConversationPane>
     final int cursor;
     if (sel.isValid && sel.isCollapsed) {
       cursor = sel.baseOffset;
-    } else if (text.isNotEmpty && _looksLikeWordBoundary(text[text.length - 1])) {
+    } else if (text.isNotEmpty &&
+        _looksLikeWordBoundary(text[text.length - 1])) {
       cursor = text.length;
     } else {
       return;
@@ -4950,8 +4973,9 @@ class _ConversationPaneState extends State<ConversationPane>
   void _onSharedText(String text, {String? subject}) {
     if (!mounted) return;
     setState(() {
-      final subjectLine =
-          (subject != null && subject.trim().isNotEmpty) ? '$subject\n' : '';
+      final subjectLine = (subject != null && subject.trim().isNotEmpty)
+          ? '$subject\n'
+          : '';
       _draftVoice = null;
       _controller.loadMarkup(subjectLine + text);
       _syncEmojiPanel(false);
@@ -5168,180 +5192,86 @@ class _ConversationPaneState extends State<ConversationPane>
         }
       },
       child: ColoredBox(
-      color: PrivetTheme.panel,
-      child: Column(
-        children: [
-          SafeArea(
-            bottom: false,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Padding(
-                  padding: EdgeInsets.fromLTRB(
-                    compact ? 2 : 8,
-                    compact ? 4 : 8,
-                    compact ? 2 : 8,
-                    compact ? 4 : 8,
-                  ),
-                  child: compact
-                      ? _buildMobileChatHeader(state, chat)
-                      : Row(
-                          children: [
-                            if (widget.showBack)
-                              IconButton(
-                                onPressed: state.clearActiveConversation,
-                                icon: const Icon(Icons.arrow_back_rounded),
+        color: PrivetTheme.panel,
+        child: Column(
+          children: [
+            SafeArea(
+              bottom: false,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      compact ? 2 : 8,
+                      compact ? 4 : 8,
+                      compact ? 2 : 8,
+                      compact ? 4 : 8,
+                    ),
+                    child: compact
+                        ? _buildMobileChatHeader(state, chat)
+                        : Row(
+                            children: [
+                              if (widget.showBack)
+                                IconButton(
+                                  onPressed: state.clearActiveConversation,
+                                  icon: const Icon(Icons.arrow_back_rounded),
+                                ),
+                              PrivetAvatar(
+                                name: chat?.title ?? 'Chat',
+                                hue:
+                                    chat?.peer?.avatarHue ??
+                                    (chat?.isGroup == true ? 90 : 160),
+                                avatarUrl: chat?.peer?.avatarUrl == null
+                                    ? null
+                                    : state.api.absoluteMediaUrl(
+                                        chat!.peer!.avatarUrl,
+                                      ),
+                                online:
+                                    chat?.peer != null &&
+                                    state.online.contains(chat!.peer!.id),
                               ),
-                            PrivetAvatar(
-                              name: chat?.title ?? 'Chat',
-                              hue:
-                                  chat?.peer?.avatarHue ??
-                                  (chat?.isGroup == true ? 90 : 160),
-                              avatarUrl: chat?.peer?.avatarUrl == null
-                                  ? null
-                                  : state.api.absoluteMediaUrl(
-                                      chat!.peer!.avatarUrl,
-                                    ),
-                              online:
-                                  chat?.peer != null &&
-                                  state.online.contains(chat!.peer!.id),
-                            ),
-                            const SizedBox(width: 12),
-                            ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 200),
-                              child: ListenableBuilder(
-                                listenable: state.typingTick,
-                                builder: (context, _) =>
-                                    _buildChatTitleColumn(state, chat),
+                              const SizedBox(width: 12),
+                              ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  maxWidth: 200,
+                                ),
+                                child: ListenableBuilder(
+                                  listenable: state.typingTick,
+                                  builder: (context, _) =>
+                                      _buildChatTitleColumn(state, chat),
+                                ),
                               ),
-                            ),
-                            Expanded(
-                              child: Align(
-                                alignment: Alignment.centerRight,
-                                child: SingleChildScrollView(
-                                  scrollDirection: Axis.horizontal,
-                                  child: Row(
-                                    children: desktopActions,
+                              Expanded(
+                                child: Align(
+                                  alignment: Alignment.centerRight,
+                                  child: SingleChildScrollView(
+                                    scrollDirection: Axis.horizontal,
+                                    child: Row(children: desktopActions),
                                   ),
                                 ),
                               ),
-                            ),
-                          ],
-                        ),
-                ),
-                if (PrivetTheme.accentStyle == AccentStyle.tape ||
-                    PrivetTheme.accentStyle == AccentStyle.larva)
-                  const AccentSplitLine(axis: Axis.horizontal)
-                else
-                  Container(height: 1, color: PrivetTheme.line),
-              ],
-            ),
-          ),
-          if (_searchOpen)
-            Container(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-              decoration: BoxDecoration(
-                border: Border(bottom: BorderSide(color: PrivetTheme.line)),
-              ),
-              child: compact
-                  ? Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        TextField(
-                          controller: _searchController,
-                          autofocus: true,
-                          style: GoogleFonts.ibmPlexSans(fontSize: 14),
-                          decoration: InputDecoration(
-                            isDense: true,
-                            hintText: 'Search messages in this chat…',
-                            prefixIcon: const Icon(
-                              Icons.search_rounded,
-                              size: 20,
-                            ),
-                            suffixIcon: _searchBusy
-                                ? const Padding(
-                                    padding: EdgeInsets.all(12),
-                                    child: SizedBox(
-                                      width: 16,
-                                      height: 16,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    ),
-                                  )
-                                : (_searchController.text.isEmpty
-                                      ? null
-                                      : IconButton(
-                                          icon: const Icon(Icons.clear_rounded),
-                                          onPressed: () {
-                                            _searchController.clear();
-                                            _onSearchChanged('');
-                                            setState(() {});
-                                          },
-                                        )),
-                            filled: true,
-                            fillColor: PrivetTheme.panelElevated,
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(10),
-                              borderSide: BorderSide(color: PrivetTheme.line),
-                            ),
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 10,
-                            ),
-                          ),
-                          onChanged: (v) {
-                            setState(() {});
-                            _onSearchChanged(v);
-                          },
-                        ),
-                        if (_searchMatchIds.isNotEmpty)
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.end,
-                            children: [
-                              Text(
-                                '${_searchMatchIndex + 1}/${_searchMatchIds.length}',
-                                style: GoogleFonts.ibmPlexSans(
-                                  fontSize: 12,
-                                  color: PrivetTheme.mist,
-                                ),
-                              ),
-                              IconButton(
-                                tooltip: 'Older match',
-                                onPressed: () => _searchStep(1),
-                                icon: const Icon(
-                                  Icons.keyboard_arrow_up_rounded,
-                                ),
-                              ),
-                              IconButton(
-                                tooltip: 'Newer match',
-                                onPressed: () => _searchStep(-1),
-                                icon: const Icon(
-                                  Icons.keyboard_arrow_down_rounded,
-                                ),
-                              ),
-                              IconButton(
-                                tooltip: 'Close search',
-                                onPressed: _closeSearch,
-                                icon: const Icon(Icons.close_rounded),
-                              ),
                             ],
-                          )
-                        else
-                          Align(
-                            alignment: Alignment.centerRight,
-                            child: IconButton(
-                              tooltip: 'Close search',
-                              onPressed: _closeSearch,
-                              icon: const Icon(Icons.close_rounded),
-                            ),
                           ),
-                      ],
-                    )
-                  : Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
+                  ),
+                  if (PrivetTheme.accentStyle == AccentStyle.tape ||
+                      PrivetTheme.accentStyle == AccentStyle.larva)
+                    const AccentSplitLine(axis: Axis.horizontal)
+                  else
+                    Container(height: 1, color: PrivetTheme.line),
+                ],
+              ),
+            ),
+            if (_searchOpen)
+              Container(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                decoration: BoxDecoration(
+                  border: Border(bottom: BorderSide(color: PrivetTheme.line)),
+                ),
+                child: compact
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          TextField(
                             controller: _searchController,
                             autofocus: true,
                             style: GoogleFonts.ibmPlexSans(fontSize: 14),
@@ -5391,737 +5321,872 @@ class _ConversationPaneState extends State<ConversationPane>
                               _onSearchChanged(v);
                             },
                           ),
-                        ),
-                        if (_searchMatchIds.isNotEmpty) ...[
-                          const SizedBox(width: 8),
-                          Text(
-                            '${_searchMatchIndex + 1}/${_searchMatchIds.length}',
-                            style: GoogleFonts.ibmPlexSans(
-                              fontSize: 12,
-                              color: PrivetTheme.mist,
+                          if (_searchMatchIds.isNotEmpty)
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.end,
+                              children: [
+                                Text(
+                                  '${_searchMatchIndex + 1}/${_searchMatchIds.length}',
+                                  style: GoogleFonts.ibmPlexSans(
+                                    fontSize: 12,
+                                    color: PrivetTheme.mist,
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Older match',
+                                  onPressed: () => _searchStep(1),
+                                  icon: const Icon(
+                                    Icons.keyboard_arrow_up_rounded,
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Newer match',
+                                  onPressed: () => _searchStep(-1),
+                                  icon: const Icon(
+                                    Icons.keyboard_arrow_down_rounded,
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Close search',
+                                  onPressed: _closeSearch,
+                                  icon: const Icon(Icons.close_rounded),
+                                ),
+                              ],
+                            )
+                          else
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: IconButton(
+                                tooltip: 'Close search',
+                                onPressed: _closeSearch,
+                                icon: const Icon(Icons.close_rounded),
+                              ),
+                            ),
+                        ],
+                      )
+                    : Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _searchController,
+                              autofocus: true,
+                              style: GoogleFonts.ibmPlexSans(fontSize: 14),
+                              decoration: InputDecoration(
+                                isDense: true,
+                                hintText: 'Search messages in this chat…',
+                                prefixIcon: const Icon(
+                                  Icons.search_rounded,
+                                  size: 20,
+                                ),
+                                suffixIcon: _searchBusy
+                                    ? const Padding(
+                                        padding: EdgeInsets.all(12),
+                                        child: SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        ),
+                                      )
+                                    : (_searchController.text.isEmpty
+                                          ? null
+                                          : IconButton(
+                                              icon: const Icon(
+                                                Icons.clear_rounded,
+                                              ),
+                                              onPressed: () {
+                                                _searchController.clear();
+                                                _onSearchChanged('');
+                                                setState(() {});
+                                              },
+                                            )),
+                                filled: true,
+                                fillColor: PrivetTheme.panelElevated,
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                  borderSide: BorderSide(
+                                    color: PrivetTheme.line,
+                                  ),
+                                ),
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 10,
+                                ),
+                              ),
+                              onChanged: (v) {
+                                setState(() {});
+                                _onSearchChanged(v);
+                              },
                             ),
                           ),
+                          if (_searchMatchIds.isNotEmpty) ...[
+                            const SizedBox(width: 8),
+                            Text(
+                              '${_searchMatchIndex + 1}/${_searchMatchIds.length}',
+                              style: GoogleFonts.ibmPlexSans(
+                                fontSize: 12,
+                                color: PrivetTheme.mist,
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: 'Older match',
+                              onPressed: () => _searchStep(1),
+                              icon: const Icon(Icons.keyboard_arrow_up_rounded),
+                            ),
+                            IconButton(
+                              tooltip: 'Newer match',
+                              onPressed: () => _searchStep(-1),
+                              icon: const Icon(
+                                Icons.keyboard_arrow_down_rounded,
+                              ),
+                            ),
+                          ],
                           IconButton(
-                            tooltip: 'Older match',
-                            onPressed: () => _searchStep(1),
-                            icon: const Icon(Icons.keyboard_arrow_up_rounded),
-                          ),
-                          IconButton(
-                            tooltip: 'Newer match',
-                            onPressed: () => _searchStep(-1),
-                            icon: const Icon(Icons.keyboard_arrow_down_rounded),
+                            tooltip: 'Close search',
+                            onPressed: _closeSearch,
+                            icon: const Icon(Icons.close_rounded),
                           ),
                         ],
-                        IconButton(
-                          tooltip: 'Close search',
-                          onPressed: _closeSearch,
-                          icon: const Icon(Icons.close_rounded),
-                        ),
-                      ],
-                    ),
-            ),
-          if (_mediaFolder != null)
-            Expanded(
-              child: ChatMediaFolderPane(
-                folder: _mediaFolder!,
-                messages: messages,
-                mediaBase: mediaBase,
-                conversationId: state.activeConversationId ?? '',
-                api: state.api,
-                tasks: [
-                  ...state.tasksFor(state.activeConversationId),
-                  ...state.taskHistoryFor(state.activeConversationId),
-                ],
-                onClose: () => setState(() => _mediaFolder = null),
-                onSelectFolder: (kind) => setState(() {
-                  _showTasks = false;
-                  _mediaFolder = kind;
-                }),
+                      ),
               ),
-            )
-          else if (_showTasks && state.activeConversationId != null)
-            Expanded(
-              child: ChatTaskPane(
-                key: ValueKey('${state.activeConversationId}-$_tasksInitialTab'),
-                state: state,
-                conversationId: state.activeConversationId!,
-                mediaBase: mediaBase,
-                initialTab: _tasksInitialTab,
-                onClose: () => setState(() => _showTasks = false),
-                revealTaskId: _revealTaskId,
-                onRevealDone: () {
-                  if (mounted) setState(() => _revealTaskId = null);
-                },
-              ),
-            )
-          else ...[
-            Expanded(
-              child: Stack(
-                children: [
-                  Listener(
-                    behavior: HitTestBehavior.translucent,
-                    onPointerUp: (_) {
-                      // Text body claims the pointer on down (child runs first).
-                      // Do not clear selection for those gestures — that was wiping
-                      // the Copy/Reply/Forward bar immediately after every drag.
-                      if (privetMessageSelectionDragging) return;
-                      if (privetMessageBodyClaimedPointer) {
+            if (_mediaFolder != null)
+              Expanded(
+                child: ChatMediaFolderPane(
+                  folder: _mediaFolder!,
+                  messages: messages,
+                  mediaBase: mediaBase,
+                  conversationId: state.activeConversationId ?? '',
+                  api: state.api,
+                  tasks: [
+                    ...state.tasksFor(state.activeConversationId),
+                    ...state.taskHistoryFor(state.activeConversationId),
+                  ],
+                  onClose: () => setState(() => _mediaFolder = null),
+                  onSelectFolder: (kind) => setState(() {
+                    _showTasks = false;
+                    _mediaFolder = kind;
+                  }),
+                ),
+              )
+            else if (_showTasks && state.activeConversationId != null)
+              Expanded(
+                child: ChatTaskPane(
+                  key: ValueKey(
+                    '${state.activeConversationId}-$_tasksInitialTab',
+                  ),
+                  state: state,
+                  conversationId: state.activeConversationId!,
+                  mediaBase: mediaBase,
+                  initialTab: _tasksInitialTab,
+                  onClose: () => setState(() => _showTasks = false),
+                  revealTaskId: _revealTaskId,
+                  onRevealDone: () {
+                    if (mounted) setState(() => _revealTaskId = null);
+                  },
+                ),
+              )
+            else ...[
+              Expanded(
+                child: Stack(
+                  children: [
+                    Listener(
+                      behavior: HitTestBehavior.translucent,
+                      onPointerUp: (_) {
+                        // Text body claims the pointer on down (child runs first).
+                        // Do not clear selection for those gestures — that was wiping
+                        // the Copy/Reply/Forward bar immediately after every drag.
+                        if (privetMessageSelectionDragging) return;
+                        if (privetMessageBodyClaimedPointer) {
+                          privetMessageBodyClaimedPointer = false;
+                          return;
+                        }
+                        privetClearMessageSelection();
+                      },
+                      onPointerCancel: (_) {
                         privetMessageBodyClaimedPointer = false;
-                        return;
-                      }
-                      privetClearMessageSelection();
-                    },
-                    onPointerCancel: (_) {
-                      privetMessageBodyClaimedPointer = false;
-                    },
-                    child: ListView.builder(
-                      controller: _scroll,
-                      reverse: true,
-                      // Prefetch a bit more off-screen so fling scroll stays
-                      // smooth when message bubbles are image-heavy.
-                      scrollCacheExtent: const ScrollCacheExtent.pixels(900),
-                      addAutomaticKeepAlives: false,
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                      itemCount:
-                          messages.length +
-                          ((state.activeConversationId != null &&
-                                  state.loadingOlder.contains(
-                                    state.activeConversationId,
-                                  ))
-                              ? 1
-                              : 0),
-                      itemBuilder: (context, i) {
-                        final loadingOlder =
-                            state.activeConversationId != null &&
-                            state.loadingOlder.contains(
-                              state.activeConversationId,
-                            );
-                        if (loadingOlder && i == messages.length) {
-                          return const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 12),
-                            child: Center(
-                              child: SizedBox(
-                                width: 22,
-                                height: 22,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
+                      },
+                      child: ListView.builder(
+                        controller: _scroll,
+                        reverse: true,
+                        // Prefetch a bit more off-screen so fling scroll stays
+                        // smooth when message bubbles are image-heavy.
+                        scrollCacheExtent: const ScrollCacheExtent.pixels(900),
+                        addAutomaticKeepAlives: false,
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                        itemCount:
+                            messages.length +
+                            ((state.activeConversationId != null &&
+                                    state.loadingOlder.contains(
+                                      state.activeConversationId,
+                                    ))
+                                ? 1
+                                : 0),
+                        itemBuilder: (context, i) {
+                          final loadingOlder =
+                              state.activeConversationId != null &&
+                              state.loadingOlder.contains(
+                                state.activeConversationId,
+                              );
+                          if (loadingOlder && i == messages.length) {
+                            return const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 12),
+                              child: Center(
+                                child: SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
                                 ),
                               ),
+                            );
+                          }
+                          // reverse: true → index 0 is newest (bottom); open lands on last message
+                          final actualIndex = messages.length - 1 - i;
+                          final m = messages[actualIndex];
+                          final mine = m.sender.id == state.user?.id;
+                          final key = _messageKeys.putIfAbsent(
+                            m.id,
+                            GlobalKey.new,
+                          );
+                          final highlighted =
+                              (_searchMatchIds.isNotEmpty &&
+                                  _searchMatchIds[_searchMatchIndex] == m.id) ||
+                              _focusedReplyId == m.id;
+                          // Day separator sits above the first message of each day.
+                          final showDaySeparator =
+                              actualIndex == 0 ||
+                              !_sameDay(
+                                messages[actualIndex - 1].createdAt,
+                                m.createdAt,
+                              );
+                          // Task-change rows are system notes: no reply/forward/
+                          // react/edit — same treatment as call-history chips.
+                          final isSystemNote = m.isCallHistory || m.isTaskEvent;
+                          final bubble = MessageBubble(
+                            message: m,
+                            mine: mine,
+                            mediaBase: mediaBase,
+                            selfId: state.user?.id,
+                            showSender: true,
+                            highlighted: highlighted,
+                            fontScale: state.chatFontSize / 15.0,
+                            // Accent themes can force a chat face (hacker → Cousine).
+                            // Otherwise my font applies only to my own messages.
+                            defaultFontFamily:
+                                PrivetTheme.accentMessageFontFamily ??
+                                (mine ? state.chatFontFamily : ''),
+                            onSetDefaultFont: state.setChatFontFamily,
+                            readByPeer:
+                                mine &&
+                                (chat?.isReadByPeer(
+                                      m,
+                                      selfId: state.user?.id,
+                                    ) ??
+                                    false),
+                            seenByLabel: mine && chat?.isGroup == true
+                                ? _seenByShort(chat!, m, state)
+                                : null,
+                            addedToTask: taskMessageIds.contains(m.id),
+                            onTaskEventTap: m.isTaskEvent
+                                ? () => _openTaskFromEvent(m)
+                                : null,
+                            onReply: isSystemNote
+                                ? null
+                                : (msg, {selectedText}) {
+                                    final snippet =
+                                        (selectedText != null &&
+                                            selectedText.trim().isNotEmpty)
+                                        ? selectedText.trim()
+                                        : null;
+                                    setState(() {
+                                      _replyingTo = msg;
+                                      _replySnippet = snippet;
+                                      _syncEmojiPanel(false);
+                                    });
+                                    // Selection belongs only in the reply bar, not the draft.
+                                    if (snippet != null) {
+                                      _controller.clear();
+                                    }
+                                    WidgetsBinding.instance
+                                        .addPostFrameCallback((_) {
+                                          if (mounted) {
+                                            _composerFocus.requestFocus();
+                                          }
+                                        });
+                                  },
+                            onForward: isSystemNote
+                                ? null
+                                : (msg, {selectedText}) =>
+                                      _forwardMessage(context, msg),
+                            onSeenBy: chat?.isGroup == true
+                                ? (msg) => _showSeenBy(context, chat!, msg)
+                                : null,
+                            onReact: isSystemNote
+                                ? null
+                                : (msg, emoji) =>
+                                      state.toggleReaction(msg.id, emoji),
+                            onAddToTask: isSystemNote
+                                ? null
+                                : (msg) async {
+                                    await state.addMessageToTask(msg);
+                                    if (!mounted) return;
+                                    setState(() {
+                                      _mediaFolder = null;
+                                      _showTasks = true;
+                                    });
+                                  },
+                            onOpenTasks: () => setState(() {
+                              _mediaFolder = null;
+                              _showTasks = true;
+                            }),
+                            aiActive: state.aiActive,
+                            onAskAi: isSystemNote
+                                ? null
+                                : (msg) => _askAiAboutMessage(context, msg),
+                            onEdit: mine && !isSystemNote
+                                ? (msg) => _editMessage(msg)
+                                : null,
+                            onFormatMessage: mine && !isSystemNote
+                                ? (sel, fmt) => _applyMessageFormat(m, sel, fmt)
+                                : null,
+                            onDelete: mine
+                                ? (msg) => _deleteMessage(msg)
+                                : null,
+                            onReplyTap: (reply) => _focusReply(reply.id),
+                          );
+                          return KeyedSubtree(
+                            key: key,
+                            child: RepaintBoundary(
+                              child: showDaySeparator
+                                  ? Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        _DaySeparator(
+                                          label: _dayLabel(m.createdAt),
+                                        ),
+                                        bubble,
+                                      ],
+                                    )
+                                  : bubble,
                             ),
                           );
+                        },
+                      ),
+                    ),
+                    // "is typing" bubble pinned to the bottom of the message
+                    // area. Overlaid (not in the Column flow) so its appearance
+                    // and disappearance never shift the visible messages up/down.
+                    // IgnorePointer lets taps/scroll still reach the message
+                    // behind it; the bubble's own padding keeps its margins.
+                    ListenableBuilder(
+                      listenable: state.typingTick,
+                      builder: (context, _) {
+                        if (state.typingUserId == null) {
+                          return const SizedBox.shrink();
                         }
-                        // reverse: true → index 0 is newest (bottom); open lands on last message
-                        final actualIndex = messages.length - 1 - i;
-                        final m = messages[actualIndex];
-                        final mine = m.sender.id == state.user?.id;
-                        final key = _messageKeys.putIfAbsent(
-                          m.id,
-                          GlobalKey.new,
-                        );
-                        final highlighted =
-                            (_searchMatchIds.isNotEmpty &&
-                                _searchMatchIds[_searchMatchIndex] == m.id) ||
-                            _focusedReplyId == m.id;
-                        // Day separator sits above the first message of each day.
-                        final showDaySeparator =
-                            actualIndex == 0 ||
-                            !_sameDay(
-                              messages[actualIndex - 1].createdAt,
-                              m.createdAt,
-                            );
-                        // Task-change rows are system notes: no reply/forward/
-                        // react/edit — same treatment as call-history chips.
-                        final isSystemNote = m.isCallHistory || m.isTaskEvent;
-                        final bubble = MessageBubble(
-                          message: m,
-                          mine: mine,
-                          mediaBase: mediaBase,
-                          selfId: state.user?.id,
-                          showSender: true,
-                          highlighted: highlighted,
-                          fontScale: state.chatFontSize / 15.0,
-                          // Accent themes can force a chat face (hacker → Cousine).
-                          // Otherwise my font applies only to my own messages.
-                          defaultFontFamily: PrivetTheme.accentMessageFontFamily ??
-                              (mine ? state.chatFontFamily : ''),
-                          onSetDefaultFont: state.setChatFontFamily,
-                          readByPeer:
-                              mine &&
-                              (chat?.isReadByPeer(m, selfId: state.user?.id) ??
-                                  false),
-                          seenByLabel: mine && chat?.isGroup == true
-                              ? _seenByShort(chat!, m, state)
-                              : null,
-                          addedToTask: taskMessageIds.contains(m.id),
-                          onTaskEventTap: m.isTaskEvent
-                              ? () => _openTaskFromEvent(m)
-                              : null,
-                          onReply: isSystemNote
-                              ? null
-                              : (msg, {selectedText}) {
-                                  final snippet =
-                                      (selectedText != null &&
-                                          selectedText.trim().isNotEmpty)
-                                      ? selectedText.trim()
-                                      : null;
-                                  setState(() {
-                                    _replyingTo = msg;
-                                    _replySnippet = snippet;
-                                    _syncEmojiPanel(false);
-                                  });
-                                  // Selection belongs only in the reply bar, not the draft.
-                                  if (snippet != null) {
-                                    _controller.clear();
-                                  }
-                                  WidgetsBinding.instance.addPostFrameCallback((
-                                    _,
-                                  ) {
-                                    if (mounted) {
-                                      _composerFocus.requestFocus();
-                                    }
-                                  });
-                                },
-                          onForward: isSystemNote
-                              ? null
-                              : (msg, {selectedText}) =>
-                                  _forwardMessage(context, msg),
-                          onSeenBy: chat?.isGroup == true
-                              ? (msg) => _showSeenBy(context, chat!, msg)
-                              : null,
-                          onReact: isSystemNote
-                              ? null
-                              : (msg, emoji) =>
-                                  state.toggleReaction(msg.id, emoji),
-                          onAddToTask: isSystemNote
-                              ? null
-                              : (msg) async {
-                                  await state.addMessageToTask(msg);
-                                  if (!mounted) return;
-                                  setState(() {
-                                    _mediaFolder = null;
-                                    _showTasks = true;
-                                  });
-                                },
-                          onOpenTasks: () => setState(() {
-                            _mediaFolder = null;
-                            _showTasks = true;
-                          }),
-                          aiActive: state.aiActive,
-                          onAskAi: isSystemNote
-                              ? null
-                              : (msg) => _askAiAboutMessage(context, msg),
-                          onEdit: mine && !isSystemNote
-                              ? (msg) => _editMessage(msg)
-                              : null,
-                          onFormatMessage:
-                              mine && !isSystemNote
-                              ? (sel, fmt) => _applyMessageFormat(m, sel, fmt)
-                              : null,
-                          onDelete: mine ? (msg) => _deleteMessage(msg) : null,
-                          onReplyTap: (reply) => _focusReply(reply.id),
-                        );
-                        return KeyedSubtree(
-                          key: key,
-                          child: RepaintBoundary(
-                            child: showDaySeparator
-                                ? Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      _DaySeparator(
-                                        label: _dayLabel(m.createdAt),
-                                      ),
-                                      bubble,
-                                    ],
-                                  )
-                                : bubble,
+                        return Positioned(
+                          left: 0,
+                          bottom: 0,
+                          child: IgnorePointer(
+                            child: TypingIndicatorBubble(
+                              label: chat?.isGroup == true
+                                  ? state.typingLabel(conversationId: chat?.id)
+                                  : null,
+                            ),
                           ),
                         );
                       },
                     ),
-                  ),
-                  // "is typing" bubble pinned to the bottom of the message
-                  // area. Overlaid (not in the Column flow) so its appearance
-                  // and disappearance never shift the visible messages up/down.
-                  // IgnorePointer lets taps/scroll still reach the message
-                  // behind it; the bubble's own padding keeps its margins.
-                  ListenableBuilder(
-                    listenable: state.typingTick,
-                    builder: (context, _) {
-                      if (state.typingUserId == null) {
-                        return const SizedBox.shrink();
-                      }
-                      return Positioned(
-                        left: 0,
-                        bottom: 0,
-                        child: IgnorePointer(
-                          child: TypingIndicatorBubble(
-                            label: chat?.isGroup == true
-                                ? state.typingLabel(conversationId: chat?.id)
-                                : null,
+                    Positioned(
+                      right: 16,
+                      bottom: 16,
+                      child: RepaintBoundary(
+                        child: AnimatedSlide(
+                          duration: privetAnim(
+                            const Duration(milliseconds: 180),
                           ),
-                        ),
-                      );
-                    },
-                  ),
-                  Positioned(
-                    right: 16,
-                    bottom: 16,
-                    child: RepaintBoundary(
-                      child: AnimatedSlide(
-                        duration: privetAnim(const Duration(milliseconds: 180)),
-                        offset: _showJumpToBottom
-                            ? Offset.zero
-                            : const Offset(0, 1.5),
-                        child: AnimatedOpacity(
-                          duration: privetAnim(const Duration(milliseconds: 180)),
-                          opacity: _showJumpToBottom ? 1 : 0,
-                          child: IgnorePointer(
-                            ignoring: !_showJumpToBottom,
-                            child: Material(
-                              color: PrivetTheme.panelElevated,
-                              shape: CircleBorder(
-                                side: BorderSide(color: PrivetTheme.line),
-                              ),
-                              elevation: privetElevation(3),
-                              child: InkWell(
-                                customBorder: const CircleBorder(),
-                                onTap: _scrollToEnd,
-                                // InkWell's default (adaptiveClickable) resolves
-                                // to the arrow cursor on native desktop; match
-                                // the send button's explicit pointer.
-                                mouseCursor: SystemMouseCursors.click,
-                                child: SizedBox(
-                                width: 44,
-                                height: 44,
-                                child: Icon(
-                                  Icons.keyboard_arrow_down_rounded,
-                                  color: PrivetTheme.paper,
+                          offset: _showJumpToBottom
+                              ? Offset.zero
+                              : const Offset(0, 1.5),
+                          child: AnimatedOpacity(
+                            duration: privetAnim(
+                              const Duration(milliseconds: 180),
+                            ),
+                            opacity: _showJumpToBottom ? 1 : 0,
+                            child: IgnorePointer(
+                              ignoring: !_showJumpToBottom,
+                              child: Material(
+                                color: PrivetTheme.panelElevated,
+                                shape: CircleBorder(
+                                  side: BorderSide(color: PrivetTheme.line),
+                                ),
+                                elevation: privetElevation(3),
+                                child: InkWell(
+                                  customBorder: const CircleBorder(),
+                                  onTap: _scrollToEnd,
+                                  // InkWell's default (adaptiveClickable) resolves
+                                  // to the arrow cursor on native desktop; match
+                                  // the send button's explicit pointer.
+                                  mouseCursor: SystemMouseCursors.click,
+                                  child: SizedBox(
+                                    width: 44,
+                                    height: 44,
+                                    child: Icon(
+                                      Icons.keyboard_arrow_down_rounded,
+                                      color: PrivetTheme.paper,
+                                    ),
+                                  ),
                                 ),
                               ),
                             ),
                           ),
                         ),
                       ),
+                    ),
+                    // Ctrl+scroll over the chat zooms the message font without
+                    // scrolling the list. Topmost in the Stack so it registers
+                    // with the pointer-signal resolver before the Scrollable.
+                    // Native desktop delivers Ctrl+wheel as a scroll signal; the
+                    // web engine converts it to a scale signal (and preventDefaults
+                    // the browser page zoom when a widget handles it).
+                    Positioned.fill(
+                      child: Listener(
+                        behavior: HitTestBehavior.translucent,
+                        onPointerSignal: (e) {
+                          if (!HardwareKeyboard.instance.isControlPressed) {
+                            return;
+                          }
+                          final double dy;
+                          if (e is PointerScrollEvent) {
+                            dy = e.scrollDelta.dy;
+                          } else if (e is PointerScaleEvent) {
+                            // Web: scale = exp(-deltaY / 200) → undo that map so
+                            // both platforms share the same step logic.
+                            dy = -200 * math.log(e.scale);
+                          } else {
+                            return;
+                          }
+                          if (dy == 0) return;
+                          final step = dy < 0 ? 0.5 : -0.5;
+                          GestureBinding.instance.pointerSignalResolver
+                              .register(
+                                e,
+                                (_) => unawaited(
+                                  state.setChatFontSize(
+                                    state.chatFontSize + step,
+                                  ),
+                                ),
+                              );
+                        },
                       ),
                     ),
+                  ],
+                ),
+              ),
+              if (state.uploading)
+                LinearProgressIndicator(
+                  minHeight: 2,
+                  color: PrivetTheme.signal,
+                  backgroundColor: PrivetTheme.line,
+                ),
+              if (_draftMedia.isNotEmpty) _buildDraftPreview(),
+              if (_editingMessage != null) _buildEditBar(),
+              if (_replyingTo != null) _buildReplyBar(),
+              if (_acSuggestions.isNotEmpty)
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 6 : 8,
+                    0,
+                    compact ? 6 : 8,
+                    4,
                   ),
-                  // Ctrl+scroll over the chat zooms the message font without
-                  // scrolling the list. Topmost in the Stack so it registers
-                  // with the pointer-signal resolver before the Scrollable.
-                  // Native desktop delivers Ctrl+wheel as a scroll signal; the
-                  // web engine converts it to a scale signal (and preventDefaults
-                  // the browser page zoom when a widget handles it).
-                  Positioned.fill(
-                    child: Listener(
-                      behavior: HitTestBehavior.translucent,
-                      onPointerSignal: (e) {
-                        if (!HardwareKeyboard.instance.isControlPressed) {
-                          return;
-                        }
-                        final double dy;
-                        if (e is PointerScrollEvent) {
-                          dy = e.scrollDelta.dy;
-                        } else if (e is PointerScaleEvent) {
-                          // Web: scale = exp(-deltaY / 200) → undo that map so
-                          // both platforms share the same step logic.
-                          dy = -200 * math.log(e.scale);
-                        } else {
-                          return;
-                        }
-                        if (dy == 0) return;
-                        final step = dy < 0 ? 0.5 : -0.5;
-                        GestureBinding.instance.pointerSignalResolver.register(
-                          e,
-                          (_) => unawaited(
-                            state.setChatFontSize(state.chatFontSize + step),
-                          ),
-                        );
-                      },
+                  child: TextFieldTapRegion(
+                    child: ComposerAutocompletePopup(
+                      suggestions: _acSuggestions,
+                      selectedIndex: _acIndex,
+                      onSelect: _acceptComposerAutocomplete,
                     ),
                   ),
-                ],
-              ),
-            ),
-            if (state.uploading)
-              LinearProgressIndicator(
-                minHeight: 2,
-                color: PrivetTheme.signal,
-                backgroundColor: PrivetTheme.line,
-              ),
-            if (_draftMedia.isNotEmpty) _buildDraftPreview(),
-            if (_editingMessage != null) _buildEditBar(),
-            if (_replyingTo != null) _buildReplyBar(),
-            if (_acSuggestions.isNotEmpty)
-              Padding(
-                padding: EdgeInsets.fromLTRB(
-                  compact ? 6 : 8,
-                  0,
-                  compact ? 6 : 8,
-                  4,
                 ),
-                child: TextFieldTapRegion(
-                  child: ComposerAutocompletePopup(
-                    suggestions: _acSuggestions,
-                    selectedIndex: _acIndex,
-                    onSelect: _acceptComposerAutocomplete,
+              if (_trainerChecking)
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 10 : 14,
+                    0,
+                    compact ? 10 : 14,
+                    4,
+                  ),
+                  child: const _TrainerCheckingBanner(),
+                ),
+              if (_trainerNotice != null)
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 6 : 8,
+                    0,
+                    compact ? 6 : 8,
+                    4,
+                  ),
+                  child: TrainerNoticeBanner(
+                    notice: _trainerNotice!,
+                    onClose: () => setState(() => _trainerNotice = null),
                   ),
                 ),
-              ),
-            if (_trainerChecking)
-              Padding(
-                padding: EdgeInsets.fromLTRB(
-                  compact ? 10 : 14,
-                  0,
-                  compact ? 10 : 14,
-                  4,
-                ),
-                child: const _TrainerCheckingBanner(),
-              ),
-            if (_shouldShowGreetingChip(state, chat))
-              Padding(
-                padding: EdgeInsets.fromLTRB(
-                  compact ? 6 : 8,
-                  0,
-                  compact ? 6 : 8,
-                  4,
-                ),
-                child: TextFieldTapRegion(
-                  child: _GreetingComposerBar(
-                    busy: _greetingBusy,
-                    busyStyle: _greetingBusyStyle,
-                    lastStyle: _lastGreetingStyle,
-                    aiAvailable:
-                        state.aiActive || state.serverAiConfigured,
-                    trainerEnabled: state.englishTrainerEnabled,
-                    trainerStats: state.trainerStats,
-                    trainerChecking: _trainerChecking,
-                    onToggleTrainer: _toggleEnglishTrainer,
-                    onOpenTrainer: () =>
-                        showTrainerDashboard(context, widget.state),
-                    onStyle: _onGreetingStyleTap,
-                    onRegenerate: _lastGreetingStyle == null
-                        ? null
-                        : () => _onGreetingStyleTap(
+              if (_shouldShowGreetingChip(state, chat))
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 6 : 8,
+                    0,
+                    compact ? 6 : 8,
+                    4,
+                  ),
+                  child: TextFieldTapRegion(
+                    child: _GreetingComposerBar(
+                      busy: _greetingBusy,
+                      busyStyle: _greetingBusyStyle,
+                      lastStyle: _lastGreetingStyle,
+                      aiAvailable: state.aiActive || state.serverAiConfigured,
+                      trainerEnabled: state.englishTrainerEnabled,
+                      trainerStats: state.trainerStats,
+                      trainerChecking: _trainerChecking,
+                      onToggleTrainer: _toggleEnglishTrainer,
+                      onOpenTrainer: () =>
+                          showTrainerDashboard(context, widget.state),
+                      onStyle: _onGreetingStyleTap,
+                      onRegenerate: _lastGreetingStyle == null
+                          ? null
+                          : () => _onGreetingStyleTap(
                               _lastGreetingStyle!,
                               philosopher: _lastGreetingPhilosopher,
                               jokeCategory: _lastGreetingJokeCategory,
                               englishCategory: _lastGreetingEnglishCategory,
                             ),
-                    onDismiss: _onGreetingChipDismiss,
-                    greetingNameLabel: chat?.isGroup == true
-                        ? null
-                        : (state.greetingNameForPeer(
-                              userId: chat?.peer?.id,
-                              displayName: chat?.peer?.displayName,
-                            ) ??
-                            'Name'),
-                    greetingNameIsCustom:
-                        chat?.isGroup != true &&
-                        state.contactGreetingName(chat?.peer?.id) != null,
-                    onEditGreetingName: chat?.isGroup == true
-                        ? null
-                        : () => _editGreetingName(chat?.peer),
+                      onDismiss: _onGreetingChipDismiss,
+                      greetingNameLabel: chat?.isGroup == true
+                          ? null
+                          : (state.greetingNameForPeer(
+                                  userId: chat?.peer?.id,
+                                  displayName: chat?.peer?.displayName,
+                                ) ??
+                                'Name'),
+                      greetingNameIsCustom:
+                          chat?.isGroup != true &&
+                          state.contactGreetingName(chat?.peer?.id) != null,
+                      onEditGreetingName: chat?.isGroup == true
+                          ? null
+                          : () => _editGreetingName(chat?.peer),
+                    ),
                   ),
                 ),
-              ),
-            SafeArea(
-              top: false,
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(
-                  compact ? 6 : 8,
-                  compact ? 6 : 8,
-                  compact ? 6 : 8,
-                  compact ? 10 : 12,
-                ),
-                child: compact
-                    ? Row(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Expanded(
-                            child: Focus(
-                              onKeyEvent: (node, event) =>
-                                  _handleComposerKeyEvent(event),
-                              child: GestureDetector(
-                                onLongPress: kIsWeb
-                                    ? () {
-                                        final box = context.findRenderObject();
-                                        if (box is RenderBox && box.hasSize) {
-                                          final center = box.localToGlobal(
-                                            Offset(
-                                              box.size.width / 2,
-                                              box.size.height / 2,
-                                            ),
-                                          );
-                                          _openComposerCtxMenu(center);
+              SafeArea(
+                top: false,
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 6 : 8,
+                    compact ? 6 : 8,
+                    compact ? 6 : 8,
+                    compact ? 10 : 12,
+                  ),
+                  child: compact
+                      ? Row(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Expanded(
+                              child: Focus(
+                                onKeyEvent: (node, event) =>
+                                    _handleComposerKeyEvent(event),
+                                child: GestureDetector(
+                                  onLongPress: kIsWeb
+                                      ? () {
+                                          final box = context
+                                              .findRenderObject();
+                                          if (box is RenderBox && box.hasSize) {
+                                            final center = box.localToGlobal(
+                                              Offset(
+                                                box.size.width / 2,
+                                                box.size.height / 2,
+                                              ),
+                                            );
+                                            _openComposerCtxMenu(center);
+                                          }
                                         }
-                                      }
-                                    : null,
-                                child: _wrapComposerPointerLayer(
-                                  child: _buildComposerInput(
-                                    state: state,
-                                    compact: true,
-                                    decoration: InputDecoration(
-                                      isDense: true,
-                                      contentPadding:
-                                          const EdgeInsets.symmetric(
-                                            horizontal: 8,
-                                            vertical: 12,
+                                      : null,
+                                  child: _wrapComposerPointerLayer(
+                                    child: _buildComposerInput(
+                                      state: state,
+                                      compact: true,
+                                      decoration: InputDecoration(
+                                        isDense: true,
+                                        contentPadding:
+                                            const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 12,
+                                            ),
+                                        hintText: _editingMessage != null
+                                            ? 'Edit message…'
+                                            : (_draftMedia.isEmpty &&
+                                                      _draftVoice == null
+                                                  ? state.composerPlaceholder
+                                                  : 'Add a caption…'),
+                                        prefixIcon: IconButton(
+                                          tooltip: 'Emoji',
+                                          onPressed: _toggleEmoji,
+                                          icon: Icon(
+                                            _showEmoji
+                                                ? Icons.keyboard_rounded
+                                                : Icons.emoji_emotions_outlined,
+                                            color: PrivetTheme.mist,
                                           ),
-                                      hintText: _editingMessage != null
-                                          ? 'Edit message…'
-                                          : (_draftMedia.isEmpty &&
-                                                    _draftVoice == null
-                                                ? state.composerPlaceholder
-                                                : 'Add a caption…'),
-                                      prefixIcon: IconButton(
-                                        tooltip: 'Emoji',
-                                        onPressed: _toggleEmoji,
-                                        icon: Icon(
-                                          _showEmoji
-                                              ? Icons.keyboard_rounded
-                                              : Icons.emoji_emotions_outlined,
-                                          color: PrivetTheme.mist,
+                                        ),
+                                        suffixIcon: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            if (cameraCaptureAvailable)
+                                              IconButton(
+                                                tooltip: 'Take a picture',
+                                                onPressed: _takePicture,
+                                                icon: Icon(
+                                                  Icons.photo_camera_outlined,
+                                                  color: PrivetTheme.mist,
+                                                ),
+                                              ),
+                                            WebAttachButton(
+                                              tooltip: 'Attach files',
+                                              onPicked: _applyPickedFile,
+                                              onPressedFallback: _pickFile,
+                                              onError: (e) =>
+                                                  widget.state.setError(
+                                                    'Could not attach file: $e',
+                                                  ),
+                                            ),
+                                          ],
                                         ),
                                       ),
-                                      suffixIcon: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          if (cameraCaptureAvailable)
-                                            IconButton(
-                                              tooltip: 'Take a picture',
-                                              onPressed: _takePicture,
-                                              icon: Icon(
-                                                Icons.photo_camera_outlined,
-                                                color: PrivetTheme.mist,
-                                              ),
-                                            ),
-                                          WebAttachButton(
-                                            tooltip: 'Attach files',
-                                            onPicked: _applyPickedFile,
-                                            onPressedFallback: _pickFile,
-                                            onError: (e) =>
-                                                widget.state.setError(
-                                              'Could not attach file: $e',
-                                            ),
-                                          ),
-                                        ],
-                                      ),
                                     ),
                                   ),
                                 ),
                               ),
                             ),
-                          ),
-                          const SizedBox(width: 8),
-                          ValueListenableBuilder<bool>(
-                            valueListenable: _composerHasContent,
-                            builder: (context, hasContent, _) {
-                              if (_recording) {
-                                return Material(
-                                  color: PrivetTheme.danger.withValues(alpha: 0.16),
-                                  borderRadius: BorderRadius.circular(14),
-                                  child: InkWell(
-                                    onTap: _stopRecording,
-                                    mouseCursor: SystemMouseCursors.click,
+                            const SizedBox(width: 8),
+                            ValueListenableBuilder<bool>(
+                              valueListenable: _composerHasContent,
+                              builder: (context, hasContent, _) {
+                                if (_recording) {
+                                  return Material(
+                                    color: PrivetTheme.danger.withValues(
+                                      alpha: 0.16,
+                                    ),
                                     borderRadius: BorderRadius.circular(14),
-                                    child: SizedBox(
-                                      width: 48,
-                                      height: 48,
-                                      child: Icon(
-                                        Icons.stop_rounded,
-                                        color: PrivetTheme.danger,
+                                    child: InkWell(
+                                      onTap: _stopRecording,
+                                      mouseCursor: SystemMouseCursors.click,
+                                      borderRadius: BorderRadius.circular(14),
+                                      child: SizedBox(
+                                        width: 48,
+                                        height: 48,
+                                        child: Icon(
+                                          Icons.stop_rounded,
+                                          color: PrivetTheme.danger,
+                                        ),
                                       ),
                                     ),
-                                  ),
-                                );
-                              }
-                              if (hasContent) {
-                                return Material(
-                                  color: PrivetTheme.signal,
-                                  borderRadius: BorderRadius.circular(14),
-                                  child: InkWell(
-                                    onTap: _send,
-                                    mouseCursor: SystemMouseCursors.click,
+                                  );
+                                }
+                                if (hasContent) {
+                                  return Material(
+                                    color: PrivetTheme.signal,
                                     borderRadius: BorderRadius.circular(14),
-                                    child: SizedBox(
-                                      width: 48,
-                                      height: 48,
-                                      child: Icon(
-                                        _editingMessage != null
-                                            ? Icons.check_rounded
-                                            : Icons.arrow_upward_rounded,
-                                        color: PrivetTheme.onAccent,
+                                    child: InkWell(
+                                      onTap: _send,
+                                      mouseCursor: SystemMouseCursors.click,
+                                      borderRadius: BorderRadius.circular(14),
+                                      child: SizedBox(
+                                        width: 48,
+                                        height: 48,
+                                        child: Icon(
+                                          _editingMessage != null
+                                              ? Icons.check_rounded
+                                              : Icons.arrow_upward_rounded,
+                                          color: PrivetTheme.onAccent,
+                                        ),
                                       ),
                                     ),
-                                  ),
-                                );
-                              }
-                              return IconButton(
-                                tooltip: _voiceMicEnabled
-                                    ? 'Voice message'
-                                    : 'No microphone detected',
-                                onPressed: _voiceMicEnabled ? _startRecording : null,
-                                icon: const Icon(Icons.mic_rounded),
-                              );
-                            },
-                          ),
-                        ],
-                      )
-                    : Row(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          IconButton(
-                            tooltip: 'Emoji',
-                            onPressed: _toggleEmoji,
-                            icon: Icon(
-                              _showEmoji
-                                  ? Icons.keyboard_rounded
-                                  : Icons.emoji_emotions_outlined,
-                            ),
-                          ),
-                          if (cameraCaptureAvailable)
-                            IconButton(
-                              tooltip: 'Take a picture',
-                              onPressed: _takePicture,
-                              icon: const Icon(
-                                Icons.photo_camera_outlined,
-                              ),
-                            ),
-                          WebAttachButton(
-                            tooltip: 'Attach files',
-                            onPicked: _applyPickedFile,
-                            onPressedFallback: _pickFile,
-                            onError: (e) => widget.state.setError(
-                              'Could not attach file: $e',
-                            ),
-                          ),
-                          Expanded(
-                            child: Focus(
-                              onKeyEvent: (node, event) =>
-                                  _handleComposerKeyEvent(event),
-                              child: GestureDetector(
-                                onLongPress: kIsWeb
-                                    ? () {
-                                        final box = context.findRenderObject();
-                                        if (box is RenderBox && box.hasSize) {
-                                          final center = box.localToGlobal(
-                                            Offset(
-                                              box.size.width / 2,
-                                              box.size.height / 2,
-                                            ),
-                                          );
-                                          _openComposerCtxMenu(center);
-                                        }
-                                      }
-                                    : null,
-                                child: _wrapComposerPointerLayer(
-                                  child: _buildComposerInput(
-                                    state: state,
-                                    compact: false,
-                                    decoration: InputDecoration(
-                                      hintText: _editingMessage != null
-                                          ? 'Edit message…'
-                                          : (_draftMedia.isEmpty &&
-                                                    _draftVoice == null
-                                                ? state.composerPlaceholder
-                                                : 'Add a caption…'),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: _recording
-                                ? 'Stop recording'
-                                : (_voiceMicEnabled
+                                  );
+                                }
+                                return IconButton(
+                                  tooltip: _voiceMicEnabled
                                       ? 'Voice message'
-                                      : 'No microphone detected'),
-                            onPressed: _recording
-                                ? _stopRecording
-                                : (_voiceMicEnabled ? _startRecording : null),
-                            icon: Icon(
-                              _recording
-                                  ? Icons.stop_rounded
-                                  : Icons.mic_rounded,
-                              color: _recording ? PrivetTheme.danger : null,
-                            ),
-                          ),
-                          const SizedBox(width: 4),
-                          Material(
-                            color: PrivetTheme.signal,
-                            borderRadius: BorderRadius.circular(14),
-                            child: InkWell(
-                              onTap: _recording ? null : _send,
-                              mouseCursor: _recording
-                                  ? SystemMouseCursors.basic
-                                  : SystemMouseCursors.click,
-                              borderRadius: BorderRadius.circular(14),
-                              child: SizedBox(
-                                width: 48,
-                                height: 48,
-                                child: Icon(
-                                  _editingMessage != null
-                                      ? Icons.check_rounded
-                                      : Icons.arrow_upward_rounded,
-                                  color: _recording
-                                      ? PrivetTheme.onAccent.withValues(alpha: 0.35)
-                                      : PrivetTheme.onAccent,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-              ),
-            ),
-            if (_showEmoji)
-              TextFieldTapRegion(
-                child: CompactEmojiPicker(
-                  // Mobile: tall enough to replace the soft keyboard; desktop
-                  // keeps the compact strip under the composer.
-                  height: compact
-                      ? (MediaQuery.sizeOf(context).height * 0.42)
-                          .clamp(280.0, 380.0)
-                      : 280,
-                  textEditingController: _controller,
-                  onSelected: (_) => state.notifyTyping(),
-                  onEditShortcodes: () {
-                    showModalBottomSheet<void>(
-                      context: context,
-                      isScrollControlled: true,
-                      backgroundColor: PrivetTheme.panel,
-                      shape: const RoundedRectangleBorder(
-                        borderRadius: BorderRadius.vertical(
-                          top: Radius.circular(16),
-                        ),
-                      ),
-                      builder: (ctx) {
-                        return Padding(
-                          padding: EdgeInsets.fromLTRB(
-                            16,
-                            16,
-                            16,
-                            16 + MediaQuery.paddingOf(ctx).bottom,
-                          ),
-                          child: SingleChildScrollView(
-                            child: CustomShortcodesEditor(
-                              initial: state.customShortcodes,
-                              onSave: (list) {
-                                unawaited(state.setCustomShortcodesList(list));
+                                      : 'No microphone detected',
+                                  onPressed: _voiceMicEnabled
+                                      ? _startRecording
+                                      : null,
+                                  icon: const Icon(Icons.mic_rounded),
+                                );
                               },
                             ),
-                          ),
-                        );
-                      },
-                    );
-                  },
+                          ],
+                        )
+                      : Row(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            IconButton(
+                              tooltip: 'Emoji',
+                              onPressed: _toggleEmoji,
+                              icon: Icon(
+                                _showEmoji
+                                    ? Icons.keyboard_rounded
+                                    : Icons.emoji_emotions_outlined,
+                              ),
+                            ),
+                            if (cameraCaptureAvailable)
+                              IconButton(
+                                tooltip: 'Take a picture',
+                                onPressed: _takePicture,
+                                icon: const Icon(Icons.photo_camera_outlined),
+                              ),
+                            WebAttachButton(
+                              tooltip: 'Attach files',
+                              onPicked: _applyPickedFile,
+                              onPressedFallback: _pickFile,
+                              onError: (e) => widget.state.setError(
+                                'Could not attach file: $e',
+                              ),
+                            ),
+                            Expanded(
+                              child: Focus(
+                                onKeyEvent: (node, event) =>
+                                    _handleComposerKeyEvent(event),
+                                child: GestureDetector(
+                                  onLongPress: kIsWeb
+                                      ? () {
+                                          final box = context
+                                              .findRenderObject();
+                                          if (box is RenderBox && box.hasSize) {
+                                            final center = box.localToGlobal(
+                                              Offset(
+                                                box.size.width / 2,
+                                                box.size.height / 2,
+                                              ),
+                                            );
+                                            _openComposerCtxMenu(center);
+                                          }
+                                        }
+                                      : null,
+                                  child: _wrapComposerPointerLayer(
+                                    child: _buildComposerInput(
+                                      state: state,
+                                      compact: false,
+                                      decoration: InputDecoration(
+                                        hintText: _editingMessage != null
+                                            ? 'Edit message…'
+                                            : (_draftMedia.isEmpty &&
+                                                      _draftVoice == null
+                                                  ? state.composerPlaceholder
+                                                  : 'Add a caption…'),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: _recording
+                                  ? 'Stop recording'
+                                  : (_voiceMicEnabled
+                                        ? 'Voice message'
+                                        : 'No microphone detected'),
+                              onPressed: _recording
+                                  ? _stopRecording
+                                  : (_voiceMicEnabled ? _startRecording : null),
+                              icon: Icon(
+                                _recording
+                                    ? Icons.stop_rounded
+                                    : Icons.mic_rounded,
+                                color: _recording ? PrivetTheme.danger : null,
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            Material(
+                              color: PrivetTheme.signal,
+                              borderRadius: BorderRadius.circular(14),
+                              child: InkWell(
+                                onTap: _recording ? null : _send,
+                                mouseCursor: _recording
+                                    ? SystemMouseCursors.basic
+                                    : SystemMouseCursors.click,
+                                borderRadius: BorderRadius.circular(14),
+                                child: SizedBox(
+                                  width: 48,
+                                  height: 48,
+                                  child: Icon(
+                                    _editingMessage != null
+                                        ? Icons.check_rounded
+                                        : Icons.arrow_upward_rounded,
+                                    color: _recording
+                                        ? PrivetTheme.onAccent.withValues(
+                                            alpha: 0.35,
+                                          )
+                                        : PrivetTheme.onAccent,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                 ),
               ),
+              if (_showEmoji)
+                TextFieldTapRegion(
+                  child: CompactEmojiPicker(
+                    // Mobile: tall enough to replace the soft keyboard; desktop
+                    // keeps the compact strip under the composer.
+                    height: compact
+                        ? (MediaQuery.sizeOf(context).height * 0.42).clamp(
+                            280.0,
+                            380.0,
+                          )
+                        : 280,
+                    textEditingController: _controller,
+                    onSelected: (_) => state.notifyTyping(),
+                    onEditShortcodes: () {
+                      showModalBottomSheet<void>(
+                        context: context,
+                        isScrollControlled: true,
+                        backgroundColor: PrivetTheme.panel,
+                        shape: const RoundedRectangleBorder(
+                          borderRadius: BorderRadius.vertical(
+                            top: Radius.circular(16),
+                          ),
+                        ),
+                        builder: (ctx) {
+                          return Padding(
+                            padding: EdgeInsets.fromLTRB(
+                              16,
+                              16,
+                              16,
+                              16 + MediaQuery.paddingOf(ctx).bottom,
+                            ),
+                            child: SingleChildScrollView(
+                              child: CustomShortcodesEditor(
+                                initial: state.customShortcodes,
+                                onSave: (list) {
+                                  unawaited(
+                                    state.setCustomShortcodesList(list),
+                                  );
+                                },
+                              ),
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
+            ],
           ],
-        ],
+        ),
       ),
-    ),
     );
   }
 
@@ -6324,7 +6389,8 @@ class _ConversationPaneState extends State<ConversationPane>
     }
     // WYSIWYG: type in the font picked in the "Aa" menu, not just the sent
     // bubbles. Explicit [font=…] runs on selected text still win over this base.
-    final baseStyle = Theme.of(context).textTheme.bodyLarge ?? const TextStyle();
+    final baseStyle =
+        Theme.of(context).textTheme.bodyLarge ?? const TextStyle();
     final accentFont = PrivetTheme.accentMessageFontFamily;
     final family = (accentFont != null && accentFont.isNotEmpty)
         ? accentFont
@@ -6341,90 +6407,90 @@ class _ConversationPaneState extends State<ConversationPane>
     final caretHeight = fontSize + 2;
     // Ubuntu blink (600ms on/off); each lit flash advances accent swatches.
     // Block (terminal/vim) vs thin beam — Profile → Appearance toggle.
-    final caretWidth =
-        state.terminalCursorEnabled ? fontSize * 0.55 : 2.0;
+    final caretWidth = state.terminalCursorEnabled ? fontSize * 0.55 : 2.0;
     // Kolobok overlay paints pack art over hidden Unicode glyphs in the field.
     // Selection tint is painted by [ComposerSelectionOverlay] (tight + inset)
     // so it stays consistent with message-body selection.
-    final field = Stack(
-      children: [
-        Theme(
-          data: Theme.of(context).copyWith(
-            textSelectionTheme: TextSelectionThemeData(
-              cursorColor: PrivetTheme.signal,
-              selectionColor: const Color(0x00000000),
-              selectionHandleColor: PrivetTheme.signal,
+    // ClipRect: overlay painters (caret / selection / kolobok) draw in field
+    // space. A Stack only clips layout overflow, so a scrolled caret would
+    // blink over the thread or below the window.
+    final field = ClipRect(
+      child: Stack(
+        children: [
+          Theme(
+            data: Theme.of(context).copyWith(
+              textSelectionTheme: TextSelectionThemeData(
+                cursorColor: PrivetTheme.signal,
+                selectionColor: const Color(0x00000000),
+                selectionHandleColor: PrivetTheme.signal,
+              ),
             ),
-          ),
-          child: TextField(
-            key: _composerFieldKey,
-            controller: _controller,
-            focusNode: _composerFocus,
-            showCursor: false,
-            cursorColor: PrivetTheme.signal,
-            cursorHeight: caretHeight,
-            cursorWidth: caretWidth,
-            selectionHeightStyle: BoxHeightStyle.tight,
-            selectionWidthStyle: BoxWidthStyle.tight,
-            minLines: 1,
-            maxLines: compact ? 5 : 6,
-            keyboardType: TextInputType.multiline,
-            style: composerStyle,
-            textInputAction: TextInputAction.newline,
-            // Mobile (Android/iOS) gets the native keyboard suggestion strip +
-            // autocorrect, like Teams. Desktop/web keep the in-app autocorrect and
-            // red-underline spelling overlay. Both honor the Settings toggles.
-            autocorrect: state.autocorrectEnabled && _nativeComposerSuggestions,
-            enableSuggestions:
-                state.autocompleteEnabled && _nativeComposerSuggestions,
-            contextMenuBuilder: kIsWeb
-                ? (context, editableTextState) =>
-                    const SizedBox.shrink()
-                : _composerContextMenu,
-            onTapOutside: _onComposerTapOutside,
-            onChanged: (value) {
-              if (_editingMessage != null) return;
-              state.notifyTypingIfComposing(value);
-            },
-            onTap: _onComposerTap,
-            decoration: decoration,
-          ),
-        ),
-        Positioned.fill(
-          child: IgnorePointer(
-            child: ComposerSelectionOverlay(
-              fieldKey: _composerFieldKey,
+            child: TextField(
+              key: _composerFieldKey,
               controller: _controller,
-            ),
-          ),
-        ),
-        Positioned.fill(
-          child: IgnorePointer(
-            child: TerminalBlockCaret(
-              fieldKey: _composerFieldKey,
               focusNode: _composerFocus,
-              controller: _controller,
-              height: caretHeight,
-              width: caretWidth,
+              showCursor: false,
+              cursorColor: PrivetTheme.signal,
+              cursorHeight: caretHeight,
+              cursorWidth: caretWidth,
+              selectionHeightStyle: BoxHeightStyle.tight,
+              selectionWidthStyle: BoxWidthStyle.tight,
+              minLines: 1,
+              maxLines: compact ? 5 : 6,
+              keyboardType: TextInputType.multiline,
+              style: composerStyle,
+              textInputAction: TextInputAction.newline,
+              // Mobile (Android/iOS) gets the native keyboard suggestion strip +
+              // autocorrect, like Teams. Desktop/web keep the in-app autocorrect and
+              // red-underline spelling overlay. Both honor the Settings toggles.
+              autocorrect:
+                  state.autocorrectEnabled && _nativeComposerSuggestions,
+              enableSuggestions:
+                  state.autocompleteEnabled && _nativeComposerSuggestions,
+              contextMenuBuilder: kIsWeb
+                  ? (context, editableTextState) => const SizedBox.shrink()
+                  : _composerContextMenu,
+              onTapOutside: _onComposerTapOutside,
+              onChanged: (value) {
+                if (_editingMessage != null) return;
+                state.notifyTypingIfComposing(value);
+              },
+              onTap: _onComposerTap,
+              decoration: decoration,
             ),
           ),
-        ),
-        Positioned.fill(
-          child: IgnorePointer(
-            child: ComposerKolobokOverlay(
-              fieldKey: _composerFieldKey,
-              controller: _controller,
+          Positioned.fill(
+            child: IgnorePointer(
+              child: ComposerSelectionOverlay(
+                fieldKey: _composerFieldKey,
+                controller: _controller,
+              ),
             ),
           ),
-        ),
-      ],
+          Positioned.fill(
+            child: IgnorePointer(
+              child: TerminalBlockCaret(
+                fieldKey: _composerFieldKey,
+                focusNode: _composerFocus,
+                controller: _controller,
+                height: caretHeight,
+                width: caretWidth,
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: IgnorePointer(
+              child: ComposerKolobokOverlay(
+                fieldKey: _composerFieldKey,
+                controller: _controller,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
     if (PrivetTheme.accentStyle == AccentStyle.larva) {
-      return AccentChromeFrame(
-        radius: 14,
-        forceLong: true,
-        child: field,
-      );
+      return AccentChromeFrame(radius: 14, forceLong: true, child: field);
     }
     return field;
   }
@@ -6555,9 +6621,7 @@ class _ConversationPaneState extends State<ConversationPane>
 
     await _ensureMediaPermissions();
     if (!isScreen && !isControl && !_mediaPerms.hasMicrophone) {
-      widget.state.setError(
-        'No microphone detected — connect one to call',
-      );
+      widget.state.setError('No microphone detected — connect one to call');
       return;
     }
 
@@ -6807,146 +6871,132 @@ class _ConversationPaneState extends State<ConversationPane>
                               : () async {
                                   final searchCtrl = TextEditingController();
                                   var peopleQuery = '';
-                                  final picked =
-                                      await showPrivetSheet<PrivetUser>(
-                                        context: context,
-                                        backgroundColor:
-                                            PrivetTheme.panelElevated,
-                                        showDragHandle: true,
-                                        isScrollControlled: true,
-                                        builder: (ctx) => StatefulBuilder(
-                                          builder: (ctx, setPick) {
-                                            final filtered = filterPeople(
-                                              candidates,
-                                              peopleQuery,
-                                            );
-                                            return SizedBox(
-                                              height:
-                                                  MediaQuery.sizeOf(ctx)
-                                                      .height *
-                                                  0.6,
-                                              child: Column(
-                                                children: [
-                                                  Padding(
-                                                    padding:
-                                                        const EdgeInsets.fromLTRB(
-                                                          20,
-                                                          8,
-                                                          20,
-                                                          8,
-                                                        ),
-                                                    child: Text(
-                                                      'Add to group',
-                                                      style: GoogleFonts.syne(
-                                                        fontSize: 18,
-                                                        fontWeight:
-                                                            FontWeight.w700,
-                                                      ),
+                                  final picked = await showPrivetSheet<PrivetUser>(
+                                    context: context,
+                                    backgroundColor: PrivetTheme.panelElevated,
+                                    showDragHandle: true,
+                                    isScrollControlled: true,
+                                    builder: (ctx) => StatefulBuilder(
+                                      builder: (ctx, setPick) {
+                                        final filtered = filterPeople(
+                                          candidates,
+                                          peopleQuery,
+                                        );
+                                        return SizedBox(
+                                          height:
+                                              MediaQuery.sizeOf(ctx).height *
+                                              0.6,
+                                          child: Column(
+                                            children: [
+                                              Padding(
+                                                padding:
+                                                    const EdgeInsets.fromLTRB(
+                                                      20,
+                                                      8,
+                                                      20,
+                                                      8,
                                                     ),
+                                                child: Text(
+                                                  'Add to group',
+                                                  style: GoogleFonts.syne(
+                                                    fontSize: 18,
+                                                    fontWeight: FontWeight.w700,
                                                   ),
-                                                  Padding(
-                                                    padding:
-                                                        const EdgeInsets.fromLTRB(
-                                                          20,
-                                                          0,
-                                                          20,
-                                                          8,
-                                                        ),
-                                                    child: TextField(
-                                                      controller: searchCtrl,
-                                                      autofocus: true,
-                                                      decoration:
-                                                          InputDecoration(
-                                                        hintText:
-                                                            'Search people',
-                                                        prefixIcon: const Icon(
-                                                          Icons.search_rounded,
-                                                        ),
-                                                        suffixIcon:
-                                                            peopleQuery.isEmpty
-                                                                ? null
-                                                                : IconButton(
-                                                                    tooltip:
-                                                                        'Clear',
-                                                                    onPressed:
-                                                                        () {
-                                                                      searchCtrl
-                                                                          .clear();
-                                                                      setPick(
-                                                                        () =>
-                                                                            peopleQuery =
-                                                                                '',
-                                                                      );
-                                                                    },
-                                                                    icon:
-                                                                        const Icon(
-                                                                      Icons
-                                                                          .close_rounded,
-                                                                    ),
-                                                                  ),
-                                                      ),
-                                                      onChanged: (v) => setPick(
-                                                        () => peopleQuery = v,
-                                                      ),
+                                                ),
+                                              ),
+                                              Padding(
+                                                padding:
+                                                    const EdgeInsets.fromLTRB(
+                                                      20,
+                                                      0,
+                                                      20,
+                                                      8,
                                                     ),
+                                                child: TextField(
+                                                  controller: searchCtrl,
+                                                  autofocus: true,
+                                                  decoration: InputDecoration(
+                                                    hintText: 'Search people',
+                                                    prefixIcon: const Icon(
+                                                      Icons.search_rounded,
+                                                    ),
+                                                    suffixIcon:
+                                                        peopleQuery.isEmpty
+                                                        ? null
+                                                        : IconButton(
+                                                            tooltip: 'Clear',
+                                                            onPressed: () {
+                                                              searchCtrl
+                                                                  .clear();
+                                                              setPick(
+                                                                () =>
+                                                                    peopleQuery =
+                                                                        '',
+                                                              );
+                                                            },
+                                                            icon: const Icon(
+                                                              Icons
+                                                                  .close_rounded,
+                                                            ),
+                                                          ),
                                                   ),
-                                                  Expanded(
-                                                    child: filtered.isEmpty
-                                                        ? Center(
-                                                            child: Text(
-                                                              'No people match “${normalizePeopleQuery(peopleQuery)}”',
-                                                              style: GoogleFonts
-                                                                  .ibmPlexSans(
+                                                  onChanged: (v) => setPick(
+                                                    () => peopleQuery = v,
+                                                  ),
+                                                ),
+                                              ),
+                                              Expanded(
+                                                child: filtered.isEmpty
+                                                    ? Center(
+                                                        child: Text(
+                                                          'No people match “${normalizePeopleQuery(peopleQuery)}”',
+                                                          style:
+                                                              GoogleFonts.ibmPlexSans(
                                                                 color:
                                                                     PrivetTheme
                                                                         .mist,
                                                               ),
-                                                            ),
-                                                          )
-                                                        : ListView.builder(
-                                                            itemCount:
-                                                                filtered.length,
-                                                            itemBuilder:
-                                                                (ctx, i) {
-                                                              final u =
-                                                                  filtered[i];
-                                                              return ListTile(
-                                                                leading:
-                                                                    PrivetAvatar(
-                                                                  name: u
-                                                                      .displayName,
-                                                                  hue: u
-                                                                      .avatarHue,
-                                                                  online: state
-                                                                      .online
-                                                                      .contains(
+                                                        ),
+                                                      )
+                                                    : ListView.builder(
+                                                        itemCount:
+                                                            filtered.length,
+                                                        itemBuilder: (ctx, i) {
+                                                          final u = filtered[i];
+                                                          return ListTile(
+                                                            leading: PrivetAvatar(
+                                                              name:
+                                                                  u.displayName,
+                                                              hue: u.avatarHue,
+                                                              online: state
+                                                                  .online
+                                                                  .contains(
                                                                     u.id,
                                                                   ),
-                                                                ),
-                                                                title:
-                                                                    UserNameBlock
-                                                                        .fromUser(
+                                                            ),
+                                                            title:
+                                                                UserNameBlock.fromUser(
                                                                   u,
                                                                   titleSize: 15,
                                                                 ),
-                                                                subtitle: Text(
-                                                                  '@${u.handle}',
-                                                                ),
-                                                                onTap: () =>
-                                                                    Navigator.pop(
+                                                            subtitle: Text(
+                                                              '@${u.handle}',
+                                                            ),
+                                                            onTap: () =>
+                                                                Navigator.pop(
                                                                   ctx,
                                                                   u,
                                                                 ),
-                                                              );
-                                                            },
-                                                          ),
-                                                  ),
-                                                ],
+                                                          );
+                                                        },
+                                                      ),
                                               ),
-                                            );
-                                          },
-                                        ),
-                                      );
+                                            ],
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  );
                                   searchCtrl.dispose();
                                   if (picked == null) return;
                                   try {
@@ -7451,7 +7501,9 @@ class _ConversationPaneState extends State<ConversationPane>
         final after = await requestMediaPermissions(camera: true);
         if (!after.cameraGranted) {
           if (mounted) {
-            widget.state.setError('Camera permission required to take a picture');
+            widget.state.setError(
+              'Camera permission required to take a picture',
+            );
           }
           return;
         }
@@ -7577,15 +7629,15 @@ class _ConversationPaneState extends State<ConversationPane>
       _amplitudeSub = _recorder
           .onAmplitudeChanged(const Duration(milliseconds: 100))
           .listen((amp) {
-        if (!mounted) return;
-        final level = ((amp.current + 45) / 45).clamp(0.08, 1.0);
-        setState(() {
-          _recordingLevels.add(level);
-          if (_recordingLevels.length > 40) {
-            _recordingLevels.removeAt(0);
-          }
-        });
-      });
+            if (!mounted) return;
+            final level = ((amp.current + 45) / 45).clamp(0.08, 1.0);
+            setState(() {
+              _recordingLevels.add(level);
+              if (_recordingLevels.length > 40) {
+                _recordingLevels.removeAt(0);
+              }
+            });
+          });
       setState(() => _recording = true);
       _syncComposerHasContent();
     } catch (e) {
@@ -7651,13 +7703,11 @@ class _ConversationPaneState extends State<ConversationPane>
     final state = widget.state;
     final next = !state.englishTrainerEnabled;
     if (next && !state.trainerAiAvailable) {
-      _trainerToast(
-        TrainerToast(
-          icon: Icons.sports_rounded,
-          color: PrivetTheme.danger,
-          title: 'The coach needs AI',
-          subtitle: 'Add a DeepSeek key in Profile & settings first.',
-        ),
+      _showTrainerNotice(
+        icon: Icons.sports_rounded,
+        color: PrivetTheme.danger,
+        title: 'The coach needs AI',
+        subtitle: 'Add a DeepSeek key in Profile & settings first.',
       );
       return;
     }
@@ -7696,7 +7746,8 @@ class _ConversationPaneState extends State<ConversationPane>
     if (peer == null) return;
     final state = widget.state;
     final existing = state.contactGreetingName(peer.id) ?? '';
-    final fallback = PrivetState.greetingFirstName(peer.displayName) ??
+    final fallback =
+        PrivetState.greetingFirstName(peer.displayName) ??
         (peer.handle.trim().isNotEmpty ? peer.handle.trim() : 'them');
     final ctrl = TextEditingController(text: existing);
     final result = await showDialog<String?>(
@@ -7705,7 +7756,8 @@ class _ConversationPaneState extends State<ConversationPane>
         return StatefulBuilder(
           builder: (ctx, setLocal) {
             final typed = ctrl.text.trim();
-            final preview = PrivetState.greetingFirstName(
+            final preview =
+                PrivetState.greetingFirstName(
                   typed.isNotEmpty ? typed : fallback,
                 ) ??
                 fallback;
@@ -7792,12 +7844,15 @@ class _ConversationPaneState extends State<ConversationPane>
       _greetingBusy = true;
       _greetingBusyStyle = style;
       _lastGreetingStyle = style;
-      _lastGreetingPhilosopher =
-          style == GreetingStyle.philosophy ? philosopher : null;
-      _lastGreetingJokeCategory =
-          style == GreetingStyle.joke ? jokeCategory : null;
-      _lastGreetingEnglishCategory =
-          style == GreetingStyle.english ? englishCategory : null;
+      _lastGreetingPhilosopher = style == GreetingStyle.philosophy
+          ? philosopher
+          : null;
+      _lastGreetingJokeCategory = style == GreetingStyle.joke
+          ? jokeCategory
+          : null;
+      _lastGreetingEnglishCategory = style == GreetingStyle.english
+          ? englishCategory
+          : null;
     });
     final draft = await state.generateGreetingDraft(
       isGroup: chat?.isGroup == true,
@@ -7856,10 +7911,7 @@ class _ConversationPaneState extends State<ConversationPane>
     }
     final editable = _composerEditableState();
     if (editable != null) {
-      editable.userUpdateTextEditingValue(
-        next,
-        SelectionChangedCause.toolbar,
-      );
+      editable.userUpdateTextEditingValue(next, SelectionChangedCause.toolbar);
     } else {
       _controller.value = next;
     }
@@ -7885,6 +7937,23 @@ class _ConversationPaneState extends State<ConversationPane>
       }
       _lastAutocorrectText = cleaned;
       _syncComposerHasContent();
+    });
+  }
+
+  void _showTrainerNotice({
+    required IconData icon,
+    required Color color,
+    required String title,
+    String? subtitle,
+  }) {
+    if (!mounted) return;
+    setState(() {
+      _trainerNotice = TrainerNotice(
+        icon: icon,
+        color: color,
+        title: title,
+        subtitle: subtitle,
+      );
     });
   }
 
@@ -7951,8 +8020,8 @@ class _ConversationPaneState extends State<ConversationPane>
           title: reward.selfFix
               ? trainerSelfFixLine()
               : check.issues.length == 1
-                  ? 'Sent · one tiny nitpick'
-                  : 'Sent · ${check.issues.length} tiny nitpicks',
+              ? 'Sent · one tiny nitpick'
+              : 'Sent · ${check.issues.length} tiny nitpicks',
           subtitle: '${first.wrong} → ${first.right}',
           xp: reward.xp,
           streak: reward.streak,
@@ -7978,7 +8047,9 @@ class _ConversationPaneState extends State<ConversationPane>
             : Icons.check_circle_rounded,
         color: const Color(0xFF5BD68A),
         title: reward.selfFix ? trainerSelfFixLine() : trainerCleanLine(),
-        subtitle: check.natural.isEmpty ? null : 'Native vibe: ${check.natural}',
+        subtitle: check.natural.isEmpty
+            ? null
+            : 'Native vibe: ${check.natural}',
         xp: reward.xp,
         streak: reward.streak,
       ),
@@ -8006,13 +8077,11 @@ class _ConversationPaneState extends State<ConversationPane>
     if (!state.englishTrainerEnabled) return true;
     if (_draftVoice != null || _draftMedia.isNotEmpty) return true;
     if (_trainerChecking) {
-      _trainerToast(
-        TrainerToast(
-          icon: Icons.hourglass_top_rounded,
-          color: PrivetTheme.mist,
-          title: 'Coach is still reading…',
-          subtitle: 'One moment — then tap send again if needed',
-        ),
+      _showTrainerNotice(
+        icon: Icons.hourglass_top_rounded,
+        color: PrivetTheme.mist,
+        title: 'Coach is still reading…',
+        subtitle: 'One moment — then tap send again if needed',
       );
       return false;
     }
@@ -8020,15 +8089,12 @@ class _ConversationPaneState extends State<ConversationPane>
     if (!shouldTrainerCheck(text)) return true;
     final trimmed = text.trim();
     if (trimmed.length > kTrainerMaxChars) {
-      _trainerToast(
-        TrainerToast(
-          icon: Icons.sports_rounded,
-          color: PrivetTheme.mist,
-          title: 'Message too long for Coach',
-          subtitle:
-              'Max $kTrainerMaxChars characters — shorten it or turn Coach off to send',
-        ),
-        duration: const Duration(seconds: 5),
+      _showTrainerNotice(
+        icon: Icons.sports_rounded,
+        color: PrivetTheme.mist,
+        title: 'Message too long for Coach',
+        subtitle:
+            'Max $kTrainerMaxChars characters — shorten it or turn Coach off to send',
       );
       return false;
     }
@@ -8047,45 +8113,41 @@ class _ConversationPaneState extends State<ConversationPane>
     setState(() => _trainerChecking = false);
     // Chat switched while the coach was reading.
     if (state.activeConversationId != chatId) {
-      _trainerToast(
-        TrainerToast(
-          icon: Icons.sports_rounded,
-          color: PrivetTheme.mist,
-          title: 'Chat changed — not sent',
-          subtitle: 'Switch back and tap send to try again',
-        ),
+      _showTrainerNotice(
+        icon: Icons.sports_rounded,
+        color: PrivetTheme.mist,
+        title: 'Chat changed — not sent',
+        subtitle: 'Switch back and tap send to try again',
       );
       return false;
     }
     // Ignore whitespace-only drift; real edits cancel the send.
     if (_controller.text.trim() != snapshot.trim()) {
-      _trainerToast(
-        TrainerToast(
-          icon: Icons.edit_rounded,
-          color: PrivetTheme.mist,
-          title: 'You edited while Coach was reading',
-          subtitle: 'Tap send again to check the new text',
-        ),
+      _showTrainerNotice(
+        icon: Icons.edit_rounded,
+        color: PrivetTheme.mist,
+        title: 'You edited while Coach was reading',
+        subtitle: 'Tap send again to check the new text',
       );
       return false;
     }
     if (check == null) {
-      _trainerToast(
-        TrainerToast(
-          icon: Icons.sports_rounded,
-          color: PrivetTheme.mist,
-          title: 'Coach couldn\'t check — not sent',
-          subtitle: failure == null || failure.isEmpty
-              ? 'Tap send to try again, or turn Coach off in the greeting bar'
-              : '$failure — tap send to retry, or turn Coach off',
-        ),
-        duration: const Duration(seconds: 5),
+      _showTrainerNotice(
+        icon: Icons.sports_rounded,
+        color: PrivetTheme.danger,
+        title: 'Coach couldn\'t check — not sent',
+        subtitle: failure == null || failure.isEmpty
+            ? 'Tap send to try again, or turn Coach off in the greeting bar'
+            : '$failure — tap send to retry, or turn Coach off',
       );
       return false;
     }
+    if (_trainerNotice != null) {
+      setState(() => _trainerNotice = null);
+    }
     final reward = await state.recordTrainerCheck(check, retry: retry);
     if (!mounted) return false;
-    if (!check.hasMajor) {
+    if (!check.hasMajor && check.natural.trim().isEmpty) {
       _trainerRetry = false;
       _toastTrainerReward(reward, check);
       return true;
@@ -8143,7 +8205,7 @@ class _ConversationPaneState extends State<ConversationPane>
 
   /// One AI grammar check. Timeout scales with message length.
   Future<TrainerCheck> _runEnglishCheck(String text) async {
-    final seconds = (22 + (text.length / 100).ceil()).clamp(22, 50);
+    final seconds = (28 + (text.length / 70).ceil()).clamp(28, 75);
     Future<TrainerCheck> once() => widget.state
         .checkEnglish(text)
         .timeout(
@@ -8155,7 +8217,7 @@ class _ConversationPaneState extends State<ConversationPane>
       return await once();
     } catch (e) {
       if (!_isRetryableCoachFailure(e)) rethrow;
-      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      await Future<void>.delayed(const Duration(milliseconds: 1400));
       return await once();
     }
   }
@@ -8166,6 +8228,8 @@ class _ConversationPaneState extends State<ConversationPane>
         msg.contains('wait a few seconds') ||
         msg.contains('empty-handed') ||
         msg.contains('empty text') ||
+        msg.contains('mumbled') ||
+        msg.contains('unreadable') ||
         msg.contains('429') ||
         msg.contains('503');
   }
@@ -8325,7 +8389,9 @@ class _ConversationPaneState extends State<ConversationPane>
     widget.state.stopOutgoingTyping();
     _clearComposerAutocomplete();
     _controller.clearMarks();
-    final stashed = _editingMessage == null ? _controller.text : _composerDraftBeforeEdit;
+    final stashed = _editingMessage == null
+        ? _controller.text
+        : _composerDraftBeforeEdit;
     final body = message.body;
     _controller.removeListener(_onComposerTextChanged);
     _controller.loadMarkup(body);
@@ -8568,7 +8634,8 @@ class _CallActionButton extends StatelessWidget {
                     : PrivetTheme.ink.withValues(alpha: 0.35),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(
-                  color: (PrivetTheme.accentStyle == AccentStyle.tape ||
+                  color:
+                      (PrivetTheme.accentStyle == AccentStyle.tape ||
                           PrivetTheme.accentStyle == AccentStyle.larva)
                       ? Colors.transparent
                       : borderColor,
@@ -8645,9 +8712,7 @@ class _ComposerMenuItemState extends State<_ComposerMenuItem> {
           width: double.infinity,
           alignment: Alignment.centerLeft,
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-          color: _hovered
-              ? const Color(0xFF3F3F46)
-              : Colors.transparent,
+          color: _hovered ? const Color(0xFF3F3F46) : Colors.transparent,
           child: Text(
             widget.label,
             style: const TextStyle(
@@ -8778,7 +8843,8 @@ class _GreetingComposerBar extends StatelessWidget {
     String? philosopher,
     String? jokeCategory,
     String? englishCategory,
-  }) onStyle;
+  })
+  onStyle;
   final VoidCallback? onRegenerate;
   final VoidCallback onDismiss;
 
@@ -8840,10 +8906,7 @@ class _GreetingComposerBar extends StatelessWidget {
                           enabled: !busy,
                           items: [
                             for (final id in kGreetingJokeCategories)
-                              (
-                                id: id,
-                                label: greetingJokeCategoryLabel(id),
-                              ),
+                              (id: id, label: greetingJokeCategoryLabel(id)),
                           ],
                           onPick: (category) => onStyle(
                             GreetingStyle.joke,
@@ -8859,10 +8922,7 @@ class _GreetingComposerBar extends StatelessWidget {
                           enabled: !busy,
                           items: [
                             for (final id in kGreetingEnglishCategories)
-                              (
-                                id: id,
-                                label: greetingEnglishCategoryLabel(id),
-                              ),
+                              (id: id, label: greetingEnglishCategoryLabel(id)),
                           ],
                           onPick: (category) => onStyle(
                             GreetingStyle.english,
@@ -8890,8 +8950,8 @@ class _GreetingComposerBar extends StatelessWidget {
                           icon: style == GreetingStyle.ai
                               ? Icons.auto_awesome_rounded
                               : style == GreetingStyle.sayHi
-                                  ? Icons.waving_hand_rounded
-                                  : null,
+                              ? Icons.waving_hand_rounded
+                              : null,
                           selected: lastStyle == style && !busy,
                           busy: busy && busyStyle == style,
                           enabled: !busy,
@@ -8944,10 +9004,7 @@ class _GreetingComposerBar extends StatelessWidget {
               iconSize: 18,
               padding: const EdgeInsets.all(6),
               constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-              icon: Icon(
-                Icons.close_rounded,
-                color: PrivetTheme.mist,
-              ),
+              icon: Icon(Icons.close_rounded, color: PrivetTheme.mist),
             ),
           ],
         ),
@@ -8979,8 +9036,8 @@ class _GreetingDropdownChip extends StatefulWidget {
   final List<({String id, String label})> items;
 
   /// Action rows under the picks; non-null `toggled` renders a switch.
-  final List<
-      ({String label, IconData icon, bool? toggled, VoidCallback onTap})> extras;
+  final List<({String label, IconData icon, bool? toggled, VoidCallback onTap})>
+  extras;
 
   /// `null` means Random from the pool.
   final ValueChanged<String?> onPick;
@@ -9113,8 +9170,7 @@ class _GreetingDropdownChipState extends State<_GreetingDropdownChip> {
                             toggled: extra.toggled,
                             onTap: () {
                               extra.onTap();
-                              WidgetsBinding.instance
-                                  .addPostFrameCallback((_) {
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
                                 if (mounted) _hideMenu();
                               });
                             },
@@ -9506,7 +9562,8 @@ class _AddChipButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final special = PrivetTheme.accentStyle == AccentStyle.tape ||
+    final special =
+        PrivetTheme.accentStyle == AccentStyle.tape ||
         PrivetTheme.accentStyle == AccentStyle.larva;
     return Padding(
       padding: const EdgeInsets.only(left: 4),
@@ -9595,7 +9652,8 @@ class _AccentPicker extends StatelessWidget {
                     ? Icon(
                         Icons.check_rounded,
                         size: 18,
-                        color: option.style == AccentStyle.hacker ||
+                        color:
+                            option.style == AccentStyle.hacker ||
                                 option.style == AccentStyle.yellow ||
                                 option.style == AccentStyle.tape
                             ? const Color(0xFF0E1114)
@@ -9624,7 +9682,11 @@ class _AccentSwatchPainter extends CustomPainter {
         const black = Color(0xFF111111);
         const yellow = Color(0xFFF0D000);
         const stripe = 5.0;
-        for (var i = -size.height; i < size.width + size.height; i += stripe * 2) {
+        for (
+          var i = -size.height;
+          i < size.width + size.height;
+          i += stripe * 2
+        ) {
           paint.color = black;
           canvas.drawPath(
             Path()

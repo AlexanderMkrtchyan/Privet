@@ -153,6 +153,85 @@ void main() {
       final parsed = parseMarkup(markup);
       expect(parsed.plainText, plain);
     });
+
+    test('bold ending mid-highlight reopens bg (no leaked close tags)', () {
+      const plain = 'you can generate them by AI';
+      const green = Color(0xFF7BD86E);
+      final runs = [
+        FormatRun(0, 3, const TextFormat(bold: true, background: green)),
+        FormatRun(3, plain.length, const TextFormat(background: green)),
+      ];
+      final markup = serializeMarkup(plain, runs);
+      // Must close+reopen [bg] around [/b] so nesting stays well-formed.
+      expect(markup, '[b][bg=#7bd86e]you[/bg][/b][bg=#7bd86e] can generate them by AI[/bg]');
+      final parsed = parseMarkup(markup);
+      expect(parsed.plainText, plain);
+      expect(parsed.plainText.contains('['), isFalse);
+      expect(parsed.runs, hasLength(2));
+      expect(parsed.runs[0].format.bold, isTrue);
+      expect(parsed.runs[0].format.background, green);
+      expect(parsed.runs[1].format.bold, isFalse);
+      expect(parsed.runs[1].format.background, green);
+    });
+
+    test('highlight then bold then italic on same range stays clean', () {
+      const plain = 'you can generate them by AI';
+      const green = Color(0xFF7BD86E);
+      var runs = [
+        FormatRun(0, plain.length, const TextFormat(background: green)),
+      ];
+      runs = applyFormatToSelection(
+        runs,
+        0,
+        plain.length,
+        const TextFormat(bold: true, background: green),
+      );
+      runs = applyFormatToSelection(
+        runs,
+        0,
+        plain.length,
+        const TextFormat(bold: true, italic: true, background: green),
+      );
+      final markup = serializeMarkup(plain, runs);
+      expect(markup, '[b][i][bg=#7bd86e]$plain[/bg][/i][/b]');
+      final parsed = parseMarkup(markup);
+      expect(parsed.plainText, plain);
+      expect(parsed.runs.single.format.bold, isTrue);
+      expect(parsed.runs.single.format.italic, isTrue);
+      expect(parsed.runs.single.format.background, green);
+    });
+
+    test('inserting italic between bold and bg reopens inner tags', () {
+      const plain = 'hello world';
+      const yellow = kDefaultHighlight;
+      final runs = [
+        FormatRun(0, 5, const TextFormat(bold: true, background: yellow)),
+        FormatRun(
+          5,
+          plain.length,
+          const TextFormat(bold: true, italic: true, background: yellow),
+        ),
+      ];
+      final markup = serializeMarkup(plain, runs);
+      expect(
+        markup,
+        '[b][bg]hello[/bg][i][bg] world[/bg][/i][/b]',
+      );
+      final parsed = parseMarkup(markup);
+      expect(parsed.plainText, plain);
+      expect(parsed.plainText.contains('['), isFalse);
+    });
+
+    test('bg color change closes and reopens with new color', () {
+      final runs = [
+        FormatRun(0, 1, const TextFormat(background: Color(0xFFFF0000))),
+        FormatRun(1, 2, const TextFormat(background: Color(0xFF00FF00))),
+      ];
+      expect(
+        serializeMarkup('ab', runs),
+        '[bg=#ff0000]a[/bg][bg=#00ff00]b[/bg]',
+      );
+    });
   });
 
   group('selection operations', () {

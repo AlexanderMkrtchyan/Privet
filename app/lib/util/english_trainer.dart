@@ -193,7 +193,10 @@ class TrainerCheck {
 }
 
 /// Apply each issue's wrong→right edit to [original].
-/// Returns null when a non-empty `wrong` span cannot be located.
+///
+/// Applies every span that can be located. Returns null only when the model
+/// listed `wrong` text and none of it appears in the original (so a full
+/// model rewrite — if any — should be used instead).
 String? applyTrainerFixes(String original, List<TrainerIssue> issues) {
   if (issues.isEmpty) return original;
   final actionable = [
@@ -202,7 +205,7 @@ String? applyTrainerFixes(String original, List<TrainerIssue> issues) {
   ];
   if (actionable.isEmpty) return original;
   final spans = trainerIssueSpans(original, issues);
-  if (spans.length < actionable.length) return null;
+  if (spans.isEmpty) return null;
   final ordered = [...spans]..sort((a, b) => b.start.compareTo(a.start));
   var out = original;
   for (final s in ordered) {
@@ -360,24 +363,103 @@ class TrainerLevelReport {
 }
 
 /// Extract the first JSON object from a model reply (tolerates ```json fences).
+///
+/// Long coach replies often get cut off mid-object. When the raw JSON does
+/// not parse, we close open strings/brackets so a partial `issues` list is
+/// still usable instead of "Coach couldn't read".
 Map<String, dynamic>? decodeTrainerJson(String raw) {
+  var s = _stripTrainerFence(raw);
+  if (s.isEmpty) return null;
+  final objectAt = s.indexOf('{');
+  final arrayAt = s.indexOf('[');
+  if (objectAt < 0 && arrayAt < 0) return null;
+
+  if (objectAt >= 0 && (arrayAt < 0 || objectAt < arrayAt)) {
+    final end = s.lastIndexOf('}');
+    if (end > objectAt) {
+      final parsed = _asTrainerMap(s.substring(objectAt, end + 1));
+      if (parsed != null) return parsed;
+    }
+    return _asTrainerMap(repairTruncatedJson(s.substring(objectAt)));
+  }
+
+  final end = s.lastIndexOf(']');
+  if (end > arrayAt) {
+    final parsed = _asTrainerMap(s.substring(arrayAt, end + 1));
+    if (parsed != null) return parsed;
+  }
+  return _asTrainerMap(repairTruncatedJson(s.substring(arrayAt)));
+}
+
+String _stripTrainerFence(String raw) {
   var s = raw.trim();
-  // Strip a leading ```json ... ``` fence if the model wrapped the object.
-  final fence = RegExp(
-    r'^```(?:json|JSON)?\s*([\s\S]*?)\s*```\s*$',
-  ).firstMatch(s);
-  if (fence != null) s = fence.group(1)!.trim();
-  final start = s.indexOf('{');
-  final end = s.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
+  if (s.startsWith('```')) {
+    s = s.replaceFirst(RegExp(r'^```(?:json|JSON)?\s*'), '');
+    final close = s.lastIndexOf('```');
+    if (close >= 0) s = s.substring(0, close);
+    s = s.trim();
+  }
+  return s;
+}
+
+Map<String, dynamic>? _asTrainerMap(String raw) {
   try {
-    final decoded = jsonDecode(s.substring(start, end + 1));
+    final decoded = jsonDecode(raw);
     if (decoded is Map<String, dynamic>) return decoded;
     if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    if (decoded is List) return {'issues': decoded, 'corrected': ''};
     return null;
   } catch (_) {
     return null;
   }
+}
+
+/// Close a truncated JSON value so [jsonDecode] can recover the prefix.
+String repairTruncatedJson(String raw) {
+  final stack = <String>[];
+  var inString = false;
+  var escape = false;
+  for (var i = 0; i < raw.length; i++) {
+    final c = raw[i];
+    if (inString) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (c == r'\') {
+        escape = true;
+        continue;
+      }
+      if (c == '"') inString = false;
+      continue;
+    }
+    if (c == '"') {
+      inString = true;
+      continue;
+    }
+    if (c == '{' || c == '[') {
+      stack.add(c);
+    } else if (c == '}' || c == ']') {
+      if (stack.isEmpty) continue;
+      final open = stack.last;
+      if ((c == '}' && open == '{') || (c == ']' && open == '[')) {
+        stack.removeLast();
+      }
+    }
+  }
+
+  var out = raw;
+  if (inString) {
+    if (escape) out = out.substring(0, out.length - 1);
+    out += '"';
+  }
+  String stripComma(String s) => s.replaceFirst(RegExp(r',\s*$'), '');
+  out = stripComma(out);
+  while (stack.isNotEmpty) {
+    out = stripComma(out);
+    out += stack.removeLast() == '{' ? '}' : ']';
+  }
+  return out;
 }
 
 /// Soft cap for one pre-send grammar check (must match server).

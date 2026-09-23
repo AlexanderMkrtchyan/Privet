@@ -277,6 +277,9 @@ class _TrainerReviewDialogState extends State<_TrainerReviewDialog> {
   String get _headline {
     final m = _c.majorCount;
     final n = _c.minorCount;
+    if (m == 0 && n == 0 && _c.natural.isNotEmpty) {
+      return 'A native speaker might say';
+    }
     if (widget.readOnly || m == 0) {
       return n == 1 ? 'One tiny nitpick' : '$n tiny nitpicks';
     }
@@ -335,14 +338,16 @@ class _TrainerReviewDialogState extends State<_TrainerReviewDialog> {
                             color: PrivetTheme.mist,
                           ),
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Tap a highlighted word for the full explanation',
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            color: PrivetTheme.mist.withValues(alpha: 0.85),
+                        if (_c.issues.isNotEmpty) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            'Tap a highlighted word for the full explanation',
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: PrivetTheme.mist.withValues(alpha: 0.85),
+                            ),
                           ),
-                        ),
+                        ],
                       ],
                     ),
                   ),
@@ -378,17 +383,19 @@ class _TrainerReviewDialogState extends State<_TrainerReviewDialog> {
                       onSelect: _selectIssue,
                       mode: _HighlightMode.wrong,
                     ),
-                    const SizedBox(height: 12),
-                    const _SectionLabel('Coach’s version'),
-                    _HighlightedText(
-                      text: _c.corrected,
-                      issues: fixedIssues,
-                      hover: _hover,
-                      selected: _selected,
-                      onHover: (i) => setState(() => _hover = i),
-                      onSelect: _selectIssue,
-                      mode: _HighlightMode.fixed,
-                    ),
+                    if (_c.corrected.trim() != _c.original.trim()) ...[
+                      const SizedBox(height: 12),
+                      const _SectionLabel('Coach’s version'),
+                      _HighlightedText(
+                        text: _c.corrected,
+                        issues: fixedIssues,
+                        hover: _hover,
+                        selected: _selected,
+                        onHover: (i) => setState(() => _hover = i),
+                        onSelect: _selectIssue,
+                        mode: _HighlightMode.fixed,
+                      ),
+                    ],
                     const SizedBox(height: 14),
                     for (var i = 0; i < _c.issues.length; i++)
                       KeyedSubtree(
@@ -849,6 +856,93 @@ class _StreakNote extends StatelessWidget {
 // ---------------------------------------------------------------------------
 // Toast after a send
 // ---------------------------------------------------------------------------
+
+/// Sticky coach message above the composer — stays until the user taps X.
+class TrainerNotice {
+  const TrainerNotice({
+    required this.icon,
+    required this.color,
+    required this.title,
+    this.subtitle,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String title;
+  final String? subtitle;
+}
+
+class TrainerNoticeBanner extends StatelessWidget {
+  const TrainerNoticeBanner({
+    super.key,
+    required this.notice,
+    required this.onClose,
+  });
+
+  final TrainerNotice notice;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: PrivetTheme.panelElevated,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: notice.color.withValues(alpha: 0.5)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 8, 2, 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Icon(notice.icon, color: notice.color, size: 20),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    notice.title,
+                    style: GoogleFonts.ibmPlexSans(
+                      fontWeight: FontWeight.w600,
+                      color: PrivetTheme.paper,
+                      fontSize: 13.5,
+                    ),
+                  ),
+                  if (notice.subtitle != null && notice.subtitle!.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        notice.subtitle!,
+                        style: TextStyle(
+                          fontSize: 12,
+                          height: 1.35,
+                          color: PrivetTheme.mist,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            IconButton(
+              tooltip: 'Close',
+              icon: const Icon(Icons.close_rounded, size: 18),
+              color: PrivetTheme.mist,
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.all(6),
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              onPressed: onClose,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 /// SnackBar body for trainer feedback.
 class TrainerToast extends StatelessWidget {

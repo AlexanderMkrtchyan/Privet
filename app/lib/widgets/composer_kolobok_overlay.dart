@@ -6,6 +6,8 @@ import '../util/kolobok_images.dart';
 import 'composer_autocorrect_controller.dart';
 import 'selectable_markup_text.dart'
     show kolobokArtSlot, kolobokDestRect, kolobokPaintCenter, kolobokPaintScale;
+import 'terminal_block_caret.dart'
+    show composerOverlayFieldClip, findComposerEditable;
 
 /// Paints Kolobok art over hidden composer glyphs (same trick as message bodies).
 ///
@@ -72,13 +74,22 @@ class _ComposerKolobokPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     if (spans.isEmpty) return;
-    final editable = _findEditable(fieldKey.currentContext);
+    final editable = findComposerEditable(fieldKey.currentContext);
     final paintBox = paintKey.currentContext?.findRenderObject();
     if (editable == null || !editable.hasSize) return;
     if (paintBox is! RenderBox || !paintBox.hasSize) return;
 
     final origin =
-        editable.localToGlobal(Offset.zero) - paintBox.localToGlobal(Offset.zero);
+        editable.localToGlobal(Offset.zero) -
+        paintBox.localToGlobal(Offset.zero);
+    final clip = composerOverlayFieldClip(
+      fieldOrigin: origin,
+      fieldSize: editable.size,
+      paintSize: size,
+    );
+    if (clip == null) return;
+    canvas.save();
+    canvas.clipRect(clip);
     final cache = KolobokImageCache.instance;
     final paint = Paint()..filterQuality = FilterQuality.high;
     final plainLen = editable.text?.toPlainText().length ?? 0;
@@ -129,25 +140,7 @@ class _ComposerKolobokPainter extends CustomPainter {
         canvas.drawImageRect(image, source, dest, paint);
       }
     }
-  }
-
-  static RenderEditable? _findEditable(BuildContext? ctx) {
-    if (ctx == null) return null;
-    RenderEditable? editable;
-    void visitor(Element el) {
-      if (editable != null) return;
-      final ro = el.renderObject;
-      if (ro is RenderEditable) {
-        editable = ro;
-        return;
-      }
-      el.visitChildren(visitor);
-    }
-
-    final root = ctx.findRenderObject();
-    if (root is RenderEditable) return root;
-    ctx.visitChildElements(visitor);
-    return editable;
+    canvas.restore();
   }
 
   @override

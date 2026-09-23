@@ -123,8 +123,10 @@ app_dir.mkdir(exist_ok=True)
 # Landing page (source-controlled) becomes the public site root.
 # Stamp download card versions from pubspec so the marketing site
 # never lags behind the shipped release.
-landing_html = Path("$ROOT/server/landing/index.html").read_text()
+landing_src = Path("$ROOT/server/landing/index.html")
+landing_html = landing_src.read_text()
 landing_html = re.sub(r"v\d+\.\d+\.\d+", f"v{'$VERSION'}", landing_html)
+landing_src.write_text(landing_html)
 (root / "index.html").write_text(landing_html)
 
 # Cache-bust the Flutter engine bundle reference.

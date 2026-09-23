@@ -1,5 +1,10 @@
 import { db } from '../db.js';
 import { generateText } from './llm.js';
+import {
+  looksLikeTrainerCheck,
+  mergeTrainerReplies,
+  splitTrainerChunks,
+} from './trainer_json.js';
 
 const HELP_TEXT = `Privet AI
 
@@ -218,32 +223,44 @@ export function englishCheckPrompt(text) {
   return `You are "Coach", a witty, warm personal English trainer inside a chat app.
 The user is a non-native speaker practising English by chatting. Check the message below BEFORE they send it.
 
-Return ONLY a JSON object, no markdown, with exactly these keys:
+Return ONLY a compact JSON object, no markdown:
 {
-  "corrected": string,      // ORIGINAL with ONLY the listed issue fixes applied — same words, tone, slang, emoji, line breaks; do NOT paraphrase
-  "issues": [               // [] when the message is fine
+  "issues": [               // [] when the message is fine. Max 8.
     {
-      "wrong": string,      // exact substring copied from the ORIGINAL message (shortest span that shows the error)
+      "wrong": string,      // exact substring copied from the ORIGINAL (shortest span)
       "right": string,      // replacement for that span
       "type": string,       // one of: ${TRAINER_ISSUE_TYPES}
       "severity": "major" | "minor",
-      "why": string,        // plain-English rule, max 18 words, no jargon soup
+      "why": string,        // plain-English rule, max 18 words
       "example": string     // one short NEW correct sentence using the same rule
     }
   ],
-  "natural": string,        // optional freer native-sounding rewrite; "" if already natural. NEVER put this rewrite in "corrected"
-  "quip": string,           // one playful coach line, max 14 words, kind (tease the mistake, never the person)
-  "cefr": "A1" | "A2" | "B1" | "B2" | "C1" | "C2"  // level this single message shows
+  "natural": string,        // how a native speaker would actually say THIS WHOLE message — same meaning, names, and line breaks, freer wording. "" only if it already sounds native. Example: "I need your help" → "Can you give me a hand?"
+  "quip": string,           // one playful coach line, max 14 words
+  "cefr": "A1" | "A2" | "B1" | "B2" | "C1" | "C2"
 }
 
 Rules:
+- Do NOT include a "corrected" field. The app applies your replacements to the original.
+- Always fill "natural" when a native speaker would word it differently. That is polish, not an error — do not list it as an issue.
 - This is casual chat. Do NOT flag: missing final period, lowercase first letter of a message, emoji, common chat shorthand (lol, btw, u, ok, pls), contractions, informal tone.
 - DO flag real grammar, spelling, word choice, articles, prepositions, tenses, agreement, word order — even in casual text.
 - Lowercase "i" as a pronoun is severity "minor". Spelling slips and missing commas are "minor". Anything that breaks grammar or meaning is "major".
 - Never invent issues. If unsure, leave it out. Names, brands, code, URLs and non-English words are not errors.
-- One issue per distinct mistake. "wrong" must appear verbatim in the original.
-- "corrected" is a surgical edit: apply each issue's right-text into the original. Keep question shape, "bro", emoji, line breaks. Put any nicer rephrase only in "natural".
-- If there are no issues, "corrected" equals the original exactly.
+- One issue per distinct mistake. "wrong" must appear verbatim in the original, including newlines and punctuation as written.
+- No preamble, no markdown fences.
+
+Message:
+<<<
+${text}
+>>>`;
+}
+
+export function englishCheckRetryPrompt(text) {
+  return `Return ONLY JSON. No markdown.
+{"issues":[{"wrong":"exact original substring","right":"fix","type":"spelling","severity":"major","why":"short rule","example":"A correct sentence."}],"quip":"kind one-liner","cefr":"B1","natural":"how a native would say the whole message"}
+If the English is already native: {"issues":[],"quip":"","cefr":"B1","natural":""}
+Max 6 issues. "wrong" must be copied verbatim from the message. Always include a native rewrite when a speaker would word it differently.
 
 Message:
 <<<
@@ -284,8 +301,67 @@ function clampTrainerText(text, max) {
 const TRAINER_CHECK_MAX_CHARS = 6000;
 
 function trainerCheckMaxTokens(bodyLen) {
-  // Base JSON + corrected copy of the message + a handful of issue objects.
-  return Math.min(3600, 1400 + Math.ceil(bodyLen / 2));
+  // Issues JSON + a full native rewrite of the message.
+  return Math.min(4000, 1800 + Math.ceil(bodyLen / 2));
+}
+
+function isEmptyCoachError(err) {
+  const msg = String(err?.message || err).toLowerCase();
+  return (
+    msg.includes('empty') ||
+    msg.includes('empty-handed') ||
+    msg.includes('unreadable')
+  );
+}
+
+async function generateTrainerCheck(body, opts) {
+  const gen = async (prompt, maxTokens) => {
+    try {
+      return await generateText(prompt, {
+        apiKey: opts.apiKey,
+        model: opts.model,
+        baseUrl: opts.baseUrl,
+        maxTokens,
+        temperature: 0.2,
+        disableThinking: true,
+        json: false,
+      });
+    } catch (err) {
+      if (!isEmptyCoachError(err)) throw err;
+      return { text: '', provider: 'unknown', model: '', error: err };
+    }
+  };
+
+  const tokens = trainerCheckMaxTokens(body.length);
+  let last = await gen(englishCheckPrompt(body), tokens);
+  if (looksLikeTrainerCheck(last.text)) return last;
+
+  last = await gen(englishCheckRetryPrompt(body), Math.max(tokens, 2000));
+  if (looksLikeTrainerCheck(last.text)) return last;
+
+  if (body.length >= 360) {
+    const chunks = splitTrainerChunks(body, 700);
+    if (chunks.length > 1) {
+      const parts = [];
+      for (const chunk of chunks) {
+        const one = await gen(
+          englishCheckRetryPrompt(chunk),
+          trainerCheckMaxTokens(chunk.length),
+        );
+        if (one.provider && one.provider !== 'unknown') last = one;
+        if (looksLikeTrainerCheck(one.text)) parts.push(one.text);
+      }
+      if (parts.length) {
+        return {
+          text: mergeTrainerReplies(parts),
+          provider: last.provider,
+          model: last.model,
+        };
+      }
+    }
+  }
+  if (last.error) throw last.error;
+  return last;
 }
 
 /**
@@ -323,20 +399,17 @@ export async function runPrivetAi({
     const body = isCheck
       ? rawBody
       : clampTrainerText(rawBody, 24000);
-    const { text, provider, model: usedModel } = await generateText(
-      isCheck ? englishCheckPrompt(body) : englishLevelPrompt(body),
-      {
-        apiKey,
-        model,
-        baseUrl,
-        maxTokens: isCheck ? trainerCheckMaxTokens(body.length) : 1400,
-        temperature: isCheck ? 0.2 : 0.5,
-        disableThinking: true,
-        // Prompt already demands JSON. response_format breaks some DeepSeek
-        // models while greet (no json mode) still works with the same key.
-        json: false,
-      },
-    );
+    const { text, provider, model: usedModel } = isCheck
+      ? await generateTrainerCheck(body, { apiKey, model, baseUrl })
+      : await generateText(englishLevelPrompt(body), {
+          apiKey,
+          model,
+          baseUrl,
+          maxTokens: 1400,
+          temperature: 0.5,
+          disableThinking: true,
+          json: false,
+        });
     return {
       text,
       meta: { kind: parsed.type, messageCount: 0, provider, model: usedModel },

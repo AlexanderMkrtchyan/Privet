@@ -100,6 +100,7 @@ export async function generateText(prompt, opts = {}) {
       maxTokens: opts.maxTokens,
       temperature: opts.temperature,
       json: opts.json,
+      disableThinking: opts.disableThinking,
     });
     return { text, provider: 'openai', model: modelOverride };
   }
@@ -125,6 +126,7 @@ export async function generateText(prompt, opts = {}) {
         maxTokens: opts.maxTokens,
         temperature: opts.temperature,
         json: opts.json,
+        disableThinking: opts.disableThinking,
       });
       return { text, provider: 'openai', model };
     } catch (err) {
@@ -160,6 +162,7 @@ export async function generateText(prompt, opts = {}) {
           maxTokens: opts.maxTokens,
           temperature: opts.temperature,
           json: opts.json,
+          disableThinking: opts.disableThinking,
         });
         return { text, provider: 'openai', model };
       }

@@ -4,6 +4,8 @@ import 'package:flutter/rendering.dart';
 import '../theme.dart';
 import 'composer_autocorrect_controller.dart';
 import 'selectable_markup_text.dart' show privetTightInkRect;
+import 'terminal_block_caret.dart'
+    show composerOverlayFieldClip, findComposerEditable;
 
 /// Paints the composer range-selection tint above the [TextField].
 ///
@@ -70,13 +72,20 @@ class _ComposerSelectionPainter extends CustomPainter {
     final end = selection.end.clamp(0, textLength);
     if (end <= start) return;
 
-    final editable = _findEditable(fieldKey.currentContext);
+    final editable = findComposerEditable(fieldKey.currentContext);
     final paintBox = paintKey.currentContext?.findRenderObject();
     if (editable == null || !editable.hasSize) return;
     if (paintBox is! RenderBox || !paintBox.hasSize) return;
 
-    final origin = editable.localToGlobal(Offset.zero) -
+    final origin =
+        editable.localToGlobal(Offset.zero) -
         paintBox.localToGlobal(Offset.zero);
+    final clip = composerOverlayFieldClip(
+      fieldOrigin: origin,
+      fieldSize: editable.size,
+      paintSize: size,
+    );
+    if (clip == null) return;
 
     final boxes = editable.getBoxesForSelection(
       TextSelection(baseOffset: start, extentOffset: end),
@@ -84,33 +93,18 @@ class _ComposerSelectionPainter extends CustomPainter {
     if (boxes.isEmpty) return;
 
     final paint = Paint()..color = signal.withValues(alpha: 0.45);
+    canvas.save();
+    canvas.clipRect(clip);
     for (final box in boxes) {
       final rect = privetTightInkRect(box.toRect().shift(origin));
       if (rect.width <= 0 || rect.height <= 0) continue;
+      if (!rect.overlaps(clip)) continue;
       canvas.drawRRect(
         RRect.fromRectAndRadius(rect, const Radius.circular(2)),
         paint,
       );
     }
-  }
-
-  static RenderEditable? _findEditable(BuildContext? ctx) {
-    if (ctx == null) return null;
-    RenderEditable? editable;
-    void visitor(Element el) {
-      if (editable != null) return;
-      final ro = el.renderObject;
-      if (ro is RenderEditable) {
-        editable = ro;
-        return;
-      }
-      el.visitChildren(visitor);
-    }
-
-    final root = ctx.findRenderObject();
-    if (root is RenderEditable) return root;
-    ctx.visitChildElements(visitor);
-    return editable;
+    canvas.restore();
   }
 
   @override

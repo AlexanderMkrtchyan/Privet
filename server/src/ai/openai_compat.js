@@ -46,7 +46,7 @@ function serverApiKey() {
 
 /**
  * @param {string} prompt
- * @param {{ apiKey?: string, model?: string, baseUrl?: string, maxTokens?: number, temperature?: number, json?: boolean }} [opts]
+ * @param {{ apiKey?: string, model?: string, baseUrl?: string, maxTokens?: number, temperature?: number, json?: boolean, disableThinking?: boolean }} [opts]
  */
 export async function generateOpenAiCompatText(prompt, opts = {}) {
   const userKey = opts.apiKey?.trim() || '';
@@ -87,7 +87,9 @@ export async function generateOpenAiCompatText(prompt, opts = {}) {
     ? 'You are Privet AI. Reply with a single valid JSON object only — no markdown fences, no preamble.'
     : 'You are Privet AI, a private messenger assistant. Be concise.';
 
-  const post = (jsonMode) =>
+  const disableThinking = opts.disableThinking === true;
+
+  const post = (jsonMode, thinkingOff) =>
     fetch(`${base}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -106,12 +108,22 @@ export async function generateOpenAiCompatText(prompt, opts = {}) {
         temperature,
         max_tokens: maxTokens,
         ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+        // DeepSeek V4 Flash otherwise spends max_tokens on hidden reasoning
+        // and returns empty `content` ~most of the time on longer prompts.
+        ...(thinkingOff ? { thinking: { type: 'disabled' } } : {}),
       }),
     });
 
-  let res = await post(!!opts.json);
+  const tryPost = async (jsonMode, thinkingOff) => {
+    const res = await post(jsonMode, thinkingOff);
+    // Hosts that do not know `thinking` reject it with 400 — retry plain.
+    if (thinkingOff && res.status === 400) return post(jsonMode, false);
+    return res;
+  };
+
+  let res = await tryPost(!!opts.json, disableThinking);
   // Some OpenAI-compatible hosts reject response_format — the prompt still asks for JSON.
-  if (opts.json && res.status === 400) res = await post(false);
+  if (opts.json && res.status === 400) res = await tryPost(false, disableThinking);
 
   const readBody = async (response) => {
     const raw = await response.text();
@@ -165,9 +177,21 @@ function extractCompatMessageText(json) {
     if (joined.trim()) return joined.trim();
   }
   // Rare: some gateways put the final answer in a sibling field.
-  for (const key of ['output_text', 'result', 'answer']) {
+  // Reasoning models often leave `content` empty and park JSON in
+  // reasoning_content when the output budget ran out.
+  for (const key of ['output_text', 'result', 'answer', 'reasoning_content']) {
     const v = msg[key];
-    if (typeof v === 'string' && v.trim()) return v.trim();
+    if (typeof v === 'string' && v.trim() && v.includes('{')) return v.trim();
+  }
+  if (Array.isArray(msg.reasoning)) {
+    const joined = msg.reasoning
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (part && typeof part.text === 'string') return part.text;
+        return '';
+      })
+      .join('');
+    if (joined.trim() && joined.includes('{')) return joined.trim();
   }
   return '';
 }

@@ -1,11 +1,11 @@
 /* Privet PWA service worker — local web.
- * Build stamp is injected by deploy-web.sh (20260922-214151).
+ * Build stamp is injected by deploy-web.sh (20260923-155442).
  * Network-first for app shell/JS so local deploys stay fresh; cache-first for
  * static icons/assets. API, media, and WebSocket traffic are never cached.
  */
 'use strict';
 
-const BUILD = '20260922-214151';
+const BUILD = '20260923-155442';
 const CACHE = `privet-static-${BUILD}`;
 
 const PRECACHE = [

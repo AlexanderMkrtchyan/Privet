@@ -41,8 +41,10 @@ class _TerminalBlockCaretState extends State<TerminalBlockCaret> {
   final GlobalKey _paintKey = GlobalKey();
   Timer? _blink;
   Timer? _idle;
+  ViewportOffset? _boundOffset;
   bool _lit = true;
   bool _armed = false;
+
   /// False while typing — caret stays on the user's accent.
   bool _cycleColors = false;
   int _colorIndex = 0;
@@ -96,9 +98,24 @@ class _TerminalBlockCaretState extends State<TerminalBlockCaret> {
   void dispose() {
     _blink?.cancel();
     _idle?.cancel();
+    _boundOffset?.removeListener(_onScroll);
+    _boundOffset = null;
     widget.focusNode.removeListener(_onFocusChanged);
     widget.controller.removeListener(_onControllerTick);
     super.dispose();
+  }
+
+  void _onScroll() {
+    if (mounted && _shouldShow) setState(() {});
+  }
+
+  void _syncScrollBinding() {
+    final editable = findComposerEditable(widget.fieldKey.currentContext);
+    final next = editable?.offset;
+    if (identical(next, _boundOffset)) return;
+    _boundOffset?.removeListener(_onScroll);
+    _boundOffset = next;
+    _boundOffset?.addListener(_onScroll);
   }
 
   void _onFocusChanged() {
@@ -195,16 +212,24 @@ class _TerminalBlockCaretState extends State<TerminalBlockCaret> {
     // Read so we rebuild when Low RAM & CPU flips (color cycle on/off).
     final _ = MediaQuery.disableAnimationsOf(context);
     final visible = _shouldShow && _lit;
-    return CustomPaint(
-      key: _paintKey,
-      painter: _TerminalBlockCaretPainter(
-        fieldKey: widget.fieldKey,
-        paintKey: _paintKey,
-        selection: widget.controller.selection,
-        height: widget.height,
-        width: widget.width,
-        color: _color,
-        visible: visible,
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _syncScrollBinding();
+    });
+    // ClipRect: CustomPaint + a non-overflowing Stack do not clip, so a
+    // scrolled caret would blink over the thread or below the window.
+    return ClipRect(
+      child: CustomPaint(
+        key: _paintKey,
+        painter: _TerminalBlockCaretPainter(
+          fieldKey: widget.fieldKey,
+          paintKey: _paintKey,
+          selection: widget.controller.selection,
+          height: widget.height,
+          width: widget.width,
+          color: _color,
+          visible: visible,
+          scrollPixels: _boundOffset?.pixels ?? 0,
+        ),
       ),
     );
   }
@@ -219,6 +244,7 @@ class _TerminalBlockCaretPainter extends CustomPainter {
     required this.width,
     required this.color,
     required this.visible,
+    required this.scrollPixels,
   });
 
   final GlobalKey fieldKey;
@@ -228,45 +254,42 @@ class _TerminalBlockCaretPainter extends CustomPainter {
   final double width;
   final Color color;
   final bool visible;
+  final double scrollPixels;
 
   @override
   void paint(Canvas canvas, Size size) {
     if (!visible) return;
-    final editable = _findEditable(fieldKey.currentContext);
+    final editable = findComposerEditable(fieldKey.currentContext);
     final paintBox = paintKey.currentContext?.findRenderObject();
     if (editable == null || !editable.hasSize) return;
     if (paintBox is! RenderBox || !paintBox.hasSize) return;
     if (!selection.isValid || !selection.isCollapsed) return;
 
     final origin =
-        editable.localToGlobal(Offset.zero) - paintBox.localToGlobal(Offset.zero);
-    final anchor = editable.getLocalRectForCaret(selection.extent).shift(origin);
+        editable.localToGlobal(Offset.zero) -
+        paintBox.localToGlobal(Offset.zero);
+    final clip = composerOverlayFieldClip(
+      fieldOrigin: origin,
+      fieldSize: editable.size,
+      paintSize: size,
+    );
+    if (clip == null) return;
+
+    final anchor = editable
+        .getLocalRectForCaret(selection.extent)
+        .shift(origin);
     final rect = Rect.fromLTWH(
       anchor.left,
       anchor.top + (anchor.height - height) / 2,
       width,
       height,
     );
+    if (!rect.overlaps(clip)) return;
+
+    canvas.save();
+    canvas.clipRect(clip);
     canvas.drawRect(rect, Paint()..color = color);
-  }
-
-  static RenderEditable? _findEditable(BuildContext? ctx) {
-    if (ctx == null) return null;
-    RenderEditable? editable;
-    void visitor(Element el) {
-      if (editable != null) return;
-      final ro = el.renderObject;
-      if (ro is RenderEditable) {
-        editable = ro;
-        return;
-      }
-      el.visitChildren(visitor);
-    }
-
-    final root = ctx.findRenderObject();
-    if (root is RenderEditable) return root;
-    ctx.visitChildElements(visitor);
-    return editable;
+    canvas.restore();
   }
 
   @override
@@ -275,6 +298,39 @@ class _TerminalBlockCaretPainter extends CustomPainter {
         oldDelegate.selection != selection ||
         oldDelegate.height != height ||
         oldDelegate.width != width ||
-        oldDelegate.color != color;
+        oldDelegate.color != color ||
+        oldDelegate.scrollPixels != scrollPixels;
   }
+}
+
+/// [RenderEditable] under a composer [TextField] key.
+RenderEditable? findComposerEditable(BuildContext? ctx) {
+  if (ctx == null) return null;
+  RenderEditable? editable;
+  void visitor(Element el) {
+    if (editable != null) return;
+    final ro = el.renderObject;
+    if (ro is RenderEditable) {
+      editable = ro;
+      return;
+    }
+    el.visitChildren(visitor);
+  }
+
+  final root = ctx.findRenderObject();
+  if (root is RenderEditable) return root;
+  ctx.visitChildElements(visitor);
+  return editable;
+}
+
+/// Visible field box in the overlay's paint space, or null if nothing shows.
+Rect? composerOverlayFieldClip({
+  required Offset fieldOrigin,
+  required Size fieldSize,
+  required Size paintSize,
+}) {
+  final field = fieldOrigin & fieldSize;
+  final clip = field.intersect(Offset.zero & paintSize);
+  if (clip.isEmpty) return null;
+  return clip;
 }
