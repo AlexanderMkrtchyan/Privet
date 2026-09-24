@@ -97,7 +97,8 @@ class _KolobokSmileyState extends State<KolobokSmiley> {
     // Android/Linux so it cannot paint over the message timestamp / nearby text.
     final constrainBig = !kIsWeb &&
         (defaultTargetPlatform == TargetPlatform.android ||
-            defaultTargetPlatform == TargetPlatform.linux) &&
+            defaultTargetPlatform == TargetPlatform.linux ||
+            defaultTargetPlatform == TargetPlatform.windows) &&
         box >= 48;
     final haloExtent = constrainBig ? box : box * 1.35;
 

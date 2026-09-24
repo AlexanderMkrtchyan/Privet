@@ -51,6 +51,29 @@ void main() {
     });
   });
 
+  group('composerKolobokOverlayClip', () {
+    test('keeps the editable horizontal inset and uses the full field height',
+        () {
+      final clip = composerKolobokOverlayClip(
+        fieldOrigin: const Offset(8, 12),
+        fieldSize: const Size(200, 24),
+        paintSize: const Size(220, 48),
+      );
+      expect(clip, const Rect.fromLTWH(8, 0, 200, 48));
+    });
+
+    test('still returns null when the editable is fully outside', () {
+      expect(
+        composerKolobokOverlayClip(
+          fieldOrigin: const Offset(0, -200),
+          fieldSize: const Size(200, 24),
+          paintSize: const Size(200, 48),
+        ),
+        isNull,
+      );
+    });
+  });
+
   testWidgets('does not visit the field during build', (tester) async {
     final fieldKey = GlobalKey();
     final focus = FocusNode();

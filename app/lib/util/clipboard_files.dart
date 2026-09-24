@@ -36,6 +36,8 @@ Future<PickedBytes?> pickFileNative() => impl.pickFileNative();
 Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) =>
     impl.pickMultipleFilesNative(maxFiles: maxFiles);
 
+Future<PickedBytes?> pickImageNative() => impl.pickImageNative();
+
 /// Read a single image from the system clipboard, or null when none.
 /// Call from a user gesture (context-menu Paste); never from polls.
 Future<PickedBytes?> readClipboardImage() => impl.readClipboardImage();

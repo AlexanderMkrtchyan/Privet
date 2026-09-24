@@ -134,6 +134,10 @@ Future<PickedBytes?> pickFileNative() {
   return pickMultipleFilesNative(maxFiles: 1).then((files) => files.isEmpty ? null : files.first);
 }
 
+Future<PickedBytes?> pickImageNative() {
+  return pickMultipleFilesNative(maxFiles: 1).then((files) => files.isEmpty ? null : files.first);
+}
+
 Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) {
   ensureAttachFileInput();
   final completer = Completer<List<PickedBytes>>();

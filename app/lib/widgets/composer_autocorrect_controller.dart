@@ -1,17 +1,17 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
 import '../util/composer_autocorrect.dart';
+import '../util/emoji_style.dart';
 import '../util/kolobok_images.dart';
 import '../util/kolobok_smileys.dart';
 import '../util/low_resource.dart';
+import '../util/noto_color_emoji.dart';
 import '../util/rich_text_markup.dart';
 import 'selectable_markup_text.dart'
-    show linuxKolobokPairExtraEm, smileyAdvanceEm;
+    show desktopKolobokOversized, linuxKolobokPairExtraEm, smileyAdvanceEm;
 
 /// Byte-offset range in composer plain text covered by a Kolobok smiley.
 class ComposerKolobokSpan {
@@ -20,6 +20,14 @@ class ComposerKolobokSpan {
   final int start;
   final int end;
   final String file;
+}
+
+class ComposerNotoSpan {
+  const ComposerNotoSpan(this.start, this.end, this.emoji);
+
+  final int start;
+  final int end;
+  final String emoji;
 }
 
 /// Active Teams-style autocorrect highlight in the composer.
@@ -63,11 +71,14 @@ class ComposerAutocorrectController extends TextEditingController {
 
   /// Kolobok ranges hidden as spaces in [buildTextSpan]; painted by overlay.
   List<ComposerKolobokSpan> _kolobokSpans = const [];
+  List<ComposerNotoSpan> _notoSpans = const [];
   bool _listeningKolobokCache = false;
 
   List<FormatRun> get formatRuns => _formatRuns;
 
   List<ComposerKolobokSpan> get kolobokSpans => _kolobokSpans;
+
+  List<ComposerNotoSpan> get notoSpans => _notoSpans;
 
   /// The message body to send: plain text with formatting tags embedded.
   String get markupText => serializeMarkup(text, _formatRuns);
@@ -214,6 +225,10 @@ class ComposerAutocorrectController extends TextEditingController {
     if (_listeningKolobokCache) return;
     _listeningKolobokCache = true;
     KolobokImageCache.instance.addListener(_onKolobokCache);
+    if (useBundledNotoColorEmoji) {
+      NotoColorEmojiCache.instance.addListener(_onKolobokCache);
+      unawaited(NotoColorEmojiCache.instance.ensureLoaded());
+    }
   }
 
   void _onKolobokCache() => notifyListeners();
@@ -570,6 +585,7 @@ class ComposerAutocorrectController extends TextEditingController {
     _ensureKolobokCacheListener();
 
     final readyKolobok = <ComposerKolobokSpan>[];
+    final readyNoto = <ComposerNotoSpan>[];
     if (t.isNotEmpty) {
       var offset = 0;
       for (final grapheme in t.characters) {
@@ -582,16 +598,25 @@ class ComposerAutocorrectController extends TextEditingController {
           } else {
             cache.frameFor(file, light: light);
           }
+        } else if (useBundledNotoColorEmoji &&
+            grapheme != kGoogleEmojiMark &&
+            isNotoAtlasGrapheme(grapheme) &&
+            NotoColorEmojiCache.instance.imageFor(grapheme) != null) {
+          readyNoto.add(
+            ComposerNotoSpan(offset, offset + grapheme.length, grapheme),
+          );
         }
         offset += grapheme.length;
       }
     }
     _kolobokSpans = readyKolobok;
+    _notoSpans = readyNoto;
 
     if (m == null &&
         issues.isEmpty &&
         runs.isEmpty &&
-        readyKolobok.isEmpty) {
+        readyKolobok.isEmpty &&
+        readyNoto.isEmpty) {
       return super.buildTextSpan(
         context: context,
         style: style,
@@ -618,6 +643,10 @@ class ComposerAutocorrectController extends TextEditingController {
     for (final k in readyKolobok) {
       cuts.add(k.start);
       cuts.add(k.end);
+    }
+    for (final n in readyNoto) {
+      cuts.add(n.start);
+      cuts.add(n.end);
     }
     final points = cuts.toList()..sort();
     final children = <InlineSpan>[];
@@ -672,9 +701,16 @@ class ComposerAutocorrectController extends TextEditingController {
           break;
         }
       }
+      ComposerNotoSpan? noto;
+      for (final n in readyNoto) {
+        if (n.start == a && n.end == b) {
+          noto = n;
+          break;
+        }
+      }
       if (kolobok != null) {
         var extraEm = 0.0;
-        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+        if (desktopKolobokOversized) {
           extraEm = linuxKolobokPairExtraEm;
         }
         children.add(
@@ -685,6 +721,20 @@ class ComposerAutocorrectController extends TextEditingController {
                 b - a,
                 sliceStyle,
                 extraEm: extraEm,
+              ),
+            ),
+          ),
+        );
+      } else if (noto != null) {
+        children.add(
+          TextSpan(
+            text: kKolobokPlaceholderUnit * (b - a),
+            style: sliceStyle.copyWith(
+              letterSpacing: _kolobokLetterSpacing(
+                b - a,
+                sliceStyle,
+                extraEm: 0,
+                advanceEm: notoInlineEm,
               ),
             ),
           ),
@@ -701,10 +751,11 @@ class ComposerAutocorrectController extends TextEditingController {
     int count,
     TextStyle style, {
     double extraEm = 0,
+    double? advanceEm,
   }) {
     const placeholderEm = 0.0;
     final em = style.fontSize ?? 16.0;
-    final target = (smileyAdvanceEm + extraEm) * em;
+    final target = ((advanceEm ?? smileyAdvanceEm) + extraEm) * em;
     final intrinsic = placeholderEm * em * count;
     return ((target - intrinsic) / count).clamp(0.0, double.infinity);
   }
@@ -717,6 +768,9 @@ class ComposerAutocorrectController extends TextEditingController {
     _fadeCtrl = null;
     if (_listeningKolobokCache) {
       KolobokImageCache.instance.removeListener(_onKolobokCache);
+      if (useBundledNotoColorEmoji) {
+        NotoColorEmojiCache.instance.removeListener(_onKolobokCache);
+      }
       _listeningKolobokCache = false;
     }
     super.dispose();

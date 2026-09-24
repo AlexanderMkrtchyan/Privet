@@ -21,6 +21,8 @@ Future<PickedBytes?> pickFileNative() async => null;
 Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) async =>
     const [];
 
+Future<PickedBytes?> pickImageNative() async => null;
+
 Future<PickedBytes?> readClipboardImage() async => null;
 
 Future<PickedBytes?> readOsClipboardImage() async => null;

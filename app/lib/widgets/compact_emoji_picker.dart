@@ -4,9 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../theme.dart';
+import '../util/emoji_style.dart';
 import '../util/kolobok_smileys.dart';
 import '../util/low_resource.dart';
+import '../util/noto_color_emoji.dart';
 import 'kolobok_smiley.dart';
+import 'noto_color_emoji.dart';
 
 /// Composer emoji panel — dense Kolobok / Google tabs with a shared search.
 ///
@@ -21,12 +24,22 @@ class CompactEmojiPicker extends StatefulWidget {
     this.textEditingController,
     this.onEditShortcodes,
     this.onPicked,
+    this.markGooglePicks = false,
+    this.dense = false,
   });
 
   final ValueChanged<String> onSelected;
   final double height;
   final bool showDivider;
   final TextEditingController? textEditingController;
+
+  /// When true, Google-tab picks are marked so reactions stay on the
+  /// Noto/Google path instead of remapping to Kolobok.
+  final bool markGooglePicks;
+
+  /// Tight overlay (message menu): skip the heavy EmojiPicker chrome and
+  /// show a plain Google glyph grid.
+  final bool dense;
 
   /// Opens the custom shortcode editor (Settings-style sheet).
   final VoidCallback? onEditShortcodes;
@@ -59,20 +72,23 @@ class _CompactEmojiPickerState extends State<CompactEmojiPicker> {
   }
 
   void _insert(String emoji, {String? kolobokFile}) {
+    final out = (kolobokFile == null && widget.markGooglePicks)
+        ? markGoogleEmoji(emoji)
+        : emoji;
     final controller = widget.textEditingController;
     if (controller != null) {
       final value = controller.value;
       final sel = value.selection;
       final start = sel.isValid ? sel.start : value.text.length;
       final end = sel.isValid ? sel.end : value.text.length;
-      final next = value.text.replaceRange(start, end, emoji);
+      final next = value.text.replaceRange(start, end, out);
       controller.value = TextEditingValue(
         text: next,
-        selection: TextSelection.collapsed(offset: start + emoji.length),
+        selection: TextSelection.collapsed(offset: start + out.length),
       );
     }
-    widget.onSelected(emoji);
-    widget.onPicked?.call(emoji, kolobokFile: kolobokFile);
+    widget.onSelected(out);
+    widget.onPicked?.call(out, kolobokFile: kolobokFile);
   }
 
   @override
@@ -94,6 +110,7 @@ class _CompactEmojiPickerState extends State<CompactEmojiPicker> {
                     child: _tab == _EmojiTab.kolobok
                         ? _KolobokGrid(
                             query: _query,
+                            dense: widget.dense,
                             onSelected: (file) {
                               final emoji = kolobokEmojiForFile(file);
                               if (emoji == null) return;
@@ -103,6 +120,7 @@ class _CompactEmojiPickerState extends State<CompactEmojiPicker> {
                         : _GooglePane(
                             height: widget.height - 48,
                             query: _query,
+                            dense: widget.dense,
                             textEditingController:
                                 widget.textEditingController,
                             onSelected: (emoji) {
@@ -266,10 +284,15 @@ class _TabChip extends StatelessWidget {
 }
 
 class _KolobokGrid extends StatelessWidget {
-  const _KolobokGrid({required this.query, required this.onSelected});
+  const _KolobokGrid({
+    required this.query,
+    required this.onSelected,
+    this.dense = false,
+  });
 
   final String query;
   final ValueChanged<String> onSelected;
+  final bool dense;
 
   List<KolobokEntry> _filtered() {
     final seen = <String>{};
@@ -304,14 +327,16 @@ class _KolobokGrid extends StatelessWidget {
       );
     }
 
+    final cell = dense ? 46.0 : _emojiCellExtent;
+    final smiley = dense ? 38.0 : 28.0;
     // Fixed cell size — never stretch with panel width (fullscreen used to
     // clamp columns at 14 and leave large gaps between 28px smileys).
     return GridView.builder(
       padding: const EdgeInsets.fromLTRB(4, 0, 4, 4),
-      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: _emojiCellExtent,
-        mainAxisSpacing: 0,
-        crossAxisSpacing: 0,
+      gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: cell,
+        mainAxisSpacing: dense ? 2 : 0,
+        crossAxisSpacing: dense ? 2 : 0,
         childAspectRatio: 1,
       ),
       itemCount: entries.length,
@@ -330,7 +355,7 @@ class _KolobokGrid extends StatelessWidget {
             child: Center(
               child: KolobokSmiley(
                 entry.file,
-                size: 28,
+                size: smiley,
                 animate: animate,
                 semanticLabel: entry.emoji,
               ),
@@ -348,12 +373,14 @@ class _GooglePane extends StatelessWidget {
     required this.query,
     required this.onSelected,
     this.textEditingController,
+    this.dense = false,
   });
 
   final double height;
   final String query;
   final ValueChanged<String> onSelected;
   final TextEditingController? textEditingController;
+  final bool dense;
 
   List<Emoji> _searchHits(BuildContext context) {
     final q = query.toLowerCase();
@@ -374,58 +401,75 @@ class _GooglePane extends StatelessWidget {
     return out;
   }
 
+  List<Emoji> _allGlyphs() {
+    final out = <Emoji>[];
+    final seen = <String>{};
+    for (final cat in defaultEmojiSet) {
+      for (final e in cat.emoji) {
+        if (seen.add(e.emoji)) out.add(e);
+      }
+    }
+    return out;
+  }
+
+  Widget _glyphGrid(List<Emoji> items) {
+    if (items.isEmpty) {
+      return Center(
+        child: Text(
+          'No matches',
+          style: TextStyle(fontSize: 13, color: PrivetTheme.mist),
+        ),
+      );
+    }
+    return GridView.builder(
+      padding: const EdgeInsets.fromLTRB(4, 0, 4, 4),
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: _emojiCellExtent,
+        mainAxisSpacing: 0,
+        crossAxisSpacing: 0,
+        childAspectRatio: 1,
+      ),
+      itemCount: items.length,
+      itemBuilder: (context, index) {
+        final e = items[index];
+        return InkWell(
+          borderRadius: BorderRadius.circular(6),
+          mouseCursor: SystemMouseCursors.click,
+          onTap: () {
+            HapticFeedback.selectionClick();
+            final controller = textEditingController;
+            if (controller != null) {
+              final value = controller.value;
+              final sel = value.selection;
+              final start = sel.isValid ? sel.start : value.text.length;
+              final end = sel.isValid ? sel.end : value.text.length;
+              final next = value.text.replaceRange(start, end, e.emoji);
+              controller.value = TextEditingValue(
+                text: next,
+                selection: TextSelection.collapsed(
+                  offset: start + e.emoji.length,
+                ),
+              );
+            }
+            onSelected(e.emoji);
+          },
+          child: Center(
+            child: useBundledNotoColorEmoji
+                ? NotoColorEmoji(e.emoji, size: 24)
+                : Text(e.emoji, style: const TextStyle(fontSize: 24)),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (query.isNotEmpty) {
-      final hits = _searchHits(context);
-      if (hits.isEmpty) {
-        return Center(
-          child: Text(
-            'No matches',
-            style: TextStyle(fontSize: 13, color: PrivetTheme.mist),
-          ),
-        );
-      }
-      return GridView.builder(
-        padding: const EdgeInsets.fromLTRB(4, 0, 4, 4),
-        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-          maxCrossAxisExtent: _emojiCellExtent,
-          mainAxisSpacing: 0,
-          crossAxisSpacing: 0,
-          childAspectRatio: 1,
-        ),
-        itemCount: hits.length,
-        itemBuilder: (context, index) {
-          final e = hits[index];
-          return InkWell(
-            borderRadius: BorderRadius.circular(6),
-            mouseCursor: SystemMouseCursors.click,
-            onTap: () {
-              HapticFeedback.selectionClick();
-              final controller = textEditingController;
-              if (controller != null) {
-                final value = controller.value;
-                final sel = value.selection;
-                final start =
-                    sel.isValid ? sel.start : value.text.length;
-                final end = sel.isValid ? sel.end : value.text.length;
-                final next =
-                    value.text.replaceRange(start, end, e.emoji);
-                controller.value = TextEditingValue(
-                  text: next,
-                  selection: TextSelection.collapsed(
-                    offset: start + e.emoji.length,
-                  ),
-                );
-              }
-              onSelected(e.emoji);
-            },
-            child: Center(
-              child: Text(e.emoji, style: const TextStyle(fontSize: 24)),
-            ),
-          );
-        },
-      );
+      return _glyphGrid(_searchHits(context));
+    }
+    if (dense || useBundledNotoColorEmoji) {
+      return _glyphGrid(_allGlyphs());
     }
 
     final clickCursor = WidgetStatePropertyAll(SystemMouseCursors.click);

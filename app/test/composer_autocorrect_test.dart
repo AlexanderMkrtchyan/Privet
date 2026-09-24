@@ -283,10 +283,6 @@ void main() {
       tester,
     ) async {
       final ctrl = ComposerAutocorrectController(text: 'whiel ');
-      addTearDown(() {
-        ctrl.clearMarks();
-        ctrl.dispose();
-      });
 
       await tester.pumpWidget(
         MaterialApp(
@@ -329,17 +325,14 @@ void main() {
       expect(ctrl.text, 'whiel ');
       expect(ctrl.mark, isNull);
 
-      await tester.pump(const Duration(seconds: 9));
+      await tester.pumpWidget(const SizedBox.shrink());
+      ctrl.dispose();
     });
 
     testWidgets('moving caret disarms Backspace undo so letters delete', (
       tester,
     ) async {
       final ctrl = ComposerAutocorrectController(text: 'teh ');
-      addTearDown(() {
-        ctrl.clearMarks();
-        ctrl.dispose();
-      });
       await tester.pumpWidget(
         MaterialApp(home: Scaffold(body: TextField(controller: ctrl))),
       );
@@ -363,15 +356,12 @@ void main() {
       expect(ctrl.text, 'the '); // unchanged; normal delete can proceed
       expect(ctrl.mark, isNotNull); // highlight may remain
 
-      await tester.pump(const Duration(seconds: 9));
+      await tester.pumpWidget(const SizedBox.shrink());
+      ctrl.dispose();
     });
 
     testWidgets('editing corrected word suppresses that typo', (tester) async {
       final ctrl = ComposerAutocorrectController(text: 'teh ');
-      addTearDown(() {
-        ctrl.clearMarks();
-        ctrl.dispose();
-      });
       await tester.pumpWidget(
         MaterialApp(home: Scaffold(body: TextField(controller: ctrl))),
       );
@@ -412,14 +402,12 @@ void main() {
       );
       expect(ctrl.text, 'teh ');
       expect(ctrl.mark, isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      ctrl.dispose();
     });
 
     testWidgets('typing boundary applies curated correction', (tester) async {
       final ctrl = ComposerAutocorrectController();
-      addTearDown(() {
-        ctrl.clearMarks();
-        ctrl.dispose();
-      });
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(body: TextField(controller: ctrl)),
@@ -439,7 +427,8 @@ void main() {
       expect(ctrl.text, 'the ');
       expect(ctrl.mark?.original, 'teh');
       ctrl.clearMarks();
-      await tester.pump(const Duration(seconds: 9));
+      await tester.pumpWidget(const SizedBox.shrink());
+      ctrl.dispose();
     });
   });
 }

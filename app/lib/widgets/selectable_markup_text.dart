@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -10,11 +11,93 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../theme.dart';
 import '../util/app_clipboard.dart';
+import '../util/emoji_style.dart';
 import '../util/kolobok_images.dart';
 import '../util/kolobok_smileys.dart';
+import '../util/noto_color_emoji.dart';
 import '../util/rich_text_markup.dart';
 import '../util/web_select_cursor.dart';
 import 'message_font_picker.dart';
+
+/// Marker behind a search hit. Dark ink on amber stays readable on both themes.
+const Color kSearchHitBackground = Color(0xFFF5C542);
+const Color kSearchHitForeground = Color(0xFF1C1404);
+
+/// Case-insensitive pieces of [text], with [query] painted as a marker.
+int countQueryOccurrences(String text, String query) {
+  final needle = query.trim().toLowerCase();
+  if (needle.isEmpty || text.isEmpty) return 0;
+  final lower = text.toLowerCase();
+  var n = 0;
+  var i = 0;
+  while (true) {
+    i = lower.indexOf(needle, i);
+    if (i < 0) return n;
+    n++;
+    i += needle.length;
+  }
+}
+
+List<InlineSpan> highlightQueryPieces(
+  String text,
+  TextStyle style, {
+  required String query,
+  GestureRecognizer? recognizer,
+  int? currentOccurrence,
+}) {
+  if (text.isEmpty) return const [];
+  final needle = query.trim().toLowerCase();
+  if (needle.isEmpty) {
+    return [TextSpan(text: text, style: style, recognizer: recognizer)];
+  }
+  final lower = text.toLowerCase();
+  final current = style.copyWith(
+    backgroundColor: kSearchHitBackground,
+    color: kSearchHitForeground,
+    fontWeight: FontWeight.w700,
+  );
+  final other = style.copyWith(
+    backgroundColor: kSearchHitBackground.withValues(alpha: 0.45),
+    color: kSearchHitForeground,
+  );
+  final spans = <InlineSpan>[];
+  var start = 0;
+  var occ = 0;
+  while (start < text.length) {
+    final i = lower.indexOf(needle, start);
+    if (i < 0) {
+      spans.add(
+        TextSpan(
+          text: text.substring(start),
+          style: style,
+          recognizer: recognizer,
+        ),
+      );
+      break;
+    }
+    if (i > start) {
+      spans.add(
+        TextSpan(
+          text: text.substring(start, i),
+          style: style,
+          recognizer: recognizer,
+        ),
+      );
+    }
+    final end = i + needle.length;
+    final focused = currentOccurrence == null || currentOccurrence == occ;
+    spans.add(
+      TextSpan(
+        text: text.substring(i, end),
+        style: focused ? current : other,
+        recognizer: recognizer,
+      ),
+    );
+    occ++;
+    start = end;
+  }
+  return spans;
+}
 
 /// Pull a selection/highlight rect in so the tint hugs glyph ink instead of
 /// the full line metrics (which stick out above/below characters).
@@ -98,6 +181,8 @@ class SelectableMarkupText extends StatefulWidget {
     this.maxWidth,
     this.toolbarSuppressed,
     this.dragging,
+    this.highlightQuery = '',
+    this.highlightOccurrence,
   });
 
   final String text;
@@ -141,6 +226,13 @@ class SelectableMarkupText extends StatefulWidget {
   /// text cursor defers to the grab cursor.
   final bool Function()? dragging;
 
+  /// When non-empty, every case-insensitive occurrence is marked in the text.
+  final String highlightQuery;
+
+  /// Which occurrence is the current search step. Others stay dimmer.
+  /// Null marks every hit the same way (task filter).
+  final int? highlightOccurrence;
+
   @override
   State<SelectableMarkupText> createState() => _SelectableMarkupTextState();
 }
@@ -158,15 +250,19 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
   /// Explicit [baseStyle.fontSize] (tasks zoom via this; chat uses [fontScale]).
   double? _cachedBaseFontSize;
   String _cachedSpanFont = '';
+  String _cachedHighlight = '';
+  int? _cachedHighlightOccurrence;
 
   /// Kolobok decode generation the cached span was built against. Image frames
   /// land asynchronously, so a span built while they were missing must be
   /// rebuilt once they arrive — otherwise the glyph stays visible for good.
   int _cachedKolobokGeneration = -1;
+  int _cachedNotoGeneration = -1;
 
   /// Smiley ranges in [_plainText] that the painter draws as art rather than
   /// as glyphs. Rebuilt with the span.
   List<_KolobokSpan> _kolobokSpans = const [];
+  List<_NotoSpan> _notoSpans = const [];
 
   /// Extra top/bottom inset so oversized Kolobok paint is not ClipRect-sheared.
   double _webSmileyPad = 0;
@@ -182,6 +278,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
   double? _webPainterBaseFontSize;
   String _webPainterFont = '';
   int _webPainterKolobokGeneration = -1;
+  int _webPainterNotoGeneration = -1;
   final _WebSelRepaint _webSelRepaint = _WebSelRepaint();
 
   // Web pointer-driven select (Listener — does not fight ListView pan arena).
@@ -208,6 +305,10 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
       kolobokSmileys.map((entry) => entry.file),
       light: PrivetTheme.isLight,
     );
+    if (useBundledNotoColorEmoji) {
+      NotoColorEmojiCache.instance.addListener(_onKolobokFrames);
+      unawaited(NotoColorEmojiCache.instance.ensureLoaded());
+    }
   }
 
   void _onKolobokFrames() {
@@ -220,6 +321,9 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
   @override
   void dispose() {
     KolobokImageCache.instance.removeListener(_onKolobokFrames);
+    if (useBundledNotoColorEmoji) {
+      NotoColorEmojiCache.instance.removeListener(_onKolobokFrames);
+    }
     setPrivetMessageLinkHover(false);
     setPrivetMessageSelectHover(false);
     _releaseWebScrollHold();
@@ -433,6 +537,27 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
   /// Cache key for explicit [baseStyle] size (tasks). Chat zoom uses [fontScale].
   double? get _baseFontSizeKey => widget.baseStyle?.fontSize;
 
+  /// Running hit index while painting fragments of one message.
+  int _highlightCursor = 0;
+
+  List<InlineSpan> _markQuery(
+    String text,
+    TextStyle style, {
+    GestureRecognizer? recognizer,
+  }) {
+    final local = widget.highlightOccurrence == null
+        ? null
+        : widget.highlightOccurrence! - _highlightCursor;
+    _highlightCursor += countQueryOccurrences(text, widget.highlightQuery);
+    return highlightQueryPieces(
+      text,
+      style,
+      query: widget.highlightQuery,
+      currentOccurrence: local,
+      recognizer: recognizer,
+    );
+  }
+
   TextSpan _spanFor(
     String text, {
     required bool withRecognizers,
@@ -444,20 +569,25 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
         _cachedSpanScale == widget.fontScale &&
         _cachedBaseFontSize == _baseFontSizeKey &&
         _cachedSpanFont == widget.defaultFont &&
+        _cachedHighlight == widget.highlightQuery.trim() &&
+        _cachedHighlightOccurrence == widget.highlightOccurrence &&
         _cachedSpan != null &&
         _cachedWithRecognizers == withRecognizers &&
-        _cachedKolobokGeneration == KolobokImageCache.instance.generation) {
+        _cachedKolobokGeneration == KolobokImageCache.instance.generation &&
+        _cachedNotoGeneration == NotoColorEmojiCache.instance.generation) {
       return _cachedSpan!;
     }
     for (final r in _linkRecognizers) {
       r.dispose();
     }
     _linkRecognizers.clear();
+    _highlightCursor = 0;
 
     final base = _baseStyleFor(hovering: hovering);
     final parsed = parseMarkup(text);
     _plainText = parsed.plainText;
     _kolobokSpans = [];
+    _notoSpans = [];
     // The bundled Kolobok pack is the app's own smiley set, so it always renders
     // as art even in "Low RAM & CPU" mode — otherwise a chat looks half pack /
     // half system glyph depending on which surfaces were gated.
@@ -493,10 +623,10 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
           recognizer = TapGestureRecognizer()..onTap = () => _openExternal(raw);
           _linkRecognizers.add(recognizer);
         }
-        spans.add(
-          TextSpan(
-            text: raw,
-            style: segBase.copyWith(
+        spans.addAll(
+          _markQuery(
+            raw,
+            segBase.copyWith(
               color: PrivetTheme.signal,
               decoration: TextDecoration.underline,
               decorationColor: PrivetTheme.signal.withValues(alpha: 0.7),
@@ -536,8 +666,11 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
       _cachedSpanScale = widget.fontScale;
       _cachedBaseFontSize = _baseFontSizeKey;
       _cachedSpanFont = widget.defaultFont;
+      _cachedHighlight = widget.highlightQuery.trim();
+      _cachedHighlightOccurrence = widget.highlightOccurrence;
       _cachedWithRecognizers = withRecognizers;
       _cachedKolobokGeneration = KolobokImageCache.instance.generation;
+      _cachedNotoGeneration = NotoColorEmojiCache.instance.generation;
       _cachedSpan = span;
     }
     return span;
@@ -566,7 +699,9 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     bool enabled,
   ) {
     if (text.isEmpty) return const [];
-    if (!enabled) return [TextSpan(text: text, style: style)];
+    if (!enabled) {
+      return _markQuery(text, style);
+    }
 
     final cache = KolobokImageCache.instance;
     final light = PrivetTheme.isLight;
@@ -579,16 +714,45 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
       final grapheme = graphemes[i];
       final file = kolobokFileForEmoji(grapheme);
       if (file == null || !cache.isReady(file, light: light)) {
+        if (file != null) {
+          cache.frameFor(file, light: light, animate: false);
+        } else if (useBundledNotoColorEmoji &&
+            grapheme != kGoogleEmojiMark &&
+            isNotoAtlasGrapheme(grapheme)) {
+          final image = NotoColorEmojiCache.instance.imageFor(grapheme);
+          if (image != null) {
+            if (buffer.isNotEmpty) {
+              spans.addAll(_markQuery(buffer.toString(), style));
+              buffer.clear();
+            }
+            spans.add(
+              TextSpan(
+                text: kKolobokPlaceholderUnit * grapheme.length,
+                style: style.copyWith(
+                  letterSpacing: _smileyAdvanceFor(
+                    grapheme.length,
+                    style,
+                    extraEm: 0,
+                    advanceEm: notoInlineEm,
+                  ),
+                ),
+              ),
+            );
+            _notoSpans.add(_NotoSpan(offset, offset + grapheme.length, grapheme));
+            offset += grapheme.length;
+            continue;
+          }
+        }
         buffer.write(grapheme);
         offset += grapheme.length;
         continue;
       }
       if (buffer.isNotEmpty) {
-        spans.add(TextSpan(text: buffer.toString(), style: style));
+        spans.addAll(_markQuery(buffer.toString(), style));
         buffer.clear();
       }
       var extraEm = 0.0;
-      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+      if (desktopKolobokOversized) {
         // Trailing gap so the next letter (or smiley) is not painted under
         // the face. Art stays left-aligned in [smileyAdvanceEm], so the
         // distance from preceding text does not change.
@@ -610,7 +774,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
       offset += grapheme.length;
     }
     if (buffer.isNotEmpty) {
-      spans.add(TextSpan(text: buffer.toString(), style: style));
+      spans.addAll(_markQuery(buffer.toString(), style));
     }
     return spans;
   }
@@ -621,10 +785,11 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     int count,
     TextStyle style, {
     double extraEm = 0,
+    double? advanceEm,
   }) {
     const placeholderEm = 0.0;
     final em = style.fontSize ?? 15.0;
-    final target = (smileyAdvanceEm + extraEm) * em;
+    final target = ((advanceEm ?? smileyAdvanceEm) + extraEm) * em;
     final intrinsic = placeholderEm * em * count;
     return ((target - intrinsic) / count).clamp(0.0, double.infinity);
   }
@@ -668,11 +833,14 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
         _cachedSpanScale == widget.fontScale &&
         _cachedBaseFontSize == _baseFontSizeKey &&
         _cachedSpanFont == widget.defaultFont &&
+        _cachedHighlight == widget.highlightQuery.trim() &&
+        _cachedHighlightOccurrence == widget.highlightOccurrence &&
         _webPainterScale == widget.fontScale &&
         _webPainterBaseFontSize == _baseFontSizeKey &&
         _webPainterFont == widget.defaultFont &&
         !_cachedWithRecognizers &&
         _webPainterKolobokGeneration == KolobokImageCache.instance.generation &&
+        _webPainterNotoGeneration == NotoColorEmojiCache.instance.generation &&
         _webPainterHover == hovering) {
       return;
     }
@@ -683,6 +851,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     _webPainterBaseFontSize = _baseFontSizeKey;
     _webPainterFont = widget.defaultFont;
     _webPainterKolobokGeneration = KolobokImageCache.instance.generation;
+    _webPainterNotoGeneration = NotoColorEmojiCache.instance.generation;
     _webPainter = TextPainter(
       text: _spanFor(widget.text, withRecognizers: false, hovering: hovering),
       textDirection: ui.TextDirection.ltr,
@@ -893,11 +1062,13 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
               textPainter: painter,
               getSelection: () => _webSel,
               kolobokSpans: _kolobokSpans,
+              notoSpans: _notoSpans,
               light: PrivetTheme.isLight,
               verticalPad: smileyPad,
               repaint: Listenable.merge([
                 _webSelRepaint,
                 KolobokImageCache.instance,
+                NotoColorEmojiCache.instance,
               ]),
             ),
           ),
@@ -996,28 +1167,43 @@ class _KolobokSpan {
   final String file;
 }
 
+class _NotoSpan {
+  const _NotoSpan(this.start, this.end, this.emoji);
+
+  final int start;
+  final int end;
+  final String emoji;
+}
+
 /// How far past the reserved box the art may reach. On web the art is mostly
 /// transparent at the edges, so modest overflow does not collide with glyphs.
 ///
 /// Android line metrics leave less slack — overshoot paints over neighbouring
-/// letters and stacked smileys, so stay at 1.0. Linux sizes against the font
-/// ([linuxKolobokInlineEm]) instead of this multiplier.
+/// letters and stacked smileys, so stay at 1.0. Linux and Windows size against
+/// the font ([linuxKolobokInlineEm]) instead of this multiplier.
 double get smileyOvershoot {
   if (!kIsWeb &&
       (defaultTargetPlatform == TargetPlatform.android ||
-          defaultTargetPlatform == TargetPlatform.linux)) {
+          defaultTargetPlatform == TargetPlatform.linux ||
+          defaultTargetPlatform == TargetPlatform.windows)) {
     return 1.0;
   }
   return 1.4;
 }
 
+/// Linux and Windows share the oversized inline Kolobok metrics.
+bool get desktopKolobokOversized {
+  if (kIsWeb) return false;
+  return defaultTargetPlatform == TargetPlatform.linux ||
+      defaultTargetPlatform == TargetPlatform.windows;
+}
+
 /// Extra top/bottom inset so painted Kolobok art is not clipped by [ClipRect].
-double _inlineSmileyVerticalPad(TextPainter painter) {
-  final fontSize = painter.textScaler.scale(
-    painter.text?.style?.fontSize ?? 15.0,
-  );
-  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
-    return fontSize * (linuxKolobokInlineEm - 1.0) * 0.55;
+double kolobokInlineVerticalPad(double fontSize) {
+  if (desktopKolobokOversized) {
+    // 2.4em faces plus the sprout raise ([kolobokPaintCenter] destHeight * 0.06).
+    return fontSize * (linuxKolobokInlineEm - 1.0) * 0.55 +
+        fontSize * linuxKolobokInlineEm * 0.06;
   }
   final overshoot = smileyOvershoot;
   if (overshoot <= 1.0) {
@@ -1026,23 +1212,30 @@ double _inlineSmileyVerticalPad(TextPainter painter) {
   return fontSize * (overshoot - 1.0) * 0.55;
 }
 
-/// Painted inline Kolobok size on Linux, as a multiple of the larger of
-/// fontSize and the glyph slot. 1.8× is 1.5× the previous 1.2 inline size.
-const double linuxKolobokInlineEm = 1.8;
+double _inlineSmileyVerticalPad(TextPainter painter) {
+  final fontSize = painter.textScaler.scale(
+    painter.text?.style?.fontSize ?? 15.0,
+  );
+  return kolobokInlineVerticalPad(fontSize);
+}
 
-/// Extra width, in em, after every Kolobok. Art is sized to
-/// ~[linuxKolobokInlineEm] × line height (~2.43em) while the face is painted
-/// in the left [smileyAdvanceEm] (2.1em), so text before the smiley stays
-/// tight and the following letter / smiley is not covered.
-const double linuxKolobokPairExtraEm = 0.55;
+/// Painted inline Kolobok size on Linux and Windows, as a multiple of the
+/// larger of fontSize and the glyph slot.
+const double linuxKolobokInlineEm = 2.4;
+
+/// Extra width, in em, after every Kolobok on Linux and Windows. Art is sized
+/// to ~[linuxKolobokInlineEm] × line height while the face is painted in the
+/// left [smileyAdvanceEm], so text before the smiley stays tight and the
+/// following letter / smiley is not covered.
+const double linuxKolobokPairExtraEm = 0.7;
 
 /// Space the art occupies per smiley, in em. Wider than the 1em an emoji
 /// glyph takes so inline smileys read a bit larger than surrounding text
-/// (see [smileyOvershoot]). Linux keeps extra width so a lone smiley next
-/// to letters stays tight; pair runs add [linuxKolobokPairExtraEm].
+/// (see [smileyOvershoot]). Linux and Windows keep extra width so a lone
+/// smiley next to letters stays tight; pair runs add [linuxKolobokPairExtraEm].
 double get smileyAdvanceEm {
-  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
-    return 2.1;
+  if (desktopKolobokOversized) {
+    return 2.7;
   }
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
     return 1.65;
@@ -1088,8 +1281,10 @@ Rect kolobokDestRect({
 
 /// Scale that maps a decoded Kolobok frame into the inline slot.
 ///
-/// Linux sizes to [linuxKolobokInlineEm] × max(fontSize, slot) so the face
-/// sits just above a capital letter even when space-glyph boxes are tight.
+/// Linux and Windows size to [linuxKolobokInlineEm] × [fontSize] so the face
+/// stays a fixed multiple of the type even when the placeholder box is a
+/// tall line (height 1.35) or a collapsed ZWSP. Sizing against the slot
+/// used to grow tall pack art to ~3.2em and shear it in the composer.
 /// Other platforms contain in [slot] then apply [smileyOvershoot].
 ///
 /// The result is always clamped so the frame's width fits [slot]; without that
@@ -1103,11 +1298,9 @@ double kolobokPaintScale({
 }) {
   if (imageWidth <= 0 || imageHeight <= 0) return 0;
   final double scale;
-  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+  if (desktopKolobokOversized) {
     final longest = math.max(imageWidth, imageHeight).toDouble();
-    final slotSide = math.min(slot.width, slot.height);
-    final target = math.max(fontSize, slotSide) * linuxKolobokInlineEm;
-    scale = target / longest;
+    scale = fontSize * linuxKolobokInlineEm / longest;
   } else {
     scale = math.min(slot.width / imageWidth, slot.height / imageHeight) *
         smileyOvershoot;
@@ -1156,6 +1349,7 @@ class _WebMessageTextPainter extends CustomPainter {
     required this.textPainter,
     required this.getSelection,
     required this.kolobokSpans,
+    required this.notoSpans,
     required this.light,
     this.verticalPad = 0,
     required Listenable repaint,
@@ -1164,6 +1358,7 @@ class _WebMessageTextPainter extends CustomPainter {
   final TextPainter textPainter;
   final ValueGetter<TextSelection> getSelection;
   final List<_KolobokSpan> kolobokSpans;
+  final List<_NotoSpan> notoSpans;
   final bool light;
   final double verticalPad;
 
@@ -1177,6 +1372,7 @@ class _WebMessageTextPainter extends CustomPainter {
     // Boxes are tight + slightly inset so the tint stays inside the characters.
     textPainter.paint(canvas, Offset.zero);
     _paintSmileys(canvas);
+    _paintNoto(canvas);
     final selection = getSelection();
     if (selection.isValid && !selection.isCollapsed) {
       final boxes = textPainter.getBoxesForSelection(
@@ -1260,10 +1456,43 @@ class _WebMessageTextPainter extends CustomPainter {
     }
   }
 
+  void _paintNoto(Canvas canvas) {
+    if (notoSpans.isEmpty) return;
+    final cache = NotoColorEmojiCache.instance;
+    final paint = Paint()..filterQuality = FilterQuality.high;
+    final fontSize = textPainter.textScaler.scale(
+      textPainter.text?.style?.fontSize ?? 15.0,
+    );
+    for (final span in notoSpans) {
+      if (span.end > textPainter.plainText.length) continue;
+      final image = cache.imageFor(span.emoji);
+      if (image == null) continue;
+      final boxes = textPainter.getBoxesForSelection(
+        TextSelection(baseOffset: span.start, extentOffset: span.end),
+      );
+      if (boxes.isEmpty) continue;
+      final source = Rect.fromLTWH(
+        0,
+        0,
+        image.width.toDouble(),
+        image.height.toDouble(),
+      );
+      for (final box in boxes) {
+        canvas.drawImageRect(
+          image,
+          source,
+          notoInlineDestRect(box.toRect(), fontSize),
+          paint,
+        );
+      }
+    }
+  }
+
   @override
   bool shouldRepaint(covariant _WebMessageTextPainter oldDelegate) {
     return oldDelegate.textPainter != textPainter ||
         oldDelegate.kolobokSpans != kolobokSpans ||
+        oldDelegate.notoSpans != notoSpans ||
         oldDelegate.light != light ||
         oldDelegate.verticalPad != verticalPad;
   }

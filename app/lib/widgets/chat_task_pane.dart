@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -1047,6 +1046,13 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
   String? _filterAssignee; // null = all, '' = unassigned, else user id
   bool _boardView = false;
 
+  /// Roots that contain the current search, active first then archived.
+  List<String> _searchHitIds = [];
+  int _searchHitIndex = 0;
+  int _searchGen = 0;
+  String? _searchFocusRootId;
+  GlobalKey? _searchRowKey;
+
   // Reveal state (tap a task-change message → open + highlight the task).
   /// Root-row id currently being scrolled/flashed ('' cleared).
   String? _revealRootId;
@@ -1133,6 +1139,10 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
       _boardView = false;
       _taskSearch = '';
       _taskSearchCtrl.clear();
+      _searchHitIds = [];
+      _searchHitIndex = 0;
+      _searchFocusRootId = null;
+      _searchRowKey = null;
       _filterStatus = null;
       _filterPriority = null;
       _filterAssignee = null;
@@ -1192,7 +1202,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     // list/board switch.
     await Future<void>.delayed(const Duration(milliseconds: 120));
     for (var step = 0; step < 40 && mounted; step++) {
-      final ctx = _revealRowKey?.currentContext;
+      final ctx = _revealKeyFor(rootId)?.currentContext;
       if (ctx != null) {
         await Scrollable.ensureVisible(
           ctx,
@@ -1232,9 +1242,10 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     }
   }
 
-  /// Row key for the reveal target (only that row gets a GlobalKey, so
-  /// ordinary rebuilds never accumulate keys).
+  /// Row key for the reveal or search-focus target (only that row gets a
+  /// GlobalKey, so ordinary rebuilds never accumulate keys).
   GlobalKey? _revealKeyFor(String rootId) {
+    if (_searchFocusRootId == rootId) return _searchRowKey;
     if (_revealRootId != rootId) return null;
     return _revealRowKey ??= GlobalKey();
   }
@@ -1396,17 +1407,106 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     }
   }
 
+  bool _bodyHasQuery(TaskItem item, String q) =>
+      markupToPlain(item.body).toLowerCase().contains(q);
+
+  /// Root matches when its own text or any subtask text contains [q].
+  bool _rootMatchesQuery(TaskItem root, ConversationTasks board, String q) {
+    if (_bodyHasQuery(root, q)) return true;
+    for (final sub in board.subtasksOf(root.id)) {
+      if (_bodyHasQuery(sub, q)) return true;
+    }
+    return false;
+  }
+
+  /// Active matches first, then archived. Subtask hits count as their parent.
+  List<String> _collectSearchHits() {
+    final q = _taskSearch.trim().toLowerCase();
+    if (q.isEmpty) return const [];
+    final board = widget.state.taskBoardFor(widget.conversationId);
+    final history = widget.state.taskHistoryBoardFor(widget.conversationId);
+    final ids = <String>[];
+    for (final t in _applyTaskFilters(board.activeItems, board)) {
+      ids.add(t.id);
+    }
+    for (final t in _applyTaskFilters(history.rootItems, history)) {
+      ids.add(t.id);
+    }
+    return ids;
+  }
+
+  void _onTaskSearchChanged(String value) {
+    final gen = ++_searchGen;
+    setState(() => _taskSearch = value);
+    if (value.trim().isEmpty) {
+      setState(() {
+        _searchHitIds = [];
+        _searchHitIndex = 0;
+        _searchFocusRootId = null;
+        _searchRowKey = null;
+      });
+      return;
+    }
+    unawaited(_runTaskSearch(gen));
+  }
+
+  /// Pages in the rest of archived history, then focuses the first hit.
+  /// A newer keystroke ([gen]) cancels this pass.
+  Future<void> _runTaskSearch(int gen) async {
+    var guard = 0;
+    while (mounted && gen == _searchGen && guard < 50) {
+      if (!widget.state.taskHistoryHasMore(widget.conversationId)) break;
+      if (widget.state.taskHistoryLoadingOlder.contains(widget.conversationId)) {
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        continue;
+      }
+      await widget.state.loadOlderTaskHistory(widget.conversationId);
+      guard++;
+    }
+    if (!mounted || gen != _searchGen) return;
+    final hits = _collectSearchHits();
+    setState(() {
+      _searchHitIds = hits;
+      _searchHitIndex = 0;
+    });
+    if (hits.isEmpty) {
+      setState(() {
+        _searchFocusRootId = null;
+        _searchRowKey = null;
+      });
+      return;
+    }
+    await _focusSearchHit(0);
+  }
+
+  Future<void> _focusSearchHit(int index) async {
+    if (_searchHitIds.isEmpty) return;
+    final safe = ((index % _searchHitIds.length) + _searchHitIds.length) %
+        _searchHitIds.length;
+    final rootId = _searchHitIds[safe];
+    widget.state.setTaskExpanded(rootId, true);
+    _searchRowKey = GlobalKey();
+    setState(() {
+      _searchHitIndex = safe;
+      _searchFocusRootId = rootId;
+    });
+    await _bringRowIntoView(rootId);
+  }
+
+  void _searchStep(int delta) {
+    if (_searchHitIds.isEmpty) return;
+    unawaited(_focusSearchHit(_searchHitIndex + delta));
+  }
+
   /// Applies the current search + status/priority/assignee filters.
-  List<TaskItem> _applyTaskFilters(List<TaskItem> items) {
+  /// Search matches the root text or any of its subtasks.
+  List<TaskItem> _applyTaskFilters(List<TaskItem> items, ConversationTasks board) {
     final q = _taskSearch.trim().toLowerCase();
     final status = _filterStatus;
     final priority = _filterPriority;
     final assignee = _filterAssignee;
     return items.where((t) {
-      if (q.isNotEmpty &&
-          !markupToPlain(t.body).toLowerCase().contains(q)) {
-        return false;
-      }
+      if (q.isNotEmpty && !_rootMatchesQuery(t, board, q)) return false;
       if (status != null && t.status != status) return false;
       if (priority != null && t.priority != priority) return false;
       if (assignee != null) {
@@ -1467,26 +1567,8 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     }
   }
 
-  Future<List<PickedBytes>> _pickFilesViaFilePicker(int maxFiles) async {
-    final result = await FilePicker.platform.pickFiles(
-      withData: true,
-      type: FileType.any,
-      allowMultiple: true,
-    );
-    if (result == null || result.files.isEmpty) return const [];
-    final picked = <PickedBytes>[];
-    for (final file in result.files) {
-      if (picked.length >= maxFiles) break;
-      final item = await pickedBytesFromRaw(
-        bytes: file.bytes,
-        path: file.path,
-        filename: file.name,
-        mimeType: _mimeFor(file.name),
-      );
-      if (item != null) picked.add(item);
-    }
-    return picked;
-  }
+  Future<List<PickedBytes>> _pickFilesViaFilePicker(int maxFiles) =>
+      pickMultipleFilesNative(maxFiles: maxFiles);
 
   Future<List<MediaAttachment>> _uploadDrafts(List<PickedBytes> drafts) async {
     final out = <MediaAttachment>[];
@@ -1754,15 +1836,6 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     );
   }
 
-  String _mimeFor(String name) {
-    final lower = name.toLowerCase();
-    if (lower.endsWith('.png')) return 'image/png';
-    if (lower.endsWith('.gif')) return 'image/gif';
-    if (lower.endsWith('.webp')) return 'image/webp';
-    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
-    return 'application/octet-stream';
-  }
-
   /// Filter/search toolbar for the Tasks tab (list | board toggle).
   Widget _buildTaskToolbar() {
     final hasFilters = _taskSearch.trim().isNotEmpty ||
@@ -1785,7 +1858,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                   height: 30,
                   child: TextField(
                     controller: _taskSearchCtrl,
-                    onChanged: (v) => setState(() => _taskSearch = v),
+                    onChanged: _onTaskSearchChanged,
                     style: GoogleFonts.ibmPlexSans(fontSize: 12.5),
                     decoration: InputDecoration(
                       hintText: 'Search tasks…',
@@ -1810,6 +1883,34 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                   ),
                 ),
               ),
+              if (_taskSearch.trim().isNotEmpty) ...[
+                const SizedBox(width: 4),
+                Text(
+                  _searchHitIds.isEmpty
+                      ? '0'
+                      : '${_searchHitIndex + 1}/${_searchHitIds.length}',
+                  style: GoogleFonts.ibmPlexSans(
+                    fontSize: 12,
+                    color: PrivetTheme.mist,
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Previous match',
+                  onPressed:
+                      _searchHitIds.isEmpty ? null : () => _searchStep(-1),
+                  icon: const Icon(Icons.keyboard_arrow_up_rounded, size: 20),
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                ),
+                IconButton(
+                  tooltip: 'Next match',
+                  onPressed:
+                      _searchHitIds.isEmpty ? null : () => _searchStep(1),
+                  icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 20),
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                ),
+              ],
               const SizedBox(width: 6),
               MouseRegion(
                 cursor: SystemMouseCursors.click,
@@ -1880,6 +1981,10 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                       _filterAssignee = null;
                       _taskSearchCtrl.clear();
                       _taskSearch = '';
+                      _searchHitIds = [];
+                      _searchHitIndex = 0;
+                      _searchFocusRootId = null;
+                      _searchRowKey = null;
                     }),
                   ),
                 ],
@@ -1922,7 +2027,25 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                 ? me
                 : null;
       }
+      if (_taskSearch.trim().isNotEmpty) {
+        _searchHitIds = _collectSearchHits();
+        if (_searchHitIds.isEmpty) {
+          _searchHitIndex = 0;
+          _searchFocusRootId = null;
+          _searchRowKey = null;
+        } else if (!_searchHitIds.contains(_searchFocusRootId)) {
+          _searchHitIndex = 0;
+          _searchFocusRootId = null;
+        } else {
+          _searchHitIndex = _searchHitIds.indexOf(_searchFocusRootId!);
+        }
+      }
     });
+    if (_taskSearch.trim().isNotEmpty &&
+        _searchHitIds.isNotEmpty &&
+        _searchFocusRootId == null) {
+      unawaited(_focusSearchHit(0));
+    }
   }
 
   Widget _filterChip({
@@ -2040,6 +2163,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         onRemoveSubtaskAttachment: history
             ? null
             : (sub, url) => widget.state.removeTaskAttachment(sub, url),
+        highlightQuery: _taskSearch.trim(),
         initiallyExpanded: widget.state.isTaskExpanded(item.id),
         onExpandedChanged: (expanded) =>
             widget.state.setTaskExpanded(item.id, expanded),
@@ -2163,7 +2287,8 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     required bool historyHasMore,
   }) {
     final board = widget.state.taskBoardFor(widget.conversationId);
-    final filtered = _applyTaskFilters(board.activeItems);
+    final filtered = _applyTaskFilters(board.activeItems, board);
+    final historyFiltered = _applyTaskFilters(historyRoots, historyBoard);
     final hasFilters = _taskSearch.trim().isNotEmpty ||
         _filterStatus != null ||
         _filterPriority != null ||
@@ -2262,18 +2387,18 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                     ),
                   ),
           ),
-        if (!emptyAll && historyRoots.isNotEmpty)
+        if (!emptyAll && historyFiltered.isNotEmpty)
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
             sliver: SliverList(
               delegate: SliverChildListDelegate([
                 _SectionLabel(
-                  historyHasMore
+                  historyHasMore && _taskSearch.trim().isEmpty
                       ? 'History — ${historyRoots.length}+'
-                      : 'History — ${historyRoots.length}',
+                      : 'History — ${historyFiltered.length}',
                 ),
                 const SizedBox(height: 6),
-                ...historyRoots.asMap().entries.map((e) => _revealWrap(
+                ...historyFiltered.asMap().entries.map((e) => _revealWrap(
                       rootId: e.value.id,
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2284,7 +2409,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                             board: historyBoard,
                             history: true,
                           ),
-                          if (e.key < historyRoots.length - 1)
+                          if (e.key < historyFiltered.length - 1)
                             const _TaskDivider(),
                         ],
                       ),
@@ -2326,7 +2451,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
   /// message reveal is active (scroll target / flash backdrop).
   Widget _revealWrap({required String rootId, required Widget child}) {
     final key = _revealKeyFor(rootId);
-    final highlighted = _revealRootId == rootId;
+    final highlighted = _revealRootId == rootId || _searchFocusRootId == rootId;
     if (key == null && !highlighted) return child;
     return AnimatedContainer(
       key: key,
@@ -2351,8 +2476,8 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
   /// Kanban board: one column per status, horizontal scroll.
   Widget _buildTaskBoard({required List<TaskItem> historyRoots}) {
     final board = widget.state.taskBoardFor(widget.conversationId);
-    final filtered = _applyTaskFilters(board.activeItems);
-    final doneFiltered = _applyTaskFilters(historyRoots);
+    final filtered = _applyTaskFilters(board.activeItems, board);
+    final doneFiltered = _applyTaskFilters(historyRoots, widget.state.taskHistoryBoardFor(widget.conversationId));
     final byStatus = <String, List<TaskItem>>{
       'todo': [],
       'in_progress': [],
@@ -2439,8 +2564,11 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                 for (final item in items)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 8),
-                    child: _TaskBoardCard(
+                    child: _revealWrap(
+                      rootId: item.id,
+                      child: _TaskBoardCard(
                       item: item,
+                      highlightQuery: _taskSearch.trim(),
                       board: board,
                       editable: editable,
                       onToggle: editable
@@ -2455,6 +2583,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                       onRestore: editable
                           ? null
                           : () => _restoreTask(item),
+                    ),
                     ),
                   ),
                 if (items.isEmpty)
@@ -4020,6 +4149,7 @@ class _TaskRow extends StatefulWidget {
     this.onFormatBody,
     this.initiallyExpanded = false,
     this.onExpandedChanged,
+    this.highlightQuery = '',
   });
 
   final int number;
@@ -4067,6 +4197,9 @@ class _TaskRow extends StatefulWidget {
 
   /// Persists a toggle of the chevron back into [PrivetState].
   final ValueChanged<bool>? onExpandedChanged;
+
+  /// Marks this text inside the task (and its subtasks) while search is active.
+  final String highlightQuery;
 
   @override
   State<_TaskRow> createState() => _TaskRowState();
@@ -4295,6 +4428,7 @@ class _TaskRowState extends State<_TaskRow> {
                                         builder: (context, constraints) =>
                                             SelectableMarkupText(
                                           text: item.body,
+                                          highlightQuery: widget.highlightQuery,
                                           baseStyle: GoogleFonts.ibmPlexSans(
                                             fontSize: widget.taskFontSize,
                                             color: PrivetTheme.paper,
@@ -4518,6 +4652,7 @@ class _TaskRowState extends State<_TaskRow> {
                       for (final sub in widget.subtasks)
                         _SubtaskRow(
                           item: sub,
+                          highlightQuery: widget.highlightQuery,
                           taskFontSize: widget.taskFontSize,
                           mediaBase: widget.mediaBase,
                           editable: !isHistory,
@@ -4811,6 +4946,7 @@ class _SubtaskRow extends StatefulWidget {
     required this.onRemoveAttachment,
     this.onPreview,
     this.onFormatBody,
+    this.highlightQuery = '',
   });
 
   final TaskItem item;
@@ -4832,6 +4968,8 @@ class _SubtaskRow extends StatefulWidget {
   /// text (plain-text selection; the parent re-serializes the markup).
   final void Function(TextSelection selection, TextFormat format)?
       onFormatBody;
+
+  final String highlightQuery;
 
   @override
   State<_SubtaskRow> createState() => _SubtaskRowState();
@@ -4929,6 +5067,7 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                     builder: (context, constraints) =>
                         SelectableMarkupText(
                       text: item.body,
+                      highlightQuery: widget.highlightQuery,
                       baseStyle: GoogleFonts.ibmPlexSans(
                         fontSize: subFontSize,
                         color: PrivetTheme.paper,
@@ -5152,6 +5291,7 @@ class _SubtaskActions extends StatelessWidget {
 class _TaskBoardCard extends StatelessWidget {
   const _TaskBoardCard({
     required this.item,
+    this.highlightQuery = '',
     required this.board,
     required this.editable,
     this.onToggle,
@@ -5163,6 +5303,7 @@ class _TaskBoardCard extends StatelessWidget {
   });
 
   final TaskItem item;
+  final String highlightQuery;
   final ConversationTasks board;
   final bool editable;
   final VoidCallback? onToggle;
@@ -5198,15 +5339,20 @@ class _TaskBoardCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    markupToPlain(item.body),
+                  Text.rich(
+                    TextSpan(
+                      children: highlightQueryPieces(
+                        markupToPlain(item.body),
+                        GoogleFonts.ibmPlexSans(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: PrivetTheme.paper,
+                        ),
+                        query: highlightQuery,
+                      ),
+                    ),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: GoogleFonts.ibmPlexSans(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                      color: PrivetTheme.paper,
-                    ),
                   ),
                   const SizedBox(height: 4),
                   Row(

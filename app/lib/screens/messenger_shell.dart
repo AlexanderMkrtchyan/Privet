@@ -3,7 +3,6 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' show BoxHeightStyle, BoxWidthStyle;
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart'
     show kIsWeb, TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/gestures.dart';
@@ -66,6 +65,7 @@ import '../widgets/custom_shortcodes_editor.dart';
 import '../widgets/english_trainer_ui.dart';
 import '../widgets/kolobok_plain_text.dart';
 import '../widgets/message_bubble.dart';
+import '../widgets/selectable_markup_text.dart';
 import '../widgets/message_font_picker.dart';
 import '../widgets/screen_share_picker.dart';
 import '../widgets/terminal_block_caret.dart';
@@ -1997,19 +1997,12 @@ class InboxPane extends StatelessWidget {
                             Expanded(
                               child: OutlinedButton.icon(
                                 onPressed: () async {
-                                  final result = await FilePicker.platform
-                                      .pickFiles(
-                                        type: FileType.image,
-                                        withData: true,
-                                      );
-                                  final file = result?.files.single;
-                                  if (file?.bytes == null) return;
+                                  final file = await pickImageNative();
+                                  if (file == null) return;
                                   setSheet(() {
-                                    pendingAvatarBytes = file!.bytes;
-                                    pendingAvatarFilename = file.name;
-                                    pendingAvatarMime = file.extension == 'png'
-                                        ? 'image/png'
-                                        : 'image/jpeg';
+                                    pendingAvatarBytes = file.bytes;
+                                    pendingAvatarFilename = file.filename;
+                                    pendingAvatarMime = file.mimeType;
                                     pendingClearAvatar = false;
                                   });
                                 },
@@ -3239,7 +3232,7 @@ class _ConversationPaneState extends State<ConversationPane>
   bool _showJumpToBottom = false;
   bool _searchOpen = false;
   bool _searchBusy = false;
-  List<String> _searchMatchIds = [];
+  List<_ChatSearchHit> _searchHits = [];
   int _searchMatchIndex = 0;
   Timer? _searchDebounce;
 
@@ -4146,7 +4139,7 @@ class _ConversationPaneState extends State<ConversationPane>
     setState(() {
       _searchOpen = !_searchOpen;
       if (!_searchOpen) {
-        _searchMatchIds = [];
+        _searchHits = [];
         _searchMatchIndex = 0;
         _searchController.clear();
       }
@@ -4885,7 +4878,7 @@ class _ConversationPaneState extends State<ConversationPane>
       _searchDebounce?.cancel();
       _searchOpen = false;
       _searchBusy = false;
-      _searchMatchIds = [];
+      _searchHits = [];
       _searchMatchIndex = 0;
       _focusReplyTimer?.cancel();
       _focusedReplyId = null;
@@ -5005,7 +4998,7 @@ class _ConversationPaneState extends State<ConversationPane>
     setState(() {
       _searchOpen = false;
       _searchBusy = false;
-      _searchMatchIds = [];
+      _searchHits = [];
       _searchMatchIndex = 0;
       _searchController.clear();
     });
@@ -5025,7 +5018,7 @@ class _ConversationPaneState extends State<ConversationPane>
     if (query.isEmpty) {
       if (!mounted) return;
       setState(() {
-        _searchMatchIds = [];
+        _searchHits = [];
         _searchMatchIndex = 0;
         _searchBusy = false;
       });
@@ -5033,16 +5026,16 @@ class _ConversationPaneState extends State<ConversationPane>
     }
     setState(() => _searchBusy = true);
     try {
-      final hits = await widget.state.searchInConversation(chatId, query);
+      final rows = await widget.state.searchInConversation(chatId, query);
       if (!mounted || widget.state.activeConversationId != chatId) return;
       if (_searchController.text.trim() != query) return;
-      final ids = hits.map((m) => m.id).toList();
+      final hits = _expandChatSearchHits(rows, query);
       setState(() {
-        _searchMatchIds = ids;
+        _searchHits = hits;
         _searchMatchIndex = 0;
         _searchBusy = false;
       });
-      if (ids.isNotEmpty) {
+      if (hits.isNotEmpty) {
         await _jumpToSearchMatch(0);
       }
     } catch (_) {
@@ -5052,17 +5045,15 @@ class _ConversationPaneState extends State<ConversationPane>
   }
 
   Future<void> _jumpToSearchMatch(int index) async {
-    if (_searchMatchIds.isEmpty) return;
-    final safe =
-        ((index % _searchMatchIds.length) + _searchMatchIds.length) %
-        _searchMatchIds.length;
-    final messageId = _searchMatchIds[safe];
+    if (_searchHits.isEmpty) return;
+    final safe = index.clamp(0, _searchHits.length - 1);
+    final hit = _searchHits[safe];
     if (_searchMatchIndex != safe) {
       setState(() => _searchMatchIndex = safe);
     } else {
-      setState(() {}); // refresh highlight even when staying on same index
+      setState(() {});
     }
-    await _scrollToMessageId(messageId);
+    await _scrollToMessageId(hit.messageId);
   }
 
   /// Scrolls the reversed message list so [messageId] is visible and built.
@@ -5152,12 +5143,28 @@ class _ConversationPaneState extends State<ConversationPane>
   }
 
   void _searchStep(int delta) {
-    if (_searchMatchIds.isEmpty) return;
+    if (_searchHits.isEmpty) return;
     final next = _searchMatchIndex + delta;
-    final normalized =
-        ((next % _searchMatchIds.length) + _searchMatchIds.length) %
-        _searchMatchIds.length;
-    unawaited(_jumpToSearchMatch(normalized));
+    if (next < 0 || next >= _searchHits.length) return;
+    unawaited(_jumpToSearchMatch(next));
+  }
+
+  _ChatSearchHit? get _currentSearchHit =>
+      _searchHits.isEmpty ? null : _searchHits[_searchMatchIndex];
+
+  Widget _searchHitLabel() {
+    final hit = _currentSearchHit;
+    final count = _searchHits.isEmpty
+        ? '0'
+        : '${_searchMatchIndex + 1}/${_searchHits.length}';
+    final date = hit == null ? '' : ' · ${_dayLabel(hit.createdAt)}';
+    return Text(
+      '$count$date',
+      style: GoogleFonts.ibmPlexSans(
+        fontSize: 12,
+        color: PrivetTheme.mist,
+      ),
+    );
   }
 
   Conversation? get _chat {
@@ -5321,27 +5328,26 @@ class _ConversationPaneState extends State<ConversationPane>
                               _onSearchChanged(v);
                             },
                           ),
-                          if (_searchMatchIds.isNotEmpty)
+                          if (_searchHits.isNotEmpty)
                             Row(
                               mainAxisAlignment: MainAxisAlignment.end,
                               children: [
-                                Text(
-                                  '${_searchMatchIndex + 1}/${_searchMatchIds.length}',
-                                  style: GoogleFonts.ibmPlexSans(
-                                    fontSize: 12,
-                                    color: PrivetTheme.mist,
-                                  ),
-                                ),
+                                _searchHitLabel(),
                                 IconButton(
-                                  tooltip: 'Older match',
-                                  onPressed: () => _searchStep(1),
+                                  tooltip: 'Previous match',
+                                  onPressed: _searchMatchIndex <= 0
+                                      ? null
+                                      : () => _searchStep(-1),
                                   icon: const Icon(
                                     Icons.keyboard_arrow_up_rounded,
                                   ),
                                 ),
                                 IconButton(
-                                  tooltip: 'Newer match',
-                                  onPressed: () => _searchStep(-1),
+                                  tooltip: 'Next match',
+                                  onPressed: _searchMatchIndex >=
+                                          _searchHits.length - 1
+                                      ? null
+                                      : () => _searchStep(1),
                                   icon: const Icon(
                                     Icons.keyboard_arrow_down_rounded,
                                   ),
@@ -5420,23 +5426,22 @@ class _ConversationPaneState extends State<ConversationPane>
                               },
                             ),
                           ),
-                          if (_searchMatchIds.isNotEmpty) ...[
+                          if (_searchHits.isNotEmpty) ...[
                             const SizedBox(width: 8),
-                            Text(
-                              '${_searchMatchIndex + 1}/${_searchMatchIds.length}',
-                              style: GoogleFonts.ibmPlexSans(
-                                fontSize: 12,
-                                color: PrivetTheme.mist,
-                              ),
-                            ),
+                            _searchHitLabel(),
                             IconButton(
-                              tooltip: 'Older match',
-                              onPressed: () => _searchStep(1),
+                              tooltip: 'Previous match',
+                              onPressed: _searchMatchIndex <= 0
+                                  ? null
+                                  : () => _searchStep(-1),
                               icon: const Icon(Icons.keyboard_arrow_up_rounded),
                             ),
                             IconButton(
-                              tooltip: 'Newer match',
-                              onPressed: () => _searchStep(-1),
+                              tooltip: 'Next match',
+                              onPressed: _searchMatchIndex >=
+                                      _searchHits.length - 1
+                                  ? null
+                                  : () => _searchStep(1),
                               icon: const Icon(
                                 Icons.keyboard_arrow_down_rounded,
                               ),
@@ -5550,9 +5555,9 @@ class _ConversationPaneState extends State<ConversationPane>
                             m.id,
                             GlobalKey.new,
                           );
+                          final searchHit = _currentSearchHit;
                           final highlighted =
-                              (_searchMatchIds.isNotEmpty &&
-                                  _searchMatchIds[_searchMatchIndex] == m.id) ||
+                              (searchHit != null && searchHit.messageId == m.id) ||
                               _focusedReplyId == m.id;
                           // Day separator sits above the first message of each day.
                           final showDaySeparator =
@@ -5571,6 +5576,14 @@ class _ConversationPaneState extends State<ConversationPane>
                             selfId: state.user?.id,
                             showSender: true,
                             highlighted: highlighted,
+                            searchQuery: searchHit != null &&
+                                    searchHit.messageId == m.id
+                                ? _searchController.text.trim()
+                                : '',
+                            searchOccurrence: searchHit != null &&
+                                    searchHit.messageId == m.id
+                                ? searchHit.occurrence
+                                : null,
                             fontScale: state.chatFontSize / 15.0,
                             // Accent themes can force a chat face (hacker → Cousine).
                             // Otherwise my font applies only to my own messages.
@@ -6404,6 +6417,11 @@ class _ConversationPaneState extends State<ConversationPane>
     // Height: slightly above cap-size; +2px is the closest tidy step without
     // going back to the tall full line-box default.
     final fontSize = resolvedStyle.fontSize ?? 16;
+    final fieldDecoration = _composerKolobokPadding(
+      decoration,
+      fontSize: fontSize,
+      compact: compact,
+    );
     final caretHeight = fontSize + 2;
     // Ubuntu blink (600ms on/off); each lit flash advances accent swatches.
     // Block (terminal/vim) vs thin beam — Profile → Appearance toggle.
@@ -6456,7 +6474,7 @@ class _ConversationPaneState extends State<ConversationPane>
                 state.notifyTypingIfComposing(value);
               },
               onTap: _onComposerTap,
-              decoration: decoration,
+              decoration: fieldDecoration,
             ),
           ),
           Positioned.fill(
@@ -6493,6 +6511,30 @@ class _ConversationPaneState extends State<ConversationPane>
       return AccentChromeFrame(radius: 14, forceLong: true, child: field);
     }
     return field;
+  }
+
+  /// Grow vertical padding so 2.4em Kolobok art is not sheared at the field edge.
+  InputDecoration _composerKolobokPadding(
+    InputDecoration? decoration, {
+    required double fontSize,
+    required bool compact,
+  }) {
+    final minPad = kolobokInlineVerticalPad(fontSize);
+    final current = decoration?.contentPadding?.resolve(
+      Directionality.of(context),
+    );
+    final fallback = compact
+        ? const EdgeInsets.symmetric(horizontal: 8, vertical: 12)
+        : const EdgeInsets.fromLTRB(12, 16, 12, 16);
+    final base = current ?? fallback;
+    final top = math.max(base.top, minPad);
+    final bottom = math.max(base.bottom, minPad);
+    if (current != null && current.top == top && current.bottom == bottom) {
+      return decoration ?? const InputDecoration();
+    }
+    return (decoration ?? const InputDecoration()).copyWith(
+      contentPadding: EdgeInsets.fromLTRB(base.left, top, base.right, bottom),
+    );
   }
 
   Widget _buildDraftPreview() {
@@ -7469,22 +7511,11 @@ class _ConversationPaneState extends State<ConversationPane>
   Future<void> _pickFile() async {
     // Non-web only — web uses HtmlElementView overlay (WebAttachButton).
     try {
-      final result = await FilePicker.platform.pickFiles(
-        withData: true,
-        type: FileType.any,
-        allowMultiple: true,
-      );
-      if (result == null || result.files.isEmpty) return;
+      final files = await pickMultipleFilesNative();
+      if (files.isEmpty) return;
       var attached = 0;
-      for (final file in result.files) {
-        final picked = await pickedBytesFromRaw(
-          bytes: file.bytes,
-          path: file.path,
-          filename: file.name,
-          mimeType: _mimeFor(file.name),
-        );
-        if (picked == null) continue;
-        _applyPickedFile(picked);
+      for (final file in files) {
+        _applyPickedFile(file);
         attached++;
       }
       if (attached == 0 && mounted) {
@@ -8550,6 +8581,72 @@ class _ConversationPaneState extends State<ConversationPane>
       }
     });
   }
+}
+
+class _ChatSearchHit {
+  const _ChatSearchHit({
+    required this.messageId,
+    required this.occurrence,
+    required this.createdAt,
+  });
+
+  final String messageId;
+  final int occurrence;
+  final DateTime createdAt;
+}
+
+String _visibleSearchText(ChatMessage m) {
+  if (m.isDeleted) return '';
+  if (m.isTaskEvent) {
+    return TaskEventPayload.tryParse(m.body)?.label ?? '';
+  }
+  if (m.aiLocal || m.kind == 'ai') {
+    final payload = AiTurnPayload.tryParse(m.body);
+    if (payload != null) {
+      return '${payload.question}\n${payload.answer}';
+    }
+  }
+  return markupToPlain(m.body);
+}
+
+bool _fileNameHasQuery(ChatMessage m, String query) {
+  final q = query.trim().toLowerCase();
+  if (q.isEmpty) return false;
+  if ((m.fileName ?? '').toLowerCase().contains(q)) return true;
+  for (final item in m.mediaItems) {
+    if ((item.fileName ?? '').toLowerCase().contains(q)) return true;
+  }
+  return false;
+}
+
+List<_ChatSearchHit> _expandChatSearchHits(
+  List<ChatMessage> rows,
+  String query,
+) {
+  final hits = <_ChatSearchHit>[];
+  for (final m in rows) {
+    final n = countQueryOccurrences(_visibleSearchText(m), query);
+    if (n > 0) {
+      for (var i = 0; i < n; i++) {
+        hits.add(
+          _ChatSearchHit(
+            messageId: m.id,
+            occurrence: i,
+            createdAt: m.createdAt,
+          ),
+        );
+      }
+    } else if (_fileNameHasQuery(m, query)) {
+      hits.add(
+        _ChatSearchHit(
+          messageId: m.id,
+          occurrence: 0,
+          createdAt: m.createdAt,
+        ),
+      );
+    }
+  }
+  return hits;
 }
 
 class _DaySeparator extends StatelessWidget {

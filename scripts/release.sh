@@ -72,7 +72,7 @@ echo "==> [4/4] Committing, tagging and pushing to GitHub"
 # Stage the source tree as well as the release metadata. Historically only
 # pubspec.yaml + server/public/ were committed, so a local Linux fix could ship
 # in the local build yet never reach GitHub/CI and vanish on the next update.
-git add app/lib app/test app/pubspec.yaml server scripts .github
+git add app/lib app/test app/pubspec.yaml app/assets server scripts .github
 if git diff --cached --quiet; then
   echo "Nothing staged to commit."
 else

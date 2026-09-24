@@ -16,6 +16,7 @@ import 'util/desktop_single_instance.dart';
 import 'util/desktop_tray.dart';
 import 'util/low_resource.dart';
 import 'util/media_cache.dart';
+import 'util/noto_color_emoji.dart';
 import 'util/video_cache.dart';
 import 'util/mobile_app_lifecycle.dart';
 import 'util/mobile_push_background.dart';
@@ -85,6 +86,9 @@ Future<void> main() async {
   // non-blocking — the UI starts regardless.
   unawaited(initMediaCache());
   unawaited(initVideoCache());
+  if (useBundledNotoColorEmoji) {
+    unawaited(NotoColorEmojiCache.instance.ensureLoaded());
+  }
   // Flutter web enables the browser menu by default (Inspect / Copy / etc.).
   // Must stay disabled or SelectableText right-click opens Chrome's menu.
   if (kIsWeb) {

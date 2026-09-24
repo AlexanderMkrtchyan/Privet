@@ -17,6 +17,7 @@ import '../util/ai_turn.dart';
 import '../util/app_clipboard.dart';
 import '../util/call_history.dart';
 import '../util/copy_image.dart';
+import '../util/emoji_style.dart';
 import '../util/low_resource.dart';
 import '../util/media_download.dart';
 import '../util/media_kind.dart';
@@ -34,7 +35,9 @@ import 'inline_video_player.dart';
 import 'privet_emoji.dart';
 import 'selectable_markup_text.dart';
 
-const kQuickReactions = ['❤️', '👍', '😂', '😮'];
+/// Kolobok shortcuts, then a Google/Noto like after a gap.
+const kQuickReactions = ['❤️', '👍', '😮'];
+const kQuickGoogleLike = '👍$kGoogleEmojiMark';
 
 /// Shared — constructing [DateFormat] per bubble every frame is wasteful.
 final _messageTimeFormat = DateFormat.jm();
@@ -97,6 +100,8 @@ class MessageBubble extends StatelessWidget {
     required this.selfId,
     this.showSender = false,
     this.highlighted = false,
+    this.searchQuery = '',
+    this.searchOccurrence,
     this.readByPeer = false,
     this.seenByLabel,
     this.addedToTask = false,
@@ -124,6 +129,12 @@ class MessageBubble extends StatelessWidget {
   final String? selfId;
   final bool showSender;
   final bool highlighted;
+
+  /// When non-empty, matching text inside this bubble is marked.
+  final String searchQuery;
+
+  /// Which occurrence of [searchQuery] is the current search step.
+  final int? searchOccurrence;
   final bool readByPeer;
   final String? seenByLabel;
 
@@ -273,12 +284,18 @@ class MessageBubble extends StatelessWidget {
                 ),
                 if (question.isNotEmpty) ...[
                   const SizedBox(height: 8),
-                  Text(
-                    question,
-                    style: GoogleFonts.ibmPlexSans(
-                      fontSize: 13,
-                      height: 1.35,
-                      color: PrivetTheme.mist,
+                  Text.rich(
+                    TextSpan(
+                      children: highlightQueryPieces(
+                        question,
+                        GoogleFonts.ibmPlexSans(
+                          fontSize: 13,
+                          height: 1.35,
+                          color: PrivetTheme.mist,
+                        ),
+                        query: searchQuery,
+                        currentOccurrence: searchOccurrence,
+                      ),
                     ),
                   ),
                   const SizedBox(height: 8),
@@ -297,6 +314,13 @@ class MessageBubble extends StatelessWidget {
                 else
                   SelectableMarkupText(
                     text: answer,
+                    highlightQuery: searchQuery,
+                    highlightOccurrence: searchQuery.isEmpty
+                        ? null
+                        : (searchOccurrence == null
+                            ? null
+                            : searchOccurrence! -
+                                countQueryOccurrences(question, searchQuery)),
                     fontScale: fontScale,
                     defaultFont: defaultFontFamily,
                     onSetDefaultFont: onSetDefaultFont,
@@ -555,6 +579,7 @@ class MessageBubble extends StatelessWidget {
         ? _SwipeReplyHandle(child: bubble)
         : bubble;
 
+    final hasReactions = message.reactions.isNotEmpty;
     return _SwipeToReply(
       mine: mine,
       enabled: onReply != null &&
@@ -564,51 +589,27 @@ class MessageBubble extends StatelessWidget {
       child: Align(
         alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
         child: Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: mine
-                ? CrossAxisAlignment.end
-                : CrossAxisAlignment.start,
+          // Extra room for the badges that hang off the top of the bubble.
+          padding: EdgeInsets.only(
+            top: hasReactions ? 14 : 0,
+            bottom: 10,
+          ),
+          child: Stack(
+            clipBehavior: Clip.none,
             children: [
               swipeableBubble,
-              if (message.reactions.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Wrap(
-                    spacing: 4,
-                    runSpacing: 4,
-                    alignment: mine ? WrapAlignment.end : WrapAlignment.start,
-                    children: message.reactions.map((r) {
-                      final mineReact = r.reactedBy(selfId);
-                      return Material(
-                        color: mineReact
-                            ? PrivetTheme.signal.withValues(alpha: 0.18)
-                            : PrivetTheme.panelElevated,
-                        borderRadius: BorderRadius.circular(999),
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(999),
-                          onTap: onReact == null
-                              ? null
-                              : () => onReact!(message, r.emoji),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 3,
-                            ),
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(999),
-                              border: Border.all(
-                                color: mineReact
-                                    ? PrivetTheme.signal.withValues(alpha: 0.55)
-                                    : PrivetTheme.line,
-                              ),
-                            ),
-                            child: PrivetEmoji(r.emoji, size: 16),
-                          ),
-                        ),
-                      );
-                    }).toList(),
+              if (hasReactions)
+                Positioned(
+                  // Top-left on both sides — the timestamp lives bottom-right,
+                  // so this corner never covers the time.
+                  top: -10,
+                  left: 6,
+                  child: _MessageReactionBadges(
+                    reactions: message.reactions,
+                    selfId: selfId,
+                    onTap: onReact == null
+                        ? null
+                        : (emoji) => onReact!(message, emoji),
                   ),
                 ),
             ],
@@ -627,9 +628,9 @@ class MessageBubble extends StatelessWidget {
     _reactionMenuOpen = true;
 
     final size = MediaQuery.sizeOf(context);
-    final left = (globalPosition.dx - 8).clamp(8.0, size.width - 288.0);
+    final left = (globalPosition.dx - 8).clamp(8.0, size.width - 300.0);
     final top =
-        (globalPosition.dy - 8).clamp(8.0, (size.height - 440.0).clamp(8.0, size.height));
+        (globalPosition.dy - 8).clamp(8.0, (size.height - 480.0).clamp(8.0, size.height));
     final hasImage = message.mediaItems.any((e) => e.kind == 'image');
     // Warm the copy cache while the menu is up so "Copy image" is instant —
     // the tap then just writes already-local bytes to the clipboard. Prefer
@@ -666,7 +667,7 @@ class MessageBubble extends StatelessWidget {
                           shadowColor: Colors.black54,
                           borderRadius: BorderRadius.circular(16),
                           child: Container(
-                            width: showMore ? 260 : 232,
+                            width: showMore ? 304 : 280,
                             padding: const EdgeInsets.fromLTRB(8, 8, 8, 6),
                             decoration: BoxDecoration(
                               borderRadius: BorderRadius.circular(16),
@@ -683,6 +684,12 @@ class MessageBubble extends StatelessWidget {
                                         emoji: e,
                                         onTap: () => close('react:$e'),
                                       ),
+                                    const SizedBox(width: 8),
+                                    _ReactionChip(
+                                      emoji: kQuickGoogleLike,
+                                      onTap: () =>
+                                          close('react:$kQuickGoogleLike'),
+                                    ),
                                     _ReactionChip(
                                       emoji: '+',
                                       isPlus: true,
@@ -710,8 +717,10 @@ class MessageBubble extends StatelessWidget {
                                   ClipRRect(
                                     borderRadius: BorderRadius.circular(10),
                                     child: CompactEmojiPicker(
-                                      height: 192,
+                                      height: 220,
                                       showDivider: false,
+                                      dense: true,
+                                      markGooglePicks: true,
                                       onSelected: (e) => close('react:$e'),
                                     ),
                                   ),
@@ -1137,6 +1146,8 @@ class MessageBubble extends StatelessWidget {
         fontScale: fontScale,
         defaultFont: defaultFontFamily,
         onSetDefaultFont: onSetDefaultFont,
+        searchQuery: searchQuery,
+        searchOccurrence: searchOccurrence,
         onReplySelection: onReply == null ? null : replyWithSelection,
         onForwardSelection: onForward == null ? null : forwardWithSelection,
         onFormatSelection: onFormatMessage == null ? null : formatSelection,
@@ -1153,6 +1164,8 @@ class MessageBubble extends StatelessWidget {
         fontScale: fontScale,
         defaultFont: defaultFontFamily,
         onSetDefaultFont: onSetDefaultFont,
+        searchQuery: searchQuery,
+        searchOccurrence: searchOccurrence,
         onReplySelection: onReply == null ? null : replyWithSelection,
         onForwardSelection: onForward == null ? null : forwardWithSelection,
         onFormatSelection: onFormatMessage == null ? null : formatSelection,
@@ -1164,6 +1177,8 @@ class MessageBubble extends StatelessWidget {
     }
     return SelectableMarkupText(
       text: message.body,
+      highlightQuery: searchQuery,
+      highlightOccurrence: searchOccurrence,
       fontScale: fontScale,
       defaultFont: defaultFontFamily,
       onSetDefaultFont: onSetDefaultFont,
@@ -1483,7 +1498,8 @@ class _BigEmojiState extends State<_BigEmoji>
     final size = base * widget.fontScale;
     final tightEmoji = !kIsWeb &&
         (defaultTargetPlatform == TargetPlatform.android ||
-            defaultTargetPlatform == TargetPlatform.linux);
+            defaultTargetPlatform == TargetPlatform.linux ||
+            defaultTargetPlatform == TargetPlatform.windows);
     // Entrance bounce peaks at 1.18×; skip it on Android/Linux — scaled paint
     // still collides with the timestamp and with neighbouring smileys.
     final entrance = !tightEmoji && !privetLowResource && _scale != null;
@@ -1535,6 +1551,8 @@ class _AlbumBody extends StatelessWidget {
     this.transferId,
     this.fontScale = 1.0,
     this.defaultFont = '',
+    this.searchQuery = '',
+    this.searchOccurrence,
     this.onSetDefaultFont,
     this.onReplySelection,
     this.onForwardSelection,
@@ -1551,6 +1569,8 @@ class _AlbumBody extends StatelessWidget {
   final String? transferId;
   final double fontScale;
   final String defaultFont;
+  final String searchQuery;
+  final int? searchOccurrence;
   final ValueChanged<String>? onSetDefaultFont;
   final ValueChanged<String>? onReplySelection;
   final ValueChanged<String>? onForwardSelection;
@@ -1632,6 +1652,8 @@ class _AlbumBody extends StatelessWidget {
           const SizedBox(height: 8),
           SelectableMarkupText(
             text: caption,
+            highlightQuery: searchQuery,
+            highlightOccurrence: searchOccurrence,
             fontScale: fontScale,
             defaultFont: defaultFont,
             onSetDefaultFont: onSetDefaultFont,
@@ -1662,6 +1684,8 @@ class _SingleMediaBody extends StatelessWidget {
     this.transferId,
     this.fontScale = 1.0,
     this.defaultFont = '',
+    this.searchQuery = '',
+    this.searchOccurrence,
     this.onSetDefaultFont,
     this.onReplySelection,
     this.onForwardSelection,
@@ -1679,6 +1703,8 @@ class _SingleMediaBody extends StatelessWidget {
   final String? transferId;
   final double fontScale;
   final String defaultFont;
+  final String searchQuery;
+  final int? searchOccurrence;
   final ValueChanged<String>? onSetDefaultFont;
   final ValueChanged<String>? onReplySelection;
   final ValueChanged<String>? onForwardSelection;
@@ -1706,6 +1732,8 @@ class _SingleMediaBody extends StatelessWidget {
 
   Widget _captionText() => SelectableMarkupText(
     text: caption,
+    highlightQuery: searchQuery,
+    highlightOccurrence: searchOccurrence,
     fontScale: fontScale,
     defaultFont: defaultFont,
     onSetDefaultFont: onSetDefaultFont,
@@ -1888,9 +1916,15 @@ class _SingleMediaBody extends StatelessWidget {
                     ExcludeSemantics(
                       child: ConstrainedBox(
                         constraints: const BoxConstraints(maxWidth: 200),
-                        child: Text(
-                          item.fileName ?? caption,
-                          style: const TextStyle(fontSize: 14, height: 1.3),
+                        child: Text.rich(
+                          TextSpan(
+                            children: highlightQueryPieces(
+                              item.fileName ?? caption,
+                              const TextStyle(fontSize: 14, height: 1.3),
+                              query: searchQuery,
+                              currentOccurrence: searchOccurrence,
+                            ),
+                          ),
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -2446,6 +2480,59 @@ class _DownloadChip extends StatelessWidget {
   }
 }
 
+/// Compact reaction pills pinned to a bubble corner so they stay visually
+/// attached to that message when another one follows.
+class _MessageReactionBadges extends StatelessWidget {
+  const _MessageReactionBadges({
+    required this.reactions,
+    required this.selfId,
+    this.onTap,
+  });
+
+  final List<MessageReaction> reactions;
+  final String? selfId;
+  final ValueChanged<String>? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 4,
+      runSpacing: 4,
+      children: reactions.map((r) {
+        final mineReact = r.reactedBy(selfId);
+        return MouseRegion(
+          cursor: onTap == null
+              ? MouseCursor.defer
+              : SystemMouseCursors.click,
+          child: GestureDetector(
+            key: ValueKey('reaction-${r.emoji}'),
+            onTap: onTap == null ? null : () => onTap!(r.emoji),
+            behavior: HitTestBehavior.opaque,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                PrivetEmoji(r.emoji, size: 32, animate: true),
+                if (r.count > 1) ...[
+                  const SizedBox(width: 3),
+                  Text(
+                    '${r.count}',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      height: 1,
+                      color: mineReact ? PrivetTheme.signal : PrivetTheme.paper,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+}
+
 class _ReactionChip extends StatelessWidget {
   const _ReactionChip({
     required this.emoji,
@@ -2470,12 +2557,12 @@ class _ReactionChip extends StatelessWidget {
           hoverColor: PrivetTheme.paper.withValues(alpha: 0.08),
           borderRadius: BorderRadius.circular(8),
           child: SizedBox(
-            width: 32,
-            height: 32,
+            width: 42,
+            height: 42,
             child: Center(
               child: isPlus
-                  ? Icon(Icons.add_rounded, size: 20, color: PrivetTheme.mist)
-                  : PrivetEmoji(emoji, size: 26),
+                  ? Icon(Icons.add_rounded, size: 22, color: PrivetTheme.mist)
+                  : PrivetEmoji(emoji, size: 34, animate: true),
             ),
           ),
         ),

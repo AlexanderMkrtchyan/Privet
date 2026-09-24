@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
+import '../util/emoji_style.dart';
 import '../util/kolobok_images.dart';
 import '../util/kolobok_smileys.dart';
 import '../util/low_resource.dart';
+import '../util/noto_color_emoji.dart';
 import 'kolobok_smiley.dart';
+import 'noto_color_emoji.dart';
 import 'selectable_markup_text.dart' show linuxKolobokInlineEm;
 
 /// Single-line (or clipped) plain text with Kolobok art for mapped smileys.
@@ -51,7 +54,10 @@ class KolobokPlainText extends StatelessWidget {
     _ensureWarm(light: light);
 
     return ListenableBuilder(
-      listenable: KolobokImageCache.instance.generationListenable,
+      listenable: Listenable.merge([
+        KolobokImageCache.instance.generationListenable,
+        NotoColorEmojiCache.instance.generationListenable,
+      ]),
       builder: (context, _) {
         return Text.rich(
           TextSpan(style: style, children: _spans(light)),
@@ -83,7 +89,20 @@ class KolobokPlainText extends StatelessWidget {
       final file = kolobokFileForEmoji(grapheme);
       if (file == null || !cache.isReady(file, light: light)) {
         // Kick decode so generationListenable can rebuild once the art lands.
-        if (file != null) cache.frameFor(file, light: light, animate: false);
+        if (file != null) {
+          cache.frameFor(file, light: light, animate: false);
+        } else if (useBundledNotoColorEmoji &&
+            grapheme != kGoogleEmojiMark &&
+            isNotoAtlasGrapheme(grapheme)) {
+          flush();
+          spans.add(
+            WidgetSpan(
+              alignment: PlaceholderAlignment.middle,
+              child: NotoColorEmoji(grapheme, size: em * notoInlineEm),
+            ),
+          );
+          continue;
+        }
         buffer.write(grapheme);
         continue;
       }

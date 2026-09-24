@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/services.dart';
 
 import 'app_image_clipboard.dart';
@@ -9,12 +10,45 @@ import 'clipboard_files.dart';
 import 'media_kind.dart';
 import 'remote_input.dart';
 
+const _imageTypeGroup = XTypeGroup(
+  label: 'Images',
+  extensions: ['bmp', 'gif', 'jpeg', 'jpg', 'png', 'webp'],
+);
+
 void Function(PickedBytes file)? _onImage;
 int _pasteBindId = 0;
 KeyEventCallback? _keyHandler;
 var _pasteInFlight = false;
 
-Future<PickedBytes?> pickFileNative() async => null;
+Future<PickedBytes?> pickFileNative() async {
+  final files = await pickMultipleFilesNative(maxFiles: 1);
+  return files.isEmpty ? null : files.first;
+}
+
+Future<PickedBytes?> pickImageNative() async {
+  if (Platform.isLinux) {
+    final file = await openFile(acceptedTypeGroups: const [_imageTypeGroup]);
+    if (file == null) return null;
+    return pickedBytesFromRaw(
+      bytes: await file.readAsBytes(),
+      path: file.path,
+      filename: file.name,
+    );
+  }
+  final result = await FilePicker.platform.pickFiles(
+    type: FileType.image,
+    withData: true,
+  );
+  final files = result?.files;
+  if (files == null || files.isEmpty) return null;
+  final file = files.first;
+  return pickedBytesFromRaw(
+    bytes: file.bytes,
+    path: file.path,
+    filename: file.name,
+    mimeType: file.extension == 'png' ? 'image/png' : 'image/jpeg',
+  );
+}
 
 Future<PickedBytes?> pickedBytesFromRaw({
   required Uint8List? bytes,
@@ -40,6 +74,20 @@ Future<PickedBytes?> pickedBytesFromRaw({
 }
 
 Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) async {
+  if (Platform.isLinux) {
+    final files = await openFiles();
+    final out = <PickedBytes>[];
+    for (final file in files) {
+      if (out.length >= maxFiles) break;
+      final picked = await pickedBytesFromRaw(
+        bytes: await file.readAsBytes(),
+        path: file.path,
+        filename: file.name,
+      );
+      if (picked != null) out.add(picked);
+    }
+    return out;
+  }
   final result = await FilePicker.platform.pickFiles(
     withData: true,
     type: FileType.any,

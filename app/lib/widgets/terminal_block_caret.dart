@@ -334,3 +334,23 @@ Rect? composerOverlayFieldClip({
   if (clip.isEmpty) return null;
   return clip;
 }
+
+/// Clip for the composer Kolobok overlay.
+///
+/// [composerOverlayFieldClip] is the [RenderEditable] line box. Oversized
+/// pack art is taller than that box and was sheared at the chin / sprout.
+/// Keep the editable's horizontal inset (do not paint over prefix/suffix
+/// icons) but use the full field height so faces can sit in content padding.
+Rect? composerKolobokOverlayClip({
+  required Offset fieldOrigin,
+  required Size fieldSize,
+  required Size paintSize,
+}) {
+  final field = composerOverlayFieldClip(
+    fieldOrigin: fieldOrigin,
+    fieldSize: fieldSize,
+    paintSize: paintSize,
+  );
+  if (field == null) return null;
+  return Rect.fromLTRB(field.left, 0, field.right, paintSize.height);
+}

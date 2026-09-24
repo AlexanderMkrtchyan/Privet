@@ -154,4 +154,43 @@ void main() {
     }
     debugDefaultTargetPlatformOverride = null;
   });
+
+  test('composer pad + raise keeps tall art inside the field', () {
+    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+    for (final em in fontSizes) {
+      final slot = Rect.fromLTWH(0, 0, smileyAdvanceEm * em, em * 1.35);
+      final artSlot = kolobokArtSlot(slot, em);
+      final scale = kolobokPaintScale(
+        slot: artSlot,
+        imageWidth: 144,
+        imageHeight: 176,
+        fontSize: em,
+      );
+      final destH = 176 * scale;
+      final dest = kolobokDestRect(
+        artSlot: artSlot,
+        center: kolobokPaintCenter(
+          slot: artSlot,
+          destHeight: destH,
+          fontSize: em,
+          baseline: slot.height * 0.8,
+        ),
+        width: 144 * scale,
+        height: destH,
+      );
+      final pad = kolobokInlineVerticalPad(em);
+      // Composer field: line box plus the extra content padding.
+      final field = Rect.fromLTRB(
+        dest.left,
+        slot.top - pad,
+        dest.right,
+        slot.bottom + pad,
+      );
+      expect(dest.top, greaterThanOrEqualTo(field.top - 0.01),
+          reason: 'smile clipped at top ${em}px dest=$dest field=$field');
+      expect(dest.bottom, lessThanOrEqualTo(field.bottom + 0.01),
+          reason: 'smile clipped at bottom ${em}px dest=$dest field=$field');
+    }
+    debugDefaultTargetPlatformOverride = null;
+  });
 }

@@ -3,9 +3,12 @@ import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 
+import '../util/emoji_style.dart';
 import '../util/kolobok_smileys.dart';
 import '../util/low_resource.dart';
+import '../util/noto_color_emoji.dart';
 import 'kolobok_smiley.dart';
+import 'noto_color_emoji.dart';
 
 export '../util/low_resource.dart' show privetLowResourceEmoji;
 
@@ -42,16 +45,27 @@ class PrivetEmoji extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final trimmed = emoji.trim();
-    if (trimmed.isEmpty) return const SizedBox.shrink();
+    final glyph = displayEmoji(trimmed);
+    if (glyph.isEmpty) return const SizedBox.shrink();
 
     final constrainBig = !kIsWeb &&
         (defaultTargetPlatform == TargetPlatform.android ||
-            defaultTargetPlatform == TargetPlatform.linux) &&
+            defaultTargetPlatform == TargetPlatform.linux ||
+            defaultTargetPlatform == TargetPlatform.windows) &&
         size >= 48;
 
     Widget glyphFallback() {
+      if (useBundledNotoColorEmoji && isNotoAtlasGrapheme(glyph)) {
+        final noto = NotoColorEmoji(glyph, size: size);
+        if (!constrainBig) return noto;
+        return SizedBox(
+          width: size,
+          height: size,
+          child: Center(child: noto),
+        );
+      }
       final text = Text(
-        trimmed,
+        glyph,
         style: TextStyle(
           fontSize: size,
           height: 1,
@@ -81,13 +95,15 @@ class PrivetEmoji extends StatelessWidget {
     // The bundled pack is the app's own smiley set, so it is intentionally NOT
     // tied to the "Low RAM & CPU" switch: that switch must never leave a chat
     // half Kolobok / half system glyph (which read as "frozen first frame").
-    final kolobok = kolobokFileForEmoji(trimmed);
-    if (kolobok != null) {
-      return KolobokSmiley(
-        kolobok,
-        size: size,
-        animate: animate && size >= staticGlyphThreshold,
-      );
+    if (!isGoogleEmojiStyle(trimmed)) {
+      final kolobok = kolobokFileForEmoji(glyph);
+      if (kolobok != null) {
+        return KolobokSmiley(
+          kolobok,
+          size: size,
+          animate: animate && size >= staticGlyphThreshold,
+        );
+      }
     }
 
     if (privetLowResource || size < staticGlyphThreshold) {
@@ -95,8 +111,8 @@ class PrivetEmoji extends StatelessWidget {
     }
 
     final data =
-        AnimatedEmojis.fromEmojiString(trimmed) ??
-        AnimatedEmojis.fromEmojiString(_stripVs(trimmed));
+        AnimatedEmojis.fromEmojiString(glyph) ??
+        AnimatedEmojis.fromEmojiString(_stripVs(glyph));
 
     if (data == null) return glyphFallback();
 
