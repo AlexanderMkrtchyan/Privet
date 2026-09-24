@@ -7475,14 +7475,24 @@ class _ConversationPaneState extends State<ConversationPane>
         allowMultiple: true,
       );
       if (result == null || result.files.isEmpty) return;
+      var attached = 0;
       for (final file in result.files) {
-        final bytes = file.bytes;
-        if (bytes == null || bytes.isEmpty) continue;
-        _applyPickedFile(
-          PickedBytes(
-            bytes: bytes,
-            filename: file.name,
-            mimeType: _mimeFor(file.name),
+        final picked = await pickedBytesFromRaw(
+          bytes: file.bytes,
+          path: file.path,
+          filename: file.name,
+          mimeType: _mimeFor(file.name),
+        );
+        if (picked == null) continue;
+        _applyPickedFile(picked);
+        attached++;
+      }
+      if (attached == 0 && mounted) {
+        widget.state.setError('Could not read the selected file');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not read the selected file'),
+            behavior: SnackBarBehavior.floating,
           ),
         );
       }
@@ -8323,6 +8333,17 @@ class _ConversationPaneState extends State<ConversationPane>
         replyTo: replyPreview,
         replyQuote: replyQuote,
       );
+      final err = widget.state.error;
+      if (err != null && err.isNotEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(err),
+            backgroundColor: PrivetTheme.danger,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        return;
+      }
       if (dismissKeyboard) _dismissComposerKeyboard();
       _scrollToEnd();
       return;

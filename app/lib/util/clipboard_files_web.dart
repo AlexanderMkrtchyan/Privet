@@ -7,6 +7,7 @@ import 'dart:typed_data';
 
 import 'clipboard_files.dart';
 import 'clipboard_read_web.dart';
+import 'media_kind.dart';
 
 html.EventListener? _pasteListener;
 void Function(PickedBytes file)? _onImage;
@@ -112,6 +113,20 @@ Future<void> _handleAttachChange(html.FileUploadInputElement input) async {
   } catch (e) {
     _onAttachError?.call(e);
   }
+}
+
+Future<PickedBytes?> pickedBytesFromRaw({
+  required Uint8List? bytes,
+  String? path,
+  required String filename,
+  String? mimeType,
+}) async {
+  if (bytes == null || bytes.isEmpty) return null;
+  return PickedBytes(
+    bytes: bytes,
+    filename: filename,
+    mimeType: mimeType ?? mimeForFilename(filename),
+  );
 }
 
 /// Legacy programmatic picker — prefer the positioned overlay input.

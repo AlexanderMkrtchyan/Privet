@@ -287,7 +287,11 @@ Future<void> mediaCacheWarmBytes(String url, Uint8List bytes) async {
   await _store(url, _blobFromBytes(url, bytes));
 }
 
-Future<String?> downloadMediaFromCache(String url, {String? filename}) async {
+Future<String?> downloadMediaFromCache(
+  String url, {
+  String? filename,
+  void Function(double progress)? onProgress,
+}) async {
   final bytes = await mediaCacheGetOrFetch(url);
   if (bytes == null) return null;
   final name = (filename != null && filename.isNotEmpty)

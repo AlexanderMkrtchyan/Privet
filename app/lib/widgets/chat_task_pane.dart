@@ -1477,13 +1477,13 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     final picked = <PickedBytes>[];
     for (final file in result.files) {
       if (picked.length >= maxFiles) break;
-      final bytes = file.bytes;
-      if (bytes == null || bytes.isEmpty) continue;
-      picked.add(PickedBytes(
-        bytes: bytes,
+      final item = await pickedBytesFromRaw(
+        bytes: file.bytes,
+        path: file.path,
         filename: file.name,
         mimeType: _mimeFor(file.name),
-      ));
+      );
+      if (item != null) picked.add(item);
     }
     return picked;
   }

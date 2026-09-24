@@ -25,7 +25,9 @@ const publicDir = path.join(serverRoot, 'public');
 
 const app = Fastify({
   logger: true,
-  bodyLimit: 1048576,
+  // Multipart chat uploads (videos) are larger than Fastify's 1MiB default.
+  // JSON stays capped by the parser below.
+  bodyLimit: 512 * 1024 * 1024,
 });
 const port = Number(process.env.PORT || 7777);
 const host = process.env.HOST || '0.0.0.0';
@@ -39,7 +41,7 @@ await app.register(websocket);
 app.removeContentTypeParser('application/json');
 app.addContentTypeParser(
   'application/json',
-  { parseAs: 'string' },
+  { parseAs: 'string', bodyLimit: 1048576 },
   (req, body, done) => {
     if (!body || body.length === 0) {
       done(null, {});
@@ -77,6 +79,17 @@ await app.register(fastifyStatic, {
   root: uploadsDir,
   prefix: '/media/',
   decorateReply: false,
+  setHeaders: (res) => {
+    // UUID filenames are immutable. Long cache lets Cloudflare / the
+    // browser keep the file so the next open is a Range hit, not origin.
+    if (typeof res.setHeader === 'function') {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      res.setHeader('Accept-Ranges', 'bytes');
+    } else if (typeof res.header === 'function') {
+      res.header('Cache-Control', 'public, max-age=31536000, immutable');
+      res.header('Accept-Ranges', 'bytes');
+    }
+  },
 });
 
 if (fs.existsSync(publicDir)) {

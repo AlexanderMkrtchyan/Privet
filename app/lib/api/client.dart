@@ -1,10 +1,12 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 
 import '../models.dart';
+import '../util/media_kind.dart';
 
 class ApiClient {
   ApiClient({String? baseUrl}) : baseUrl = baseUrl ?? resolveBaseUrl();
@@ -788,7 +790,11 @@ class ApiClient {
     required String filename,
     required String mimeType,
     bool asVoice = false,
+    void Function(double progress)? onProgress,
   }) async {
+    if (bytes.length > kMaxUploadBytes) {
+      throw ApiException(413, 'File too large (max 512MB)');
+    }
     final uri = _u('/uploads').replace(
       queryParameters: asVoice ? {'as': 'voice'} : null,
     );
@@ -805,16 +811,19 @@ class ApiClient {
       contentType = MediaType('application', 'octet-stream');
     }
     req.files.add(
-      http.MultipartFile.fromBytes(
+      http.MultipartFile(
         'file',
-        bytes,
+        _progressByteStream(bytes, onProgress),
+        bytes.length,
         filename: filename.isEmpty ? 'attachment.bin' : filename,
         contentType: contentType,
       ),
     );
+    onProgress?.call(0);
     final streamed = await req.send();
     final res = await http.Response.fromStream(streamed);
     final data = _decode(res);
+    onProgress?.call(1);
     return MediaUpload.fromJson(data);
   }
 
@@ -853,17 +862,55 @@ class ApiClient {
     return _decode(res);
   }
 
+  /// Yields [bytes] in chunks so [onProgress] can track the upload body.
+  /// Caps at 0.97 until the server ACK — the last 3% is the response.
+  static http.ByteStream _progressByteStream(
+    List<int> bytes,
+    void Function(double progress)? onProgress,
+  ) {
+    final total = bytes.length;
+    if (total == 0) {
+      onProgress?.call(1);
+      return http.ByteStream.fromBytes(bytes);
+    }
+    const chunkSize = 64 * 1024;
+    Stream<List<int>> chunks() async* {
+      for (var offset = 0; offset < total; offset += chunkSize) {
+        final end = math.min(offset + chunkSize, total);
+        yield bytes.sublist(offset, end);
+        onProgress?.call((end / total * 0.97).clamp(0.0, 0.97));
+      }
+    }
+
+    return http.ByteStream(chunks());
+  }
+
   Map<String, dynamic> _decode(http.Response res) {
-    final body = res.body.isEmpty ? <String, dynamic>{} : jsonDecode(res.body);
+    Object? body;
+    try {
+      body = res.body.isEmpty ? <String, dynamic>{} : jsonDecode(res.body);
+    } catch (_) {
+      throw ApiException(res.statusCode, _httpErrorMessage(res));
+    }
     if (res.statusCode >= 400) {
       throw ApiException(
         res.statusCode,
         (body is Map && body['error'] != null)
             ? body['error'].toString()
-            : 'request failed',
+            : _httpErrorMessage(res),
       );
     }
     return body as Map<String, dynamic>;
+  }
+
+  String _httpErrorMessage(http.Response res) {
+    final snippet = res.body.trim();
+    final tooLarge = res.statusCode == 413 ||
+        snippet.contains('413') ||
+        snippet.contains('Request Entity Too Large');
+    if (tooLarge) return 'File too large (max 512MB)';
+    if (res.statusCode >= 400) return 'Upload failed (${res.statusCode})';
+    return 'Server returned an invalid response';
   }
 
   String get wsUrl {

@@ -19,6 +19,9 @@ import '../util/call_history.dart';
 import '../util/copy_image.dart';
 import '../util/low_resource.dart';
 import '../util/media_download.dart';
+import '../util/media_kind.dart';
+import '../util/media_saved_toast.dart';
+import '../util/media_transfer_progress.dart';
 import '../util/perf.dart';
 import '../util/rich_text_markup.dart';
 import '../util/task_event_payload.dart';
@@ -1130,6 +1133,7 @@ class MessageBubble extends StatelessWidget {
         mediaBase: mediaBase,
         caption: message.body,
         pending: message.pending,
+        transferId: message.id,
         fontScale: fontScale,
         defaultFont: defaultFontFamily,
         onSetDefaultFont: onSetDefaultFont,
@@ -1144,6 +1148,7 @@ class MessageBubble extends StatelessWidget {
         mediaBase: mediaBase,
         caption: message.body,
         pending: message.pending,
+        transferId: message.id,
         voiceLabel: message.kind == 'voice',
         fontScale: fontScale,
         defaultFont: defaultFontFamily,
@@ -1527,6 +1532,7 @@ class _AlbumBody extends StatelessWidget {
     required this.mediaBase,
     required this.caption,
     this.pending = false,
+    this.transferId,
     this.fontScale = 1.0,
     this.defaultFont = '',
     this.onSetDefaultFont,
@@ -1542,6 +1548,7 @@ class _AlbumBody extends StatelessWidget {
   /// Message is still being sent — the bubble menu (and right-click image
   /// targeting) is disabled while it is.
   final bool pending;
+  final String? transferId;
   final double fontScale;
   final String defaultFont;
   final ValueChanged<String>? onSetDefaultFont;
@@ -1611,6 +1618,7 @@ class _AlbumBody extends StatelessWidget {
                           : tileH,
                       compact: items.length > 1 && item.kind != 'video',
                       pending: pending,
+                      transferId: transferId,
                       galleryUrls: galleryUrls,
                       galleryFilenames: galleryFilenames,
                       galleryIndex: galleryIndex < 0 ? 0 : galleryIndex,
@@ -1651,6 +1659,7 @@ class _SingleMediaBody extends StatelessWidget {
     required this.caption,
     required this.voiceLabel,
     this.pending = false,
+    this.transferId,
     this.fontScale = 1.0,
     this.defaultFont = '',
     this.onSetDefaultFont,
@@ -1667,6 +1676,7 @@ class _SingleMediaBody extends StatelessWidget {
   /// Message is still being sent — the bubble menu (and right-click image
   /// targeting) is disabled while it is.
   final bool pending;
+  final String? transferId;
   final double fontScale;
   final String defaultFont;
   final ValueChanged<String>? onSetDefaultFont;
@@ -1806,9 +1816,19 @@ class _SingleMediaBody extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            ExcludeSemantics(child: InlineVideoPlayer(url: _url)),
-            const SizedBox(height: 4),
-            _DownloadChip(url: _url, filename: _downloadName),
+            ExcludeSemantics(
+              child: pending && _url.isEmpty
+                  ? _PendingVideoUpload(
+                      width: 260,
+                      height: 160,
+                      transferId: transferId,
+                    )
+                  : InlineVideoPlayer(url: _url),
+            ),
+            if (_url.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              _DownloadChip(url: _url, filename: _downloadName),
+            ],
             if (caption.isNotEmpty) ...[
               const SizedBox(height: 6),
               _captionText(),
@@ -1906,6 +1926,7 @@ class _AttachmentTile extends StatelessWidget {
     required this.height,
     required this.compact,
     this.pending = false,
+    this.transferId,
     this.galleryUrls = const [],
     this.galleryFilenames = const [],
     this.galleryIndex = 0,
@@ -1920,6 +1941,7 @@ class _AttachmentTile extends StatelessWidget {
   /// Message is still being sent — the bubble menu (and right-click image
   /// targeting) is disabled while it is.
   final bool pending;
+  final String? transferId;
   final List<String> galleryUrls;
   final List<String?> galleryFilenames;
   final int galleryIndex;
@@ -2037,7 +2059,13 @@ class _AttachmentTile extends StatelessWidget {
           ),
         );
       case 'video':
-        content = InlineVideoPlayer(url: url, width: width, height: height);
+        content = pending && url.isEmpty
+            ? _PendingVideoUpload(
+                width: width,
+                height: height,
+                transferId: transferId,
+              )
+            : InlineVideoPlayer(url: url, width: width, height: height);
       case 'audio':
       case 'voice':
         content = _clickableFileTile(
@@ -2297,6 +2325,68 @@ class _SlidingGradientTransform extends GradientTransform {
       bounds.width * (slidePercent * 2 - 1) * 1.5,
       0,
       0,
+    );
+  }
+}
+
+/// Ready-box shown while a video is still uploading, with live percent.
+class _PendingVideoUpload extends StatelessWidget {
+  const _PendingVideoUpload({
+    required this.width,
+    required this.height,
+    this.transferId,
+  });
+
+  final double width;
+  final double height;
+  final String? transferId;
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = transferId == null
+        ? null
+        : mediaTransferProgressOf(transferId!);
+    return SizedBox(
+      width: width,
+      height: height,
+      child: ColoredBox(
+        color: PrivetTheme.ink,
+        child: Center(
+          child: progress == null
+              ? _pendingLabel(null)
+              : ValueListenableBuilder<double>(
+                  valueListenable: progress,
+                  builder: (_, value, __) => _pendingLabel(value),
+                ),
+        ),
+      ),
+    );
+  }
+
+  Widget _pendingLabel(double? value) {
+    final pct = value == null ? '' : ' ${formatTransferPercent(value)}';
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: 28,
+          height: 28,
+          child: CircularProgressIndicator(
+            strokeWidth: 2.2,
+            color: PrivetTheme.signal,
+            value: value != null && value > 0 ? value : null,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Uploading$pct',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: PrivetTheme.paper.withValues(alpha: 0.85),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -2816,11 +2906,13 @@ Future<void> _downloadMedia(
   String url, {
   required String filename,
 }) async {
-  final saved = await downloadMedia(url, filename: filename);
-  if (saved == null || !context.mounted) return;
-  final messenger = ScaffoldMessenger.maybeOf(context);
-  messenger?.showSnackBar(
-    SnackBar(content: Text('Saved to $saved')),
+  await downloadMediaWithToast(
+    context,
+    url: url,
+    filename: filename,
+    isVideo: looksLikeVideo(filename: filename, url: url),
+    download: ({required url, filename, onProgress}) =>
+        downloadMedia(url, filename: filename, onProgress: onProgress),
   );
 }
 

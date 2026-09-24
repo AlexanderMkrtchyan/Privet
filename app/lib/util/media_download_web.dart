@@ -5,7 +5,11 @@ import 'dart:html' as html;
 /// Downloads without opening a new tab. Fetches as a blob so the `download`
 /// attribute works even when the Flutter UI and API are on different ports.
 /// The browser owns the actual save, so there is no local path to report.
-Future<String?> downloadMedia(String url, {String? filename}) async {
+Future<String?> downloadMedia(
+  String url, {
+  String? filename,
+  void Function(double progress)? onProgress,
+}) async {
   final name = (filename != null && filename.isNotEmpty)
       ? filename
       : url.split('/').last.split('?').first;

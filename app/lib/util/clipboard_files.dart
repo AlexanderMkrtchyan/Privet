@@ -16,6 +16,21 @@ class PickedBytes {
   final String mimeType;
 }
 
+/// Builds a [PickedBytes] from FilePicker output. On desktop, [bytes] is
+/// often empty even when [path] is set — read the file in that case.
+Future<PickedBytes?> pickedBytesFromRaw({
+  required Uint8List? bytes,
+  String? path,
+  required String filename,
+  String? mimeType,
+}) =>
+    impl.pickedBytesFromRaw(
+      bytes: bytes,
+      path: path,
+      filename: filename,
+      mimeType: mimeType,
+    );
+
 Future<PickedBytes?> pickFileNative() => impl.pickFileNative();
 
 Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) =>

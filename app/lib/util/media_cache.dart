@@ -46,5 +46,13 @@ void reportMediaCacheError(String where, String detail) =>
 /// Saves [url]'s bytes locally, preferring cached bytes (instant) over a
 /// network fetch. Returns the saved path on native platforms, or null on web
 /// where the browser triggers the download itself.
-Future<String?> downloadMediaFromCache(String url, {String? filename}) =>
-    impl.downloadMediaFromCache(url, filename: filename);
+Future<String?> downloadMediaFromCache(
+  String url, {
+  String? filename,
+  void Function(double progress)? onProgress,
+}) =>
+    impl.downloadMediaFromCache(
+      url,
+      filename: filename,
+      onProgress: onProgress,
+    );

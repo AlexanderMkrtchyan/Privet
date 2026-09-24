@@ -4,16 +4,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 
-import '../theme.dart';
 import '../util/low_resource.dart';
+import '../util/privet_video_controller.dart';
+import '../util/privet_video_prefs.dart';
+import 'privet_video_chrome.dart';
+import 'privet_video_surface.dart';
 
-/// Full-screen video viewer: black backdrop, centered video, play/pause,
-/// scrub bar with time, and exit-fullscreen buttons. Used by the inline
-/// player's fullscreen control on every platform — web (official <video>
-/// backend) and desktop (native backend via fvp).
+/// Full-screen video viewer. When [controller] is already initialized (the
+/// inline player hands it over) playback continues without a second open.
+/// Otherwise the URL is opened here. Used on every platform — web (official
+/// `<video>` backend) and desktop (native backend via fvp).
 Future<void> showVideoFullscreen(
   BuildContext context, {
   required String url,
+  VideoPlayerController? controller,
   Duration initialPosition = Duration.zero,
 }) {
   return showGeneralDialog<void>(
@@ -25,6 +29,7 @@ Future<void> showVideoFullscreen(
     pageBuilder: (ctx, animation, secondaryAnimation) {
       return _VideoFullscreenPage(
         url: url,
+        controller: controller,
         initialPosition: initialPosition,
       );
     },
@@ -41,10 +46,12 @@ Future<void> showVideoFullscreen(
 class _VideoFullscreenPage extends StatefulWidget {
   const _VideoFullscreenPage({
     required this.url,
+    this.controller,
     this.initialPosition = Duration.zero,
   });
 
   final String url;
+  final VideoPlayerController? controller;
   final Duration initialPosition;
 
   @override
@@ -53,34 +60,56 @@ class _VideoFullscreenPage extends StatefulWidget {
 
 class _VideoFullscreenPageState extends State<_VideoFullscreenPage> {
   VideoPlayerController? _controller;
+  bool _ownsController = false;
   bool _ready = false;
   bool _failed = false;
   bool _playing = false;
+  bool _buffering = false;
+  bool _chrome = true;
+  Timer? _hideChrome;
 
   @override
   void initState() {
     super.initState();
-    _init();
+    final existing = widget.controller;
+    if (existing != null && existing.value.isInitialized) {
+      _controller = existing;
+      _ownsController = false;
+      _ready = true;
+      _syncFromController();
+      existing.addListener(_onTick);
+      _scheduleHide();
+    } else {
+      _init();
+    }
   }
 
   Future<void> _init() async {
-    final controller =
-        VideoPlayerController.networkUrl(Uri.parse(widget.url))
-          ..setLooping(false);
+    final controller = createPrivetVideoController(widget.url)
+      ..setLooping(false);
+    _ownsController = true;
     try {
       await controller.initialize();
       if (!mounted) {
         unawaited(controller.dispose());
         return;
       }
-      _controller = controller;
-      _controller!.addListener(_onTick);
+      tunePrivetVideoController(controller);
+      await PrivetVideoPrefs.apply(controller);
       if (widget.initialPosition > Duration.zero) {
         await controller.seekTo(widget.initialPosition);
       }
+      if (!mounted) {
+        unawaited(controller.dispose());
+        return;
+      }
+      _controller = controller;
+      _controller!.addListener(_onTick);
       _ready = true;
-      if (mounted) setState(() {});
+      _syncFromController();
+      setState(() {});
       await controller.play();
+      _scheduleHide();
     } catch (_) {
       unawaited(controller.dispose());
       if (!mounted) return;
@@ -89,12 +118,44 @@ class _VideoFullscreenPageState extends State<_VideoFullscreenPage> {
     }
   }
 
+  void _syncFromController() {
+    final controller = _controller;
+    if (controller == null) return;
+    _playing = controller.value.isPlaying;
+    _buffering = controller.value.isBuffering;
+  }
+
   void _onTick() {
     if (!mounted) return;
     final controller = _controller;
     if (controller == null) return;
     final playing = controller.value.isPlaying;
-    if (playing != _playing) setState(() => _playing = playing);
+    final buffering = controller.value.isBuffering;
+    if (playing == _playing && buffering == _buffering) return;
+    setState(() {
+      _playing = playing;
+      _buffering = buffering;
+    });
+    if (playing) {
+      _scheduleHide();
+    } else {
+      _hideChrome?.cancel();
+      if (!_chrome) setState(() => _chrome = true);
+    }
+  }
+
+  void _scheduleHide() {
+    _hideChrome?.cancel();
+    if (!_playing) return;
+    _hideChrome = Timer(const Duration(milliseconds: 2400), () {
+      if (!mounted || !_playing) return;
+      setState(() => _chrome = false);
+    });
+  }
+
+  void _revealChrome() {
+    if (!_chrome) setState(() => _chrome = true);
+    _scheduleHide();
   }
 
   Future<void> _togglePlay() async {
@@ -105,40 +166,100 @@ class _VideoFullscreenPageState extends State<_VideoFullscreenPage> {
     } else {
       await controller.play();
     }
+    _revealChrome();
+  }
+
+  Future<void> _nudge(Duration delta) async {
+    final controller = _controller;
+    if (controller == null || !_ready) return;
+    final duration = controller.value.duration;
+    var next = controller.value.position + delta;
+    if (next < Duration.zero) next = Duration.zero;
+    if (duration > Duration.zero && next > duration) next = duration;
+    await controller.seekTo(next);
+    _revealChrome();
+  }
+
+  Future<void> _nudgeVolume(double delta) async {
+    final controller = _controller;
+    if (controller == null || !_ready) return;
+    PrivetVideoPrefs.muted = false;
+    PrivetVideoPrefs.volume =
+        (PrivetVideoPrefs.volume + delta).clamp(0.0, 1.0);
+    await controller.setVolume(PrivetVideoPrefs.effectiveVolume);
+    if (mounted) setState(() {});
+    _revealChrome();
   }
 
   void _close() => Navigator.of(context).maybePop();
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
-    if (event.logicalKey == LogicalKeyboardKey.escape) {
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.escape) {
       _close();
       return KeyEventResult.handled;
     }
-    if (event.logicalKey == LogicalKeyboardKey.space) {
+    if (key == LogicalKeyboardKey.space ||
+        key == LogicalKeyboardKey.keyK) {
       unawaited(_togglePlay());
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowLeft ||
+        key == LogicalKeyboardKey.keyJ) {
+      unawaited(_nudge(const Duration(seconds: -10)));
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight ||
+        key == LogicalKeyboardKey.keyL) {
+      unawaited(_nudge(const Duration(seconds: 10)));
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      unawaited(_nudgeVolume(0.1));
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowDown) {
+      unawaited(_nudgeVolume(-0.1));
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.keyM) {
+      PrivetVideoPrefs.muted = !PrivetVideoPrefs.muted;
+      final controller = _controller;
+      if (controller != null) {
+        unawaited(controller.setVolume(PrivetVideoPrefs.effectiveVolume));
+      }
+      if (mounted) setState(() {});
+      _revealChrome();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.keyF) {
+      _close();
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
   }
 
+  void _onDoubleTap(TapDownDetails details, Size size) {
+    final x = details.localPosition.dx;
+    if (x < size.width / 3) {
+      unawaited(_nudge(const Duration(seconds: -10)));
+    } else if (x > size.width * 2 / 3) {
+      unawaited(_nudge(const Duration(seconds: 10)));
+    } else {
+      unawaited(_togglePlay());
+    }
+  }
+
   @override
   void dispose() {
+    _hideChrome?.cancel();
     final controller = _controller;
     if (controller != null) {
       controller.removeListener(_onTick);
-      controller.dispose();
+      if (_ownsController) controller.dispose();
     }
     super.dispose();
-  }
-
-  static String _fmt(Duration d) {
-    final total = d.inSeconds;
-    final h = total ~/ 3600;
-    final m = (total % 3600) ~/ 60;
-    final s = total % 60;
-    String two(int v) => v.toString().padLeft(2, '0');
-    return h > 0 ? '$h:${two(m)}:${two(s)}' : '${two(m)}:${two(s)}';
   }
 
   @override
@@ -147,175 +268,175 @@ class _VideoFullscreenPageState extends State<_VideoFullscreenPage> {
     return Focus(
       autofocus: true,
       onKeyEvent: _onKey,
-      child: Material(
-        type: MaterialType.transparency,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _close,
-            ),
-            if (_failed)
-              const Center(
-                child: Text(
-                  'Video unavailable',
-                  style: TextStyle(color: Colors.white70, fontSize: 14),
-                ),
+      child: MouseRegion(
+        onHover: (_) => _revealChrome(),
+        cursor: _chrome ? SystemMouseCursors.basic : SystemMouseCursors.none,
+        child: Material(
+          type: MaterialType.transparency,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _close,
               ),
-            if (!_ready && !_failed)
-              const Center(
-                child: SizedBox(
-                  width: 28,
-                  height: 28,
-                  child: CircularProgressIndicator(strokeWidth: 2.5),
-                ),
-              ),
-            if (_ready && controller != null)
-              Center(
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: _togglePlay,
-                    child: FittedBox(
-                      fit: BoxFit.contain,
-                      child: SizedBox(
-                        width: controller.value.size.width,
-                        height: controller.value.size.height,
-                        child: VideoPlayer(controller),
-                      ),
-                    ),
+              if (_failed)
+                const Center(
+                  child: Text(
+                    'Video unavailable',
+                    style: TextStyle(color: Colors.white70, fontSize: 14),
                   ),
                 ),
-              ),
-            if (_ready && !_playing)
-              IgnorePointer(
-                child: Center(
-                  child: Container(
-                    width: 64,
-                    height: 64,
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.45),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      Icons.play_arrow_rounded,
-                      size: 40,
+              if (!_ready && !_failed)
+                const Center(
+                  child: SizedBox(
+                    width: 28,
+                    height: 28,
+                    child: CircularProgressIndicator(strokeWidth: 2.5),
+                  ),
+                ),
+              if (_ready && controller != null)
+                Center(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final size = Size(
+                        constraints.maxWidth,
+                        constraints.maxHeight,
+                      );
+                      return MouseRegion(
+                        cursor: SystemMouseCursors.click,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: _togglePlay,
+                          onDoubleTapDown: (details) =>
+                              _onDoubleTap(details, size),
+                          child: PrivetVideoSurface(controller: controller),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              if (_ready && _buffering)
+                const Center(
+                  child: SizedBox(
+                    width: 32,
+                    height: 32,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.4,
                       color: Colors.white,
                     ),
                   ),
                 ),
-              ),
-            SafeArea(
-              child: Align(
-                alignment: Alignment.topRight,
-                child: Padding(
-                  padding: const EdgeInsets.all(8),
-                  child: _VideoChromeButton(
-                    tooltip: 'Exit fullscreen',
-                    icon: Icons.fullscreen_exit_rounded,
-                    onPressed: _close,
+              if (_ready && !_playing)
+                Center(
+                  child: _PlayBadge(
+                    size: 64,
+                    iconSize: 40,
+                    onPressed: _togglePlay,
                   ),
                 ),
-              ),
-            ),
-            if (_ready && controller != null)
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: Container(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Colors.transparent,
-                        Colors.black.withValues(alpha: 0.62),
-                      ],
-                    ),
-                  ),
-                  padding: const EdgeInsets.fromLTRB(12, 36, 12, 10),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      VideoProgressIndicator(
-                        controller,
-                        allowScrubbing: true,
-                        padding: const EdgeInsets.symmetric(vertical: 6),
-                        colors: VideoProgressColors(
-                          playedColor: PrivetTheme.signal,
-                          bufferedColor: Colors.white38,
-                          backgroundColor: Colors.white24,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Row(
+              if (_ready && controller != null)
+                AnimatedOpacity(
+                  opacity: _chrome ? 1 : 0,
+                  duration: const Duration(milliseconds: 180),
+                  child: IgnorePointer(
+                    ignoring: !_chrome,
+                    child: SafeArea(
+                      child: Stack(
                         children: [
-                          _VideoChromeButton(
-                            tooltip: _playing ? 'Pause' : 'Play',
-                            icon: _playing
-                                ? Icons.pause_rounded
-                                : Icons.play_arrow_rounded,
-                            onPressed: _togglePlay,
+                          Align(
+                            alignment: Alignment.topRight,
+                            child: Padding(
+                              padding: const EdgeInsets.all(8),
+                              child: _TopClose(onPressed: _close),
+                            ),
                           ),
-                          const SizedBox(width: 10),
-                          ValueListenableBuilder<VideoPlayerValue>(
-                            valueListenable: controller,
-                            builder: (context, value, _) {
-                              return Text(
-                                '${_fmt(value.position)} / ${_fmt(value.duration)}',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              );
-                            },
-                          ),
-                          const Spacer(),
-                          _VideoChromeButton(
-                            tooltip: 'Exit fullscreen',
-                            icon: Icons.fullscreen_exit_rounded,
-                            onPressed: _close,
+                          Align(
+                            alignment: Alignment.bottomCenter,
+                            child: PrivetVideoChrome(
+                              controller: controller,
+                              dense: false,
+                              playing: _playing,
+                              showSpeed: true,
+                              showSkip: true,
+                              onPlayPause: _togglePlay,
+                              onSkip: _nudge,
+                              onToggleFullscreen: _close,
+                            ),
                           ),
                         ],
                       ),
-                    ],
+                    ),
                   ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
-class _VideoChromeButton extends StatelessWidget {
-  const _VideoChromeButton({
-    required this.tooltip,
-    required this.icon,
-    required this.onPressed,
+class _PlayBadge extends StatelessWidget {
+  const _PlayBadge({
+    this.size = 52,
+    this.iconSize = 32,
+    this.onPressed,
   });
 
-  final String tooltip;
-  final IconData icon;
+  final double size;
+  final double iconSize;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final badge = Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.45),
+        shape: BoxShape.circle,
+      ),
+      child: Icon(
+        Icons.play_arrow_rounded,
+        size: iconSize,
+        color: Colors.white,
+      ),
+    );
+    if (onPressed == null) return badge;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: Material(
+        color: Colors.transparent,
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onPressed,
+          mouseCursor: SystemMouseCursors.click,
+          child: badge,
+        ),
+      ),
+    );
+  }
+}
+
+class _TopClose extends StatelessWidget {
+  const _TopClose({required this.onPressed});
+
   final VoidCallback onPressed;
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
+    return Tooltip(
+      message: 'Exit fullscreen',
       child: Material(
         color: Colors.black.withValues(alpha: 0.45),
         shape: const CircleBorder(),
         child: IconButton(
-          tooltip: tooltip,
+          tooltip: 'Exit fullscreen',
           onPressed: onPressed,
           mouseCursor: SystemMouseCursors.click,
-          icon: Icon(icon, color: Colors.white),
+          icon: const Icon(Icons.fullscreen_exit_rounded, color: Colors.white),
           iconSize: 22,
           padding: const EdgeInsets.all(6),
           constraints: const BoxConstraints(minWidth: 36, minHeight: 36),

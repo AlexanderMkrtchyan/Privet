@@ -7,6 +7,8 @@ import '../theme.dart';
 import '../util/copy_image.dart';
 import '../util/low_resource.dart';
 import '../util/media_download.dart';
+import '../util/media_kind.dart';
+import '../util/media_saved_toast.dart';
 
 /// Result of [showImageContextMenu].
 enum ImageContextAction { copy, download }
@@ -42,14 +44,16 @@ Future<void> handleImageContextMenu(
     );
     if (!context.mounted || action == null) return;
     if (action == ImageContextAction.download) {
-      final saved = await downloadMedia(url, filename: filename);
-      if (saved != null && context.mounted) {
-        final messenger =
-            messengerKey?.currentState ?? ScaffoldMessenger.maybeOf(context);
-        messenger?.showSnackBar(
-          SnackBar(content: Text('Saved to $saved')),
-        );
-      }
+      if (!context.mounted) return;
+      await downloadMediaWithToast(
+        context,
+        url: url,
+        filename: filename,
+        isVideo: looksLikeVideo(filename: filename, url: url),
+        messengerKey: messengerKey,
+        download: ({required url, filename, onProgress}) =>
+            downloadMedia(url, filename: filename, onProgress: onProgress),
+      );
       return;
     }
     final ok = await copyImageToClipboard(url, filename: filename);

@@ -19,5 +19,9 @@ void mediaCacheUnpin() {}
 
 void reportMediaCacheError(String where, String detail) {}
 
-Future<String?> downloadMediaFromCache(String url, {String? filename}) async =>
+Future<String?> downloadMediaFromCache(
+  String url, {
+  String? filename,
+  void Function(double progress)? onProgress,
+}) async =>
     null;

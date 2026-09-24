@@ -6,6 +6,7 @@ import { v4 as uuid } from 'uuid';
 import multipart from '@fastify/multipart';
 import bcrypt from 'bcryptjs';
 import { publicUser, uploadsDir, db } from '../db.js';
+import { remuxFaststart } from '../media/faststart.js';
 import {
   allowQuickJoin,
   createUser,
@@ -242,7 +243,7 @@ function emitTaskChangeMessage({ actorId, conversationId, task, action, from, to
 }
 
 const MEDIA_KINDS = new Set(['image', 'video', 'audio', 'voice', 'file', 'album']);
-const MAX_UPLOAD_BYTES = 80 * 1024 * 1024; // 80MB
+const MAX_UPLOAD_BYTES = 512 * 1024 * 1024; // 512MB
 
 function kindFromMime(mime, fallback = 'file') {
   if (!mime) return fallback;
@@ -1462,7 +1463,11 @@ export async function registerRoutes(app) {
         /* ignore */
       }
       if (err.code === 'FST_REQ_FILE_TOO_LARGE') {
-        return reply.code(413).send({ error: 'File too large (max 80MB)' });
+        return reply.code(413).send({ error: 'File too large (max 512MB)' });
+      }
+      if (err.code === 'ENOSPC') {
+        request.log.error({ err }, 'upload failed: disk full');
+        return reply.code(507).send({ error: 'Server storage is full' });
       }
       throw err;
     }
@@ -1473,7 +1478,17 @@ export async function registerRoutes(app) {
       } catch {
         /* ignore */
       }
-      return reply.code(413).send({ error: 'File too large (max 80MB)' });
+      return reply.code(413).send({ error: 'File too large (max 512MB)' });
+    }
+
+    if (kindFromMime(mime, 'file') === 'video') {
+      // Optional playback help. Never block the upload ACK — ffmpeg hanging
+      // here made even small videos look like they never uploaded.
+      setImmediate(() => {
+        remuxFaststart(dest).catch((err) => {
+          request.log.warn({ err }, 'faststart remux failed');
+        });
+      });
     }
 
     const stat = fs.statSync(dest);

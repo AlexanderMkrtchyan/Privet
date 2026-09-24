@@ -6,6 +6,8 @@ import '../api/client.dart';
 import '../models.dart';
 import '../theme.dart';
 import '../util/media_cache.dart';
+import '../util/media_kind.dart';
+import '../util/media_saved_toast.dart';
 import '../util/perf.dart';
 import 'cached_media_image.dart';
 import 'image_lightbox.dart';
@@ -114,14 +116,14 @@ Future<void> saveMediaFromCache(
   String url, {
   required String filename,
 }) async {
-  final saved = await downloadMediaFromCache(url, filename: filename);
-  if (!context.mounted) return;
-  if (saved != null) {
-    final messenger = ScaffoldMessenger.maybeOf(context);
-    messenger?.showSnackBar(
-      SnackBar(content: Text('Saved to $saved')),
-    );
-  }
+  await downloadMediaWithToast(
+    context,
+    url: url,
+    filename: filename,
+    isVideo: looksLikeVideo(filename: filename, url: url),
+    download: ({required url, filename, onProgress}) =>
+        downloadMediaFromCache(url, filename: filename, onProgress: onProgress),
+  );
 }
 
 /// Teams-style Photos / Files browser over the conversation's full shared
@@ -565,7 +567,12 @@ class _FilesList extends StatelessWidget {
                 ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                  child: InlineVideoPlayer(url: url),
+                  child: InlineVideoPlayer(
+                    url: url,
+                    width: 640,
+                    height: 360,
+                    autoInit: true,
+                  ),
                 ),
               ],
             ),

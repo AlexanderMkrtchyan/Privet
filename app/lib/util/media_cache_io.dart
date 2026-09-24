@@ -7,6 +7,8 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'video_cache.dart';
+
 /// Max media entries kept on disk, oldest evicted first (LRU).
 const int kMediaCacheMaxEntries = 20;
 
@@ -165,18 +167,119 @@ Future<void> mediaCacheWarmBytes(String url, Uint8List bytes) async {
 /// Native platforms have no console diagnostic hook — no-op.
 void reportMediaCacheError(String where, String detail) {}
 
-Future<String?> downloadMediaFromCache(String url, {String? filename}) async {
-  final bytes = await mediaCacheGetOrFetch(url);
-  if (bytes == null) return null;
+Future<String?> downloadMediaFromCache(
+  String url, {
+  String? filename,
+  void Function(double progress)? onProgress,
+}) async {
+  final cachedVideo = videoCachePathSync(url);
+  if (cachedVideo != null) {
+    onProgress?.call(1);
+    return _copyToDownloads(cachedVideo, filename: filename, url: url);
+  }
+  final cached = await mediaCacheGet(url);
+  if (cached != null) {
+    onProgress?.call(1);
+    return _writeDownloads(cached, filename: filename, url: url);
+  }
+  return _streamToDownloads(url, filename: filename, onProgress: onProgress);
+}
+
+Future<Directory> _downloadsDir() async =>
+    await getDownloadsDirectory() ?? await getApplicationSupportDirectory();
+
+Future<String?> _writeDownloads(
+  Uint8List bytes, {
+  String? filename,
+  required String url,
+}) async {
   try {
-    final dir = await getDownloadsDirectory() ??
-        await getApplicationSupportDirectory();
+    final dir = await _downloadsDir();
     final name = _safeDownloadName(filename ?? _nameFromUrl(url));
     final file = File(p.join(dir.path, name));
     await file.writeAsBytes(bytes, flush: true);
     return file.path;
   } catch (_) {
     return null;
+  }
+}
+
+Future<String?> _copyToDownloads(
+  String sourcePath, {
+  String? filename,
+  required String url,
+}) async {
+  try {
+    final dir = await _downloadsDir();
+    final name = _safeDownloadName(filename ?? _nameFromUrl(url));
+    final dest = File(p.join(dir.path, name));
+    await File(sourcePath).copy(dest.path);
+    return dest.path;
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<String?> _streamToDownloads(
+  String url, {
+  String? filename,
+  void Function(double progress)? onProgress,
+}) async {
+  final dir = await _downloadsDir();
+  final name = _safeDownloadName(filename ?? _nameFromUrl(url));
+  final dest = File(p.join(dir.path, name));
+  final part = File('${dest.path}.part');
+  final client = http.Client();
+  try {
+    final request = http.Request('GET', Uri.parse(url));
+    final response = await client
+        .send(request)
+        .timeout(const Duration(minutes: 10));
+    if (response.statusCode != 200 && response.statusCode != 206) {
+      return null;
+    }
+    final total = response.contentLength;
+    final sink = part.openWrite();
+    var received = 0;
+    try {
+      await for (final chunk in response.stream) {
+        received += chunk.length;
+        sink.add(chunk);
+        if (total != null && total > 0) {
+          onProgress?.call((received / total).clamp(0.0, 1.0));
+        }
+      }
+      await sink.close();
+    } catch (_) {
+      try {
+        await sink.close();
+      } catch (_) {}
+      try {
+        await part.delete();
+      } catch (_) {}
+      return null;
+    }
+    if (received == 0) {
+      try {
+        await part.delete();
+      } catch (_) {}
+      return null;
+    }
+    if (await dest.exists()) {
+      try {
+        await dest.delete();
+      } catch (_) {}
+    }
+    await part.rename(dest.path);
+    onProgress?.call(1);
+    return dest.path;
+  } catch (_) {
+    try {
+      if (await part.exists()) await part.delete();
+    } catch (_) {}
+    return null;
+  } finally {
+    client.close();
   }
 }
 

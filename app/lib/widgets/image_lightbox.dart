@@ -13,6 +13,8 @@ import '../util/copy_image.dart';
 import '../util/image_context_menu.dart';
 import '../util/low_resource.dart';
 import '../util/media_cache.dart';
+import '../util/media_kind.dart';
+import '../util/media_saved_toast.dart';
 import '../util/web_select_cursor.dart';
 import 'cached_media_image.dart';
 import 'image_annotation.dart';
@@ -206,12 +208,17 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   /// save is instant instead of a fresh server download. Confirms in the
   /// dialog's own messenger — the root one is hidden behind this overlay.
   Future<void> _downloadCurrent() async {
-    final saved = await downloadMediaFromCache(_url, filename: _downloadName);
-    if (!mounted || saved == null) return;
-    _snackKey.currentState?.showSnackBar(
-      SnackBar(
-        content: Text('Saved to $saved'),
-        behavior: SnackBarBehavior.floating,
+    await downloadMediaWithToast(
+      context,
+      url: _url,
+      filename: _downloadName,
+      isVideo: looksLikeVideo(filename: _downloadName, url: _url),
+      messengerKey: _snackKey,
+      download: ({required url, filename, onProgress}) =>
+          downloadMediaFromCache(
+        url,
+        filename: filename,
+        onProgress: onProgress,
       ),
     );
   }

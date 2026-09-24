@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 
 import 'app_image_clipboard.dart';
 import 'clipboard_files.dart';
+import 'media_kind.dart';
 import 'remote_input.dart';
 
 void Function(PickedBytes file)? _onImage;
@@ -13,6 +15,29 @@ KeyEventCallback? _keyHandler;
 var _pasteInFlight = false;
 
 Future<PickedBytes?> pickFileNative() async => null;
+
+Future<PickedBytes?> pickedBytesFromRaw({
+  required Uint8List? bytes,
+  String? path,
+  required String filename,
+  String? mimeType,
+}) async {
+  var data = bytes;
+  if (data == null || data.isEmpty) {
+    if (path == null || path.isEmpty) return null;
+    try {
+      data = await File(path).readAsBytes();
+    } catch (_) {
+      return null;
+    }
+  }
+  if (data.isEmpty) return null;
+  return PickedBytes(
+    bytes: data,
+    filename: filename,
+    mimeType: mimeType ?? mimeForFilename(filename),
+  );
+}
 
 Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) async {
   final result = await FilePicker.platform.pickFiles(
@@ -24,24 +49,14 @@ Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) async {
   final out = <PickedBytes>[];
   for (final file in result.files) {
     if (out.length >= maxFiles) break;
-    final bytes = file.bytes;
-    if (bytes == null || bytes.isEmpty) continue;
-    out.add(PickedBytes(
-      bytes: bytes,
+    final picked = await pickedBytesFromRaw(
+      bytes: file.bytes,
+      path: file.path,
       filename: file.name,
-      mimeType: _mimeFor(file.name),
-    ));
+    );
+    if (picked != null) out.add(picked);
   }
   return out;
-}
-
-String _mimeFor(String name) {
-  final lower = name.toLowerCase();
-  if (lower.endsWith('.png')) return 'image/png';
-  if (lower.endsWith('.gif')) return 'image/gif';
-  if (lower.endsWith('.webp')) return 'image/webp';
-  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
-  return 'application/octet-stream';
 }
 
 int bindImagePaste(void Function(PickedBytes file) onImage) {

@@ -5,5 +5,9 @@ import 'media_download_stub.dart'
 /// Downloads [url] with optional [filename]. On native platforms the file is
 /// saved straight to the OS Downloads folder and the saved path is returned;
 /// on web the browser handles the download itself and null is returned.
-Future<String?> downloadMedia(String url, {String? filename}) =>
-    impl.downloadMedia(url, filename: filename);
+Future<String?> downloadMedia(
+  String url, {
+  String? filename,
+  void Function(double progress)? onProgress,
+}) =>
+    impl.downloadMedia(url, filename: filename, onProgress: onProgress);

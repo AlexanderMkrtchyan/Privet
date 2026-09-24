@@ -2,6 +2,20 @@ import 'dart:typed_data';
 
 import 'clipboard_files.dart';
 
+Future<PickedBytes?> pickedBytesFromRaw({
+  required Uint8List? bytes,
+  String? path,
+  required String filename,
+  String? mimeType,
+}) async {
+  if (bytes == null || bytes.isEmpty) return null;
+  return PickedBytes(
+    bytes: bytes,
+    filename: filename,
+    mimeType: mimeType ?? 'application/octet-stream',
+  );
+}
+
 Future<PickedBytes?> pickFileNative() async => null;
 
 Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) async =>

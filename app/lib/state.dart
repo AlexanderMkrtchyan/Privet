@@ -50,7 +50,10 @@ import 'util/composer_media_attach.dart';
 import 'util/copy_image.dart';
 import 'util/incoming_call_android.dart';
 import 'util/media_cache.dart';
+import 'util/media_kind.dart';
+import 'util/media_transfer_progress.dart';
 import 'util/mobile_app_lifecycle.dart';
+import 'util/video_cache.dart';
 import 'util/shared_intent.dart';
 import 'util/web_notifications.dart';
 
@@ -4256,7 +4259,18 @@ class PrivetState extends ChangeNotifier {
 
   String _friendlyError(Object e) {
     if (e is ApiException) return e.message;
-    return e.toString();
+    final text = e.toString();
+    if (text.contains('SocketException') ||
+        text.contains('Connection reset') ||
+        text.contains('Connection closed') ||
+        text.contains('Broken pipe')) {
+      return 'Could not reach the server — try again';
+    }
+    if (text.contains('Unexpected character') ||
+        text.contains('FormatException')) {
+      return 'Upload failed — the server rejected the file';
+    }
+    return text;
   }
 
   Future<void> logout() async {
@@ -5888,18 +5902,22 @@ Examples:
       expandEmoticons((caption ?? '').trim()),
       chatFontFamily,
     );
+    final placeholderKind = files.length > 1
+        ? 'album'
+        : mediaKindFromMime(files.first.mimeType, filename: files.first.filename);
     final placeholder = ChatMessage(
       id: clientId,
       conversationId: chatId,
       body: body,
-      kind: files.length > 1 ? 'album' : 'image',
+      kind: placeholderKind,
       attachments: [
         for (final f in files)
           MediaAttachment(
             mediaUrl: '',
-            kind: 'image',
+            kind: mediaKindFromMime(f.mimeType, filename: f.filename),
             mimeType: f.mimeType,
             fileName: f.filename,
+            fileSize: f.bytes.length,
           ),
       ],
       createdAt: DateTime.now(),
@@ -5914,12 +5932,16 @@ Examples:
 
     try {
       final uploaded = <MediaAttachment>[];
-      for (final file in files) {
+      for (var i = 0; i < files.length; i++) {
+        final file = files[i];
         final up = await _api.uploadBytes(
           bytes: file.bytes,
           filename: file.filename,
           mimeType: file.mimeType,
           asVoice: asVoice && files.length == 1,
+          onProgress: (p) {
+            setMediaTransferProgress(clientId, (i + p) / files.length);
+          },
         );
         uploaded.add(
           MediaAttachment(
@@ -5935,13 +5957,17 @@ Examples:
         // the shared-media folder render from the same cache key, so the just-
         // sent image appears instantly instead of re-downloading what we just
         // uploaded.
+        final absolute = _api.absoluteMediaUrl(up.mediaUrl);
         if (up.kind == 'image') {
           await mediaCacheWarmBytes(
-            _api.absoluteMediaUrl(up.mediaUrl),
+            absolute,
             Uint8List.fromList(file.bytes),
           );
+        } else if (up.kind == 'video') {
+          await videoCacheWarmBytes(absolute, file.bytes);
         }
       }
+      setMediaTransferProgress(clientId, 1);
 
       final kind = uploaded.length > 1 ? 'album' : uploaded.first.kind;
       final first = uploaded.first;
@@ -5989,6 +6015,8 @@ Examples:
     } finally {
       uploading = false;
       notifyListeners();
+      // After the pending bubble unmounts — disposing first throws.
+      clearMediaTransferProgress(clientId);
     }
   }
 

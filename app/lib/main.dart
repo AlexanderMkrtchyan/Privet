@@ -16,6 +16,7 @@ import 'util/desktop_single_instance.dart';
 import 'util/desktop_tray.dart';
 import 'util/low_resource.dart';
 import 'util/media_cache.dart';
+import 'util/video_cache.dart';
 import 'util/mobile_app_lifecycle.dart';
 import 'util/mobile_push_background.dart';
 import 'util/mobile_push_config.dart';
@@ -39,6 +40,20 @@ Future<void> main() async {
       'platforms': ['windows', 'linux'],
       if (defaultTargetPlatform == TargetPlatform.linux)
         'video.decoders': const ['CUDA', 'VDPAU', 'FFmpeg', 'dav1d'],
+      // Cap the texture so a 4K chat clip is not composited at native size
+      // into a 260px bubble (the main source of Linux stutter).
+      'maxWidth': 1920,
+      'maxHeight': 1080,
+      'player': <String, String>{
+        'avio.reconnect': '1',
+        'avio.reconnect_delay_max': '7',
+        'demux.buffer.ranges': '1',
+        'demux.buffer.protocols': 'file,http,https',
+        // Fast-start MP4s only need a small probe. A large analyzeduration
+        // waits on extra megabytes before the first frame.
+        'avformat.probesize': '65536',
+        'avformat.analyzeduration': '500000',
+      },
     });
   }
   if (MobilePushConfig.isConfigured) {
@@ -69,6 +84,7 @@ Future<void> main() async {
   // files open instantly without hitting the server. Best-effort and
   // non-blocking — the UI starts regardless.
   unawaited(initMediaCache());
+  unawaited(initVideoCache());
   // Flutter web enables the browser menu by default (Inspect / Copy / etc.).
   // Must stay disabled or SelectableText right-click opens Chrome's menu.
   if (kIsWeb) {
