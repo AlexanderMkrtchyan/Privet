@@ -3377,6 +3377,15 @@ class _ConversationPaneState extends State<ConversationPane>
       return true;
     }
 
+    final keys = HardwareKeyboard.instance;
+    // Ctrl/Cmd+End → newest message (same as the down-arrow button).
+    if ((keys.isControlPressed || keys.isMetaPressed) &&
+        event.logicalKey == LogicalKeyboardKey.end) {
+      if (ModalRoute.of(context)?.isCurrent != true) return false;
+      _scrollToEnd();
+      return true;
+    }
+
     // Mouse-drag select + mouseup outside often leaves an unfocused (inactive)
     // selection. Still honor Backspace/Delete against that range.
     final sel = _controller.selection;
@@ -3397,7 +3406,6 @@ class _ConversationPaneState extends State<ConversationPane>
     }
 
     if (event.logicalKey != LogicalKeyboardKey.keyC) return false;
-    final keys = HardwareKeyboard.instance;
     if (!keys.isControlPressed && !keys.isMetaPressed) return false;
     // Let TextField handle its own range selection.
     if (_composerFocus.hasFocus) {
@@ -4769,6 +4777,10 @@ class _ConversationPaneState extends State<ConversationPane>
     final keys = HardwareKeyboard.instance;
     // Ctrl/Cmd+B → bold, Ctrl/Cmd+I → italic on the composer selection.
     if (keys.isControlPressed || keys.isMetaPressed) {
+      if (event.logicalKey == LogicalKeyboardKey.end) {
+        _scrollToEnd();
+        return KeyEventResult.handled;
+      }
       if (event.logicalKey == LogicalKeyboardKey.keyB) {
         _applyComposerFormat(bold: true);
         return KeyEventResult.handled;
@@ -5712,58 +5724,11 @@ class _ConversationPaneState extends State<ConversationPane>
                         );
                       },
                     ),
-                    Positioned(
-                      right: 16,
-                      bottom: 16,
-                      child: RepaintBoundary(
-                        child: AnimatedSlide(
-                          duration: privetAnim(
-                            const Duration(milliseconds: 180),
-                          ),
-                          offset: _showJumpToBottom
-                              ? Offset.zero
-                              : const Offset(0, 1.5),
-                          child: AnimatedOpacity(
-                            duration: privetAnim(
-                              const Duration(milliseconds: 180),
-                            ),
-                            opacity: _showJumpToBottom ? 1 : 0,
-                            child: IgnorePointer(
-                              ignoring: !_showJumpToBottom,
-                              child: Material(
-                                color: PrivetTheme.panelElevated,
-                                shape: CircleBorder(
-                                  side: BorderSide(color: PrivetTheme.line),
-                                ),
-                                elevation: privetElevation(3),
-                                child: InkWell(
-                                  customBorder: const CircleBorder(),
-                                  onTap: _scrollToEnd,
-                                  // InkWell's default (adaptiveClickable) resolves
-                                  // to the arrow cursor on native desktop; match
-                                  // the send button's explicit pointer.
-                                  mouseCursor: SystemMouseCursors.click,
-                                  child: SizedBox(
-                                    width: 44,
-                                    height: 44,
-                                    child: Icon(
-                                      Icons.keyboard_arrow_down_rounded,
-                                      color: PrivetTheme.paper,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    // Ctrl+scroll over the chat zooms the message font without
-                    // scrolling the list. Topmost in the Stack so it registers
-                    // with the pointer-signal resolver before the Scrollable.
-                    // Native desktop delivers Ctrl+wheel as a scroll signal; the
-                    // web engine converts it to a scale signal (and preventDefaults
-                    // the browser page zoom when a widget handles it).
+                    // Ctrl+scroll zooms the message font. Above the list so
+                    // it wins the pointer-signal resolver, but *under* the
+                    // jump-to-latest button — a full-screen translucent
+                    // Listener on top eats mouse clicks on older Windows
+                    // (DPI / embedding hit-test bugs).
                     Positioned.fill(
                       child: Listener(
                         behavior: HitTestBehavior.translucent,
@@ -5793,6 +5758,57 @@ class _ConversationPaneState extends State<ConversationPane>
                                 ),
                               );
                         },
+                      ),
+                    ),
+                    Positioned(
+                      right: 16,
+                      bottom: 16,
+                      child: RepaintBoundary(
+                        child: AnimatedSlide(
+                          duration: privetAnim(
+                            const Duration(milliseconds: 180),
+                          ),
+                          offset: _showJumpToBottom
+                              ? Offset.zero
+                              : const Offset(0, 1.5),
+                          child: AnimatedOpacity(
+                            duration: privetAnim(
+                              const Duration(milliseconds: 180),
+                            ),
+                            opacity: _showJumpToBottom ? 1 : 0,
+                            child: IgnorePointer(
+                              ignoring: !_showJumpToBottom,
+                              child: Tooltip(
+                                message: 'Jump to latest (Ctrl+End)',
+                                child: Material(
+                                  color: PrivetTheme.panelElevated,
+                                  shape: CircleBorder(
+                                    side: BorderSide(color: PrivetTheme.line),
+                                  ),
+                                  elevation: privetElevation(3),
+                                  // Listener/onPointerDown, not InkWell onTap:
+                                  // mouse tap slop is ~1px, and old Windows +
+                                  // DPI scaling often cancels the tap.
+                                  child: Listener(
+                                    behavior: HitTestBehavior.opaque,
+                                    onPointerDown: (_) => _scrollToEnd(),
+                                    child: MouseRegion(
+                                      cursor: SystemMouseCursors.click,
+                                      child: SizedBox(
+                                        width: 44,
+                                        height: 44,
+                                        child: Icon(
+                                          Icons.keyboard_arrow_down_rounded,
+                                          color: PrivetTheme.paper,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -8569,16 +8585,31 @@ class _ConversationPaneState extends State<ConversationPane>
     return DateFormat('MMMM d, yyyy').format(local);
   }
 
+  /// Reverse ListView: offset 0 is the newest message.
+  ///
+  /// Prefer [ScrollPosition.jumpTo] over [animateTo]. Driven scroll
+  /// animations need vsync ticks; those can stall on older Windows boxes
+  /// (see the v0.1.30 UI/platform thread workaround), so a 220ms
+  /// [animateTo] finishes at the old offset and the down-arrow looks dead.
+  /// [jumpTo] applies the offset synchronously.
   void _scrollToEnd() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) {
-        // reverse: true ListView — offset 0 is the newest message
-        _scroll.animateTo(
-          0,
-          duration: privetAnim(const Duration(milliseconds: 220)),
-          curve: Curves.easeOut,
-        );
+    void snap() {
+      if (!mounted || !_scroll.hasClients) return;
+      final pos = _scroll.position;
+      if (pos.pixels != 0) {
+        pos.jumpTo(0);
       }
+    }
+
+    snap();
+    if (_showJumpToBottom) {
+      setState(() => _showJumpToBottom = false);
+    }
+    // Variable-height bubbles can shift extent after a long jump; snap
+    // again once the newest rows have laid out.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      snap();
+      WidgetsBinding.instance.addPostFrameCallback((_) => snap());
     });
   }
 }
