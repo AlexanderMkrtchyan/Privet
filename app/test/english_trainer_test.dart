@@ -82,6 +82,55 @@ void main() {
       expect(c.issues, hasLength(2));
     });
 
+    test('unapplied issues use the native rewrite as coach version', () {
+      final c = TrainerCheck.parse(
+        'I need your help with this',
+        '{"issues":[{"wrong":"NOT_HERE","right":"x","type":"word_choice","severity":"major","why":"Nope.","example":"Can you help?"}],"natural":"Can you give me a hand with this?"}',
+      )!;
+      expect(c.corrected, 'Can you give me a hand with this?');
+      expect(c.natural, isEmpty);
+      expect(trainerFixedSendText(c), 'Can you give me a hand with this?');
+    });
+
+    test('Send fixed falls back to native when coach version is still mine', () {
+      const check = TrainerCheck(
+        original: 'I need your help',
+        corrected: 'I need your help',
+        issues: [],
+        natural: 'Can you give me a hand?',
+      );
+      expect(trainerFixedSendText(check), 'Can you give me a hand?');
+    });
+
+    test('applyTrainerFixes returns null when nothing actually changed', () {
+      expect(
+        applyTrainerFixes('hello there', const [
+          TrainerIssue(
+            wrong: 'MISSING',
+            right: 'x',
+            type: 'other',
+            major: true,
+            why: '',
+            example: '',
+          ),
+        ]),
+        isNull,
+      );
+      expect(
+        applyTrainerFixes('hello there', const [
+          TrainerIssue(
+            wrong: '',
+            right: 'please',
+            type: 'missing_word',
+            major: true,
+            why: '',
+            example: '',
+          ),
+        ]),
+        isNull,
+      );
+    });
+
     test('accepts a bare issues array', () {
       final c = TrainerCheck.parse(
         'I goed',

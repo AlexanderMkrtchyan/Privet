@@ -65,14 +65,39 @@ Future<void> videoCacheWarmBytes(String url, List<int> bytes) async {
   final dest = File(p.join(dir.path, name));
   try {
     await dest.writeAsBytes(bytes, flush: true);
-    await _synchronized(() async {
-      final old = _find(url);
-      if (old != null) _entries.remove(old);
-      _entries.add(_CacheEntry(url, name, bytes.length));
-      await _prune();
-      await _saveIndex();
-    });
+    await _indexCached(url, name, bytes.length);
   } catch (_) {}
+}
+
+Future<void> videoCacheWarmFile(String url, String path) async {
+  if (url.isEmpty || path.isEmpty) return;
+  final src = File(path);
+  if (!await src.exists()) return;
+  final size = await src.length();
+  if (size == 0 || size > _maxEntryBytes) return;
+  await _ensureInit();
+  final dir = _cacheDir;
+  if (dir == null) return;
+  final name = _fileNameFor(url);
+  final dest = File(p.join(dir.path, name));
+  try {
+    if (p.equals(src.path, dest.path)) {
+      await _indexCached(url, name, size);
+      return;
+    }
+    await src.copy(dest.path);
+    await _indexCached(url, name, size);
+  } catch (_) {}
+}
+
+Future<void> _indexCached(String url, String name, int size) {
+  return _synchronized(() async {
+    final old = _find(url);
+    if (old != null) _entries.remove(old);
+    _entries.add(_CacheEntry(url, name, size));
+    await _prune();
+    await _saveIndex();
+  });
 }
 
 Future<String?> videoCacheEnsure(String url) async {

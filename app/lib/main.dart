@@ -216,6 +216,7 @@ class _PrivetAppState extends State<PrivetApp> with WidgetsBindingObserver {
       unawaited(_state.cancelAndroidRingOnForeground());
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
+      _state.onAppPaused();
       unawaited(_state.postAndroidRingWhenBackgrounded());
     }
   }

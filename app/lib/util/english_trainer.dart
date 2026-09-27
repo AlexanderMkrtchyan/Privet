@@ -155,10 +155,10 @@ class TrainerCheck {
     var natural = map['natural']?.toString().trim() ?? '';
     final applied = applyTrainerFixes(original, issues);
 
-    late final String corrected;
+    var corrected = original;
     if (issues.isEmpty) {
       corrected = original;
-    } else if (applied != null) {
+    } else if (applied != null && !_sameLoose(applied, original)) {
       corrected = applied;
       // Model put a freer rewrite in `corrected` — keep it as the native tip.
       if (modelCorrected.isNotEmpty &&
@@ -167,10 +167,13 @@ class TrainerCheck {
           (natural.isEmpty || _sameLoose(natural, applied))) {
         natural = modelCorrected;
       }
-    } else if (modelCorrected.isNotEmpty) {
+    } else if (modelCorrected.isNotEmpty &&
+        !_sameLoose(modelCorrected, original)) {
       corrected = modelCorrected;
-    } else {
-      corrected = original;
+    } else if (natural.isNotEmpty && !_sameLoose(natural, original)) {
+      // Patches did not land — still offer the rewrite as Coach's version
+      // so "Send fixed" does not ship the original.
+      corrected = natural;
     }
 
     return TrainerCheck(
@@ -194,16 +197,16 @@ class TrainerCheck {
 
 /// Apply each issue's wrong→right edit to [original].
 ///
-/// Applies every span that can be located. Returns null only when the model
-/// listed `wrong` text and none of it appears in the original (so a full
-/// model rewrite — if any — should be used instead).
+/// Applies every span that can be located. Returns null when nothing
+/// actually changed, so a model rewrite / native tip can be used instead
+/// of shipping the original as "fixed".
 String? applyTrainerFixes(String original, List<TrainerIssue> issues) {
   if (issues.isEmpty) return original;
   final actionable = [
     for (var i = 0; i < issues.length; i++)
       if (issues[i].wrong.trim().isNotEmpty) i,
   ];
-  if (actionable.isEmpty) return original;
+  if (actionable.isEmpty) return null;
   final spans = trainerIssueSpans(original, issues);
   if (spans.isEmpty) return null;
   final ordered = [...spans]..sort((a, b) => b.start.compareTo(a.start));
@@ -211,7 +214,20 @@ String? applyTrainerFixes(String original, List<TrainerIssue> issues) {
   for (final s in ordered) {
     out = out.replaceRange(s.start, s.end, issues[s.issue].right);
   }
-  return out;
+  return out == original ? null : out;
+}
+
+/// Text the "Send fixed" action should transmit.
+///
+/// Prefers the surgical coach version; if that is still the original,
+/// uses the native rewrite so the button never silently sends "mine".
+String trainerFixedSendText(TrainerCheck check) {
+  final original = check.original.trim();
+  final fixed = check.corrected.trim();
+  if (fixed.isNotEmpty && fixed != original) return check.corrected;
+  final native = check.natural.trim();
+  if (native.isNotEmpty) return native;
+  return check.corrected.isNotEmpty ? check.corrected : check.original;
 }
 
 /// Where each issue's `wrong` text sits inside [text] (non-overlapping, in order).

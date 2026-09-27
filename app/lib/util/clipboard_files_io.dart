@@ -30,14 +30,14 @@ Future<PickedBytes?> pickImageNative() async {
     final file = await openFile(acceptedTypeGroups: const [_imageTypeGroup]);
     if (file == null) return null;
     return pickedBytesFromRaw(
-      bytes: await file.readAsBytes(),
+      bytes: null,
       path: file.path,
       filename: file.name,
     );
   }
   final result = await FilePicker.platform.pickFiles(
     type: FileType.image,
-    withData: true,
+    withData: false,
   );
   final files = result?.files;
   if (files == null || files.isEmpty) return null;
@@ -47,6 +47,7 @@ Future<PickedBytes?> pickImageNative() async {
     path: file.path,
     filename: file.name,
     mimeType: file.extension == 'png' ? 'image/png' : 'image/jpeg',
+    fileSize: file.size,
   );
 }
 
@@ -55,55 +56,99 @@ Future<PickedBytes?> pickedBytesFromRaw({
   String? path,
   required String filename,
   String? mimeType,
+  int? fileSize,
 }) async {
-  var data = bytes;
-  if (data == null || data.isEmpty) {
-    if (path == null || path.isEmpty) return null;
+  final name = filename.isEmpty ? 'attachment.bin' : filename;
+  final mime = mimeType ?? mimeForFilename(name);
+  var data = (bytes != null && bytes.isNotEmpty) ? bytes : null;
+  var size = data?.length ?? fileSize ?? 0;
+  String? resolvedPath = (path != null && path.isNotEmpty) ? path : null;
+
+  if (resolvedPath != null) {
     try {
-      data = await File(path).readAsBytes();
+      final file = File(resolvedPath);
+      if (!await file.exists()) {
+        resolvedPath = null;
+      } else {
+        size = await file.length();
+      }
     } catch (_) {
-      return null;
+      resolvedPath = null;
     }
   }
-  if (data.isEmpty) return null;
+
+  if (size <= 0 && data == null && resolvedPath == null) return null;
+  ensureUploadFits(size);
+
+  final kind = mediaKindFromMime(mime, filename: name);
+  final loadPreview = data == null &&
+      resolvedPath != null &&
+      kind == 'image' &&
+      size <= kMaxInMemoryAttachBytes;
+  if (loadPreview) {
+    try {
+      data = await File(resolvedPath).readAsBytes();
+      if (data.isNotEmpty) size = data.length;
+    } catch (_) {
+      data = null;
+    }
+  }
+
+  if (data == null && resolvedPath == null) return null;
   return PickedBytes(
     bytes: data,
-    filename: filename,
-    mimeType: mimeType ?? mimeForFilename(filename),
+    path: resolvedPath,
+    filename: name,
+    mimeType: mime,
+    fileSize: size,
   );
 }
 
 Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) async {
+  FileTooLargeException? tooLarge;
   if (Platform.isLinux) {
     final files = await openFiles();
     final out = <PickedBytes>[];
     for (final file in files) {
       if (out.length >= maxFiles) break;
-      final picked = await pickedBytesFromRaw(
-        bytes: await file.readAsBytes(),
-        path: file.path,
-        filename: file.name,
-      );
-      if (picked != null) out.add(picked);
+      try {
+        final picked = await pickedBytesFromRaw(
+          bytes: null,
+          path: file.path,
+          filename: file.name,
+        );
+        if (picked != null) out.add(picked);
+      } on FileTooLargeException catch (e) {
+        tooLarge = e;
+      }
     }
+    if (out.isEmpty && tooLarge != null) throw tooLarge;
     return out;
   }
+  // Never withData: true — Android copies the whole video into RAM and
+  // dies when the user picks from Downloads / Videos.
   final result = await FilePicker.platform.pickFiles(
-    withData: true,
+    withData: false,
     type: FileType.any,
-    allowMultiple: true,
+    allowMultiple: maxFiles > 1,
   );
   if (result == null || result.files.isEmpty) return const [];
   final out = <PickedBytes>[];
   for (final file in result.files) {
     if (out.length >= maxFiles) break;
-    final picked = await pickedBytesFromRaw(
-      bytes: file.bytes,
-      path: file.path,
-      filename: file.name,
-    );
-    if (picked != null) out.add(picked);
+    try {
+      final picked = await pickedBytesFromRaw(
+        bytes: file.bytes,
+        path: file.path,
+        filename: file.name,
+        fileSize: file.size,
+      );
+      if (picked != null) out.add(picked);
+    } on FileTooLargeException catch (e) {
+      tooLarge = e;
+    }
   }
+  if (out.isEmpty && tooLarge != null) throw tooLarge;
   return out;
 }
 

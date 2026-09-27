@@ -791,8 +791,27 @@ class ApiClient {
     required String mimeType,
     bool asVoice = false,
     void Function(double progress)? onProgress,
+  }) {
+    return uploadStream(
+      stream: _progressByteStream(bytes, onProgress),
+      length: bytes.length,
+      filename: filename,
+      mimeType: mimeType,
+      asVoice: asVoice,
+      onProgress: onProgress,
+    );
+  }
+
+  /// Streams the body so a 256MB+ video never has to sit in RAM twice.
+  Future<MediaUpload> uploadStream({
+    required Stream<List<int>> stream,
+    required int length,
+    required String filename,
+    required String mimeType,
+    bool asVoice = false,
+    void Function(double progress)? onProgress,
   }) async {
-    if (bytes.length > kMaxUploadBytes) {
+    if (length > kMaxUploadBytes) {
       throw ApiException(413, 'File too large (max 512MB)');
     }
     final uri = _u('/uploads').replace(
@@ -813,8 +832,8 @@ class ApiClient {
     req.files.add(
       http.MultipartFile(
         'file',
-        _progressByteStream(bytes, onProgress),
-        bytes.length,
+        http.ByteStream(stream),
+        length,
         filename: filename.isEmpty ? 'attachment.bin' : filename,
         contentType: contentType,
       ),
@@ -864,25 +883,26 @@ class ApiClient {
 
   /// Yields [bytes] in chunks so [onProgress] can track the upload body.
   /// Caps at 0.97 until the server ACK — the last 3% is the response.
-  static http.ByteStream _progressByteStream(
+  static Stream<List<int>> _progressByteStream(
     List<int> bytes,
     void Function(double progress)? onProgress,
   ) {
     final total = bytes.length;
     if (total == 0) {
       onProgress?.call(1);
-      return http.ByteStream.fromBytes(bytes);
+      return Stream<List<int>>.fromIterable([Uint8List(0)]);
     }
+    final data = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
     const chunkSize = 64 * 1024;
     Stream<List<int>> chunks() async* {
       for (var offset = 0; offset < total; offset += chunkSize) {
         final end = math.min(offset + chunkSize, total);
-        yield bytes.sublist(offset, end);
+        yield Uint8List.sublistView(data, offset, end);
         onProgress?.call((end / total * 0.97).clamp(0.0, 0.97));
       }
     }
 
-    return http.ByteStream(chunks());
+    return chunks();
   }
 
   Map<String, dynamic> _decode(http.Response res) {

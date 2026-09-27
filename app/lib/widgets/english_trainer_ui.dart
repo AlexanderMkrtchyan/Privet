@@ -222,6 +222,9 @@ class _TrainerReviewDialogState extends State<_TrainerReviewDialog> {
 
   TrainerCheck get _c => widget.check;
 
+  bool get _hasFixed => _c.corrected.trim() != _c.original.trim();
+  bool get _hasNative => _c.natural.trim().isNotEmpty;
+
   @override
   void initState() {
     super.initState();
@@ -262,8 +265,12 @@ class _TrainerReviewDialogState extends State<_TrainerReviewDialog> {
       } else if (HardwareKeyboard.instance.isControlPressed ||
           HardwareKeyboard.instance.isMetaPressed) {
         _close(TrainerOutcome.sentMine);
-      } else {
+      } else if (_hasFixed) {
         _close(TrainerOutcome.sentFixed);
+      } else if (_hasNative) {
+        _close(TrainerOutcome.sentNatural);
+      } else {
+        _close(TrainerOutcome.sentMine);
       }
       return KeyEventResult.handled;
     }
@@ -485,7 +492,7 @@ class _TrainerReviewDialogState extends State<_TrainerReviewDialog> {
                             children: [Text('Send mine'), _Kbd('Ctrl ⏎')],
                           ),
                         ),
-                        if (_c.natural.trim().isNotEmpty)
+                        if (_hasNative && _hasFixed)
                           OutlinedButton.icon(
                             onPressed: () =>
                                 _close(TrainerOutcome.sentNatural),
@@ -495,17 +502,37 @@ class _TrainerReviewDialogState extends State<_TrainerReviewDialog> {
                             ),
                             label: const Text('Send native'),
                           ),
-                        FilledButton.icon(
-                          onPressed: () => _close(TrainerOutcome.sentFixed),
-                          icon: const Icon(Icons.auto_fix_high_rounded, size: 18),
-                          label: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Text('Send fixed'),
-                              _Kbd('⏎', color: PrivetTheme.onAccent),
-                            ],
+                        if (_hasNative && !_hasFixed)
+                          FilledButton.icon(
+                            onPressed: () =>
+                                _close(TrainerOutcome.sentNatural),
+                            icon: const Icon(
+                              Icons.record_voice_over_rounded,
+                              size: 18,
+                            ),
+                            label: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Text('Send native'),
+                                _Kbd('⏎', color: PrivetTheme.onAccent),
+                              ],
+                            ),
                           ),
-                        ),
+                        if (_hasFixed)
+                          FilledButton.icon(
+                            onPressed: () => _close(TrainerOutcome.sentFixed),
+                            icon: const Icon(
+                              Icons.auto_fix_high_rounded,
+                              size: 18,
+                            ),
+                            label: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Text('Send fixed'),
+                                _Kbd('⏎', color: PrivetTheme.onAccent),
+                              ],
+                            ),
+                          ),
                       ],
                     ),
             ),

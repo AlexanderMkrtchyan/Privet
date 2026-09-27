@@ -138,9 +138,14 @@ class RealtimeClient {
   }
 
   /// Re-open the socket if it dropped (foreground resume, network flap).
-  Future<void> ensureConnected(String token) async {
+  ///
+  /// [force] closes a still-open socket first — needed after Android/iOS
+  /// freeze the isolate long enough that [isConnected] is a lie (half-open
+  /// NAT drop, no FIN, pingInterval never ran while paused).
+  Future<void> ensureConnected(String token, {bool force = false}) async {
     _authToken = token;
-    if (isConnected) return;
+    _manualDisconnect = false;
+    if (isConnected && !force) return;
     await connect(token);
   }
 

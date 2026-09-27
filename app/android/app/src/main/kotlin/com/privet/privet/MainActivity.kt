@@ -1,13 +1,16 @@
 package com.privet.privet
 
+import android.Manifest
 import android.app.NotificationManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -15,6 +18,7 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
 class MainActivity : FlutterActivity() {
+    private var pendingStorageResult: MethodChannel.Result? = null
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         // A cold start from another app's share sheet delivers the payload in
         // onCreate; parse it before the engine builds so Flutter can poll.
@@ -172,6 +176,51 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "privet/storage",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "requestReadMedia" -> requestReadMedia(result)
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == STORAGE_PERMISSION_REQUEST) {
+            pendingStorageResult?.success(
+                grantResults.any { it == PackageManager.PERMISSION_GRANTED },
+            )
+            pendingStorageResult = null
+        }
+    }
+
+    private fun requestReadMedia(result: MethodChannel.Result) {
+        val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(
+                Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_AUDIO,
+            )
+        } else {
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+        val missing = perms.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) {
+            result.success(true)
+            return
+        }
+        pendingStorageResult?.success(false)
+        pendingStorageResult = result
+        requestPermissions(missing.toTypedArray(), STORAGE_PERMISSION_REQUEST)
     }
 
     private val clipboardManager: ClipboardManager
@@ -344,5 +393,9 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         FlutterEngineHolder.clear()
         super.onDestroy()
+    }
+
+    companion object {
+        private const val STORAGE_PERMISSION_REQUEST = 4721
     }
 }

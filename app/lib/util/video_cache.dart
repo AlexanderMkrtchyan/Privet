@@ -17,6 +17,10 @@ Future<String?> videoCacheEnsure(String url) => impl.videoCacheEnsure(url);
 Future<void> videoCacheWarmBytes(String url, List<int> bytes) =>
     impl.videoCacheWarmBytes(url, bytes);
 
+/// Same as [videoCacheWarmBytes] but copies from disk instead of RAM.
+Future<void> videoCacheWarmFile(String url, String path) =>
+    impl.videoCacheWarmFile(url, path);
+
 /// Start a background download if [url] is not already local and not [hold]ing.
 void videoCacheWarm(String url) => impl.videoCacheWarm(url);
 

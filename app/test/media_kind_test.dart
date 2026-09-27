@@ -22,4 +22,13 @@ void main() {
     expect(looksLikeVideo(url: 'https://x/a.webm?x=1'), isTrue);
     expect(looksLikeVideo(filename: 'pic.jpg'), isFalse);
   });
+
+  test('ensureUploadFits allows 256MB and rejects over 512MB', () {
+    expect(() => ensureUploadFits(256 * 1024 * 1024), returnsNormally);
+    expect(() => ensureUploadFits(kMaxUploadBytes), returnsNormally);
+    expect(
+      () => ensureUploadFits(kMaxUploadBytes + 1),
+      throwsA(isA<FileTooLargeException>()),
+    );
+  });
 }

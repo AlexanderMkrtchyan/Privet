@@ -1,6 +1,21 @@
 /// Client upload cap. Must stay in sync with `MAX_UPLOAD_BYTES` on the server.
 const int kMaxUploadBytes = 512 * 1024 * 1024;
 
+/// Images smaller than this stay in RAM for the composer thumbnail.
+/// Videos and bigger files keep a disk path and are streamed on send.
+const int kMaxInMemoryAttachBytes = 12 * 1024 * 1024;
+
+void ensureUploadFits(int size) {
+  if (size > kMaxUploadBytes) throw const FileTooLargeException();
+}
+
+class FileTooLargeException implements Exception {
+  const FileTooLargeException();
+
+  @override
+  String toString() => 'File too large (max 512MB)';
+}
+
 String mimeForFilename(String name) {
   final lower = name.toLowerCase();
   if (lower.endsWith('.png')) return 'image/png';

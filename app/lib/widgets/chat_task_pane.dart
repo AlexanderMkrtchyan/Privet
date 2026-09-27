@@ -11,6 +11,9 @@ import '../models.dart';
 import '../state.dart';
 import '../theme.dart';
 import '../util/clipboard_files.dart';
+import '../util/media_kind.dart';
+import '../util/media_upload.dart';
+import '../util/storage_access.dart';
 import '../util/image_context_menu.dart';
 import '../util/perf.dart';
 import '../util/privet_sheet.dart';
@@ -1557,11 +1560,14 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         widget.state.setError('Max $_maxFiles files per task');
         return;
       }
+      if (!kIsWeb) await requestReadMediaAccess();
       final picked = kIsWeb
           ? await pickMultipleFilesNative(maxFiles: remaining)
           : await _pickFilesViaFilePicker(remaining);
       if (picked.isEmpty) return;
       _addDraftFiles(picked);
+    } on FileTooLargeException catch (e) {
+      widget.state.setError(e.toString());
     } catch (e) {
       widget.state.setError('Attach failed: $e');
     }
@@ -1573,11 +1579,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
   Future<List<MediaAttachment>> _uploadDrafts(List<PickedBytes> drafts) async {
     final out = <MediaAttachment>[];
     for (final draft in drafts.take(_maxFiles)) {
-      final up = await widget.state.api.uploadBytes(
-        bytes: draft.bytes,
-        filename: draft.filename,
-        mimeType: draft.mimeType,
-      );
+      final up = await uploadPicked(widget.state.api, draft);
       out.add(MediaAttachment(
         mediaUrl: up.mediaUrl,
         kind: draft.mimeType.startsWith('image/') ? 'image' : 'file',
@@ -1644,6 +1646,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         widget.state.setError('Max $_maxFiles files per task');
         return;
       }
+      if (!kIsWeb) await requestReadMediaAccess();
       final picked = kIsWeb
           ? await pickMultipleFilesNative(maxFiles: remaining)
           : await _pickFilesViaFilePicker(remaining);
@@ -1651,11 +1654,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
       final next = List<MediaAttachment>.from(item.mediaItems);
       for (final draft in picked) {
         if (next.length >= _maxFiles) break;
-        final up = await widget.state.api.uploadBytes(
-          bytes: draft.bytes,
-          filename: draft.filename,
-          mimeType: draft.mimeType,
-        );
+        final up = await uploadPicked(widget.state.api, draft);
         next.add(MediaAttachment(
           mediaUrl: up.mediaUrl,
           kind: draft.mimeType.startsWith('image/') ? 'image' : 'file',
@@ -1664,6 +1663,8 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         ));
       }
       await widget.state.setTaskAttachments(item: item, attachments: next);
+    } on FileTooLargeException catch (e) {
+      widget.state.setError(e.toString());
     } catch (e) {
       widget.state.setError('Could not attach: $e');
     }
@@ -2778,7 +2779,8 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                                     children: [
                                       ClipRRect(
                                         borderRadius: BorderRadius.circular(10),
-                                        child: draft.mimeType.startsWith('image/')
+                                        child: draft.mimeType.startsWith('image/') &&
+                                                draft.hasPreviewBytes
                                             ? Image.memory(draft.bytes, width: 72, height: 72, fit: BoxFit.cover)
                                             : Container(
                                                 width: 72,

@@ -6,14 +6,23 @@ import 'clipboard_files_stub.dart'
 
 class PickedBytes {
   PickedBytes({
-    required this.bytes,
+    Uint8List? bytes,
+    this.path,
     required this.filename,
     required this.mimeType,
-  });
+    int? fileSize,
+  })  : bytes = bytes ?? Uint8List(0),
+        fileSize = fileSize ?? bytes?.length ?? 0;
 
+  /// In-memory payload for small items (photos, voice, paste). Empty when
+  /// [path] is the source of truth — large videos must not be loaded here.
   final Uint8List bytes;
+  final String? path;
   final String filename;
   final String mimeType;
+  final int fileSize;
+
+  bool get hasPreviewBytes => bytes.isNotEmpty;
 }
 
 /// Builds a [PickedBytes] from FilePicker output. On desktop, [bytes] is
@@ -23,12 +32,14 @@ Future<PickedBytes?> pickedBytesFromRaw({
   String? path,
   required String filename,
   String? mimeType,
+  int? fileSize,
 }) =>
     impl.pickedBytesFromRaw(
       bytes: bytes,
       path: path,
       filename: filename,
       mimeType: mimeType,
+      fileSize: fileSize,
     );
 
 Future<PickedBytes?> pickFileNative() => impl.pickFileNative();

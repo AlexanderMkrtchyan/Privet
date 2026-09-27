@@ -7,6 +7,8 @@ Future<String?> videoCacheEnsure(String url) async => null;
 
 Future<void> videoCacheWarmBytes(String url, List<int> bytes) async {}
 
+Future<void> videoCacheWarmFile(String url, String path) async {}
+
 void videoCacheWarm(String url) {}
 
 void videoCacheHold(String url) {}

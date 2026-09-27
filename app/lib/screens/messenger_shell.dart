@@ -37,7 +37,9 @@ import '../util/greeting_style.dart';
 import '../util/composer_autocorrect.dart';
 import '../util/composer_media_attach.dart';
 import '../util/desktop_tray.dart';
+import '../util/media_kind.dart';
 import '../util/media_permissions.dart';
+import '../util/storage_access.dart';
 import '../util/task_event_payload.dart';
 import '../util/media_ui_wake.dart';
 import '../util/mobile_push_notifications.dart';
@@ -6613,7 +6615,7 @@ class _ConversationPaneState extends State<ConversationPane>
                         border: Border.all(color: PrivetTheme.line),
                       ),
                       clipBehavior: Clip.antiAlias,
-                      child: isImage
+                      child: isImage && draft.hasPreviewBytes
                           ? Image.memory(
                               draft.bytes,
                               width: 72,
@@ -7514,9 +7516,11 @@ class _ConversationPaneState extends State<ConversationPane>
       _draftVoice = null;
       _draftMedia.add(
         PickedBytes(
-          bytes: picked.bytes,
+          bytes: picked.hasPreviewBytes ? picked.bytes : null,
+          path: picked.path,
           filename: picked.filename,
           mimeType: mime,
+          fileSize: picked.fileSize,
         ),
       );
       _syncEmojiPanel(false);
@@ -7527,6 +7531,7 @@ class _ConversationPaneState extends State<ConversationPane>
   Future<void> _pickFile() async {
     // Non-web only — web uses HtmlElementView overlay (WebAttachButton).
     try {
+      await requestReadMediaAccess();
       final files = await pickMultipleFilesNative();
       if (files.isEmpty) return;
       var attached = 0;
@@ -7539,6 +7544,16 @@ class _ConversationPaneState extends State<ConversationPane>
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Could not read the selected file'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } on FileTooLargeException catch (e) {
+      widget.state.setError(e.toString());
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.toString()),
             behavior: SnackBarBehavior.floating,
           ),
         );
@@ -8219,8 +8234,9 @@ class _ConversationPaneState extends State<ConversationPane>
       case TrainerOutcome.sentFixed:
         _trainerRetry = false;
         final xp = await state.recordTrainerOutcome(TrainerOutcome.sentFixed);
-        _trainerSendOverride = check.corrected;
-        _setComposerPlainText(check.corrected);
+        final fixed = trainerFixedSendText(check);
+        _trainerSendOverride = fixed;
+        _setComposerPlainText(fixed);
         _trainerToast(
           TrainerToast(
             icon: Icons.auto_fix_high_rounded,
@@ -8369,12 +8385,7 @@ class _ConversationPaneState extends State<ConversationPane>
       final chatId = widget.state.activeConversationId;
       if (chatId != null) await widget.state.clearDraft(chatId);
       await widget.state.sendMediaAlbum(
-        files: drafts
-            .map(
-              (d) =>
-                  (bytes: d.bytes, filename: d.filename, mimeType: d.mimeType),
-            )
-            .toList(),
+        files: drafts,
         caption: caption,
         replyToId: replyToId,
         replyTo: replyPreview,

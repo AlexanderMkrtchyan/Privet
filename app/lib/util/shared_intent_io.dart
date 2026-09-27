@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, debugPrint, kIsWeb;
 import 'package:flutter/services.dart';
@@ -26,16 +24,18 @@ Future<List<SharedDraft>> takePendingShares() async {
         for (final f in rawFiles) {
           if (f is! Map) continue;
           final path = f['path']?.toString();
-          final bytes = (path == null) ? null : await _readFile(path);
-          if (bytes == null || bytes.isEmpty) continue;
-          files.add(
-            PickedBytes(
-              bytes: bytes,
+          if (path == null || path.isEmpty) continue;
+          try {
+            final picked = await pickedBytesFromRaw(
+              bytes: null,
+              path: path,
               filename: f['fileName']?.toString() ?? 'shared',
-              mimeType:
-                  f['mimeType']?.toString() ?? 'application/octet-stream',
-            ),
-          );
+              mimeType: f['mimeType']?.toString(),
+            );
+            if (picked != null) files.add(picked);
+          } catch (e, st) {
+            debugPrint('[privet] shared file skipped: $e\n$st');
+          }
         }
       }
       final draft = SharedDraft(
@@ -49,13 +49,5 @@ Future<List<SharedDraft>> takePendingShares() async {
   } catch (e, st) {
     debugPrint('[privet] takePendingShares failed: $e\n$st');
     return const [];
-  }
-}
-
-Future<Uint8List?> _readFile(String path) async {
-  try {
-    return await File(path).readAsBytes();
-  } catch (_) {
-    return null;
   }
 }

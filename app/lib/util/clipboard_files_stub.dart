@@ -7,12 +7,14 @@ Future<PickedBytes?> pickedBytesFromRaw({
   String? path,
   required String filename,
   String? mimeType,
+  int? fileSize,
 }) async {
   if (bytes == null || bytes.isEmpty) return null;
   return PickedBytes(
     bytes: bytes,
     filename: filename,
     mimeType: mimeType ?? 'application/octet-stream',
+    fileSize: bytes.length,
   );
 }
 

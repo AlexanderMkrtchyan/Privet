@@ -49,9 +49,11 @@ import 'util/android_realtime_service.dart';
 import 'util/composer_media_attach.dart';
 import 'util/copy_image.dart';
 import 'util/incoming_call_android.dart';
+import 'util/clipboard_files.dart';
 import 'util/media_cache.dart';
 import 'util/media_kind.dart';
 import 'util/media_transfer_progress.dart';
+import 'util/media_upload.dart';
 import 'util/mobile_app_lifecycle.dart';
 import 'util/video_cache.dart';
 import 'util/shared_intent.dart';
@@ -2315,7 +2317,7 @@ class PrivetState extends ChangeNotifier {
     _rt = RealtimeClient(url: _api.wsUrl);
     _rt.addHandler(_onEvent);
     _rt.onReconnected = () {
-      unawaited(_resyncAfterReconnect());
+      unawaited(_resyncAfterReconnect(forceActiveHistory: _isMobilePlatform));
     };
     _disposeVisibility = onDocumentVisible(_onTabVisible);
     // Install focus hooks early (web document focus / desktop window focus).
@@ -2333,7 +2335,10 @@ class PrivetState extends ChangeNotifier {
   Timer? _inboxReconcileTimer;
   /// Last time the window regained focus and we re-checked the socket / inbox.
   DateTime? _lastVisibleResyncAt;
+  DateTime? _pausedAt;
   bool _resyncingAfterReconnect = false;
+  bool _resyncAgainAfterReconnect = false;
+  final Set<String> _historyResyncQueued = {};
   SharedPreferences? _prefsCache;
   /// Keep under the peer clear window and above the server rate limit so
   /// refreshes are not dropped (matched 2s/2s used to lag ~3–4s).
@@ -4253,8 +4258,29 @@ class PrivetState extends ChangeNotifier {
     }
     final chatId = data['conversationId'];
     if (chatId != null && chatId.isNotEmpty) {
-      unawaited(openConversation(chatId));
+      unawaited(_openConversationFromNotification(
+        chatId,
+        messageId: data['messageId'],
+      ));
     }
+  }
+
+  /// FCM / local-notification tap: the WS gap while backgrounded never
+  /// delivered this message, and inbox [lastMessage] is still stale, so
+  /// [openConversation] would no-op on an already-loaded cache.
+  Future<void> _openConversationFromNotification(
+    String chatId, {
+    String? messageId,
+  }) async {
+    await openConversation(chatId, forceResync: true);
+    if (messageId != null && messageId.isNotEmpty) {
+      unawaited(() async {
+        try {
+          await ensureMessageLoaded(chatId, messageId);
+        } catch (_) {}
+      }());
+    }
+    unawaited(refreshInbox().catchError((_) {}));
   }
 
   String _friendlyError(Object e) {
@@ -4266,6 +4292,7 @@ class PrivetState extends ChangeNotifier {
         text.contains('Broken pipe')) {
       return 'Could not reach the server — try again';
     }
+    if (e is FileTooLargeException) return e.toString();
     if (text.contains('Unexpected character') ||
         text.contains('FormatException')) {
       return 'Upload failed — the server rejected the file';
@@ -4452,7 +4479,10 @@ class PrivetState extends ChangeNotifier {
   /// Force-fetch recent messages even when [historyLoaded] already contains
   /// [id]. Used after reconnect when the inbox preview is ahead of the pane.
   Future<void> _resyncHistory(String id) async {
-    if (_historyLoading.contains(id)) return;
+    if (_historyLoading.contains(id)) {
+      _historyResyncQueued.add(id);
+      return;
+    }
     _historyLoading.add(id);
     try {
       final remote = await _api.messages(id, limit: messagePageSize);
@@ -4467,6 +4497,9 @@ class PrivetState extends ChangeNotifier {
       // Keep the existing cache; the next reconnect/open can retry.
     } finally {
       _historyLoading.remove(id);
+      if (_historyResyncQueued.remove(id)) {
+        unawaited(_resyncHistory(id));
+      }
     }
   }
 
@@ -4537,6 +4570,9 @@ class PrivetState extends ChangeNotifier {
       rethrow;
     } finally {
       _historyLoading.remove(id);
+      if (_historyResyncQueued.remove(id)) {
+        unawaited(_resyncHistory(id));
+      }
     }
   }
 
@@ -4598,7 +4634,7 @@ class PrivetState extends ChangeNotifier {
     reopenChatTick.value++;
   }
 
-  Future<void> openConversation(String id) async {
+  Future<void> openConversation(String id, {bool forceResync = false}) async {
     // Opening a chat is intentional presence so attachChatSurface can mark-read.
     _lastUserPresence = DateTime.now();
     unlockNotificationAudio();
@@ -4628,11 +4664,15 @@ class PrivetState extends ChangeNotifier {
     try {
       // After long idle, inbox preview can be ahead of a still-"loaded"
       // history cache; force-merge when lastMessage is missing locally.
+      // Notification taps pass [forceResync] because inbox lastMessage is
+      // still the pre-background snapshot at this moment.
       final last = idx >= 0 ? conversations[idx].lastMessage : null;
-      if (historyLoaded.contains(id) &&
-          _historyMissingLastMessage(id, last)) {
+      if (forceResync ||
+          (historyLoaded.contains(id) &&
+              _historyMissingLastMessage(id, last))) {
         await _resyncHistory(id);
-      } else {
+      }
+      if (!historyLoaded.contains(id)) {
         await ensureHistory(id);
       }
     } catch (e) {
@@ -5032,12 +5072,33 @@ class PrivetState extends ChangeNotifier {
     await requestNotificationPermission();
   }
 
+  void onAppPaused() {
+    _pausedAt ??= DateTime.now();
+  }
+
   /// Reconnect WS and refresh inbox when the app returns to foreground.
   Future<void> onAppResumed() async {
     final token = _api.token;
     if (user == null || token == null) return;
-    await _rt.ensureConnected(token);
-    unawaited(_resyncAfterReconnect());
+    final pausedAt = _pausedAt;
+    _pausedAt = null;
+    final away = pausedAt == null
+        ? Duration.zero
+        : DateTime.now().difference(pausedAt);
+    final inCall = callSession != null || ringing != null;
+    // Isolate was frozen: pingInterval never ran, so [isConnected] can be a
+    // lie. Re-open unless a call is using this socket for signaling.
+    final forceSocket = _isMobilePlatform &&
+        !inCall &&
+        away >= const Duration(seconds: 5);
+    await _rt.ensureConnected(token, force: forceSocket);
+    unawaited(_resyncAfterReconnect(forceActiveHistory: _isMobilePlatform));
+    // Notification tap often lands on the already-open chat whose cache
+    // missed the FCM-only message. Don't wait for inbox lastMessage.
+    if (_isMobilePlatform) {
+      final id = activeConversationId;
+      if (id != null) unawaited(_resyncHistory(id).catchError((_) {}));
+    }
     // A share from another app brought us to the front — pick up the payload.
     unawaited(_pollSharedIntents());
   }
@@ -5869,7 +5930,13 @@ Examples:
     ReplyPreview? replyTo,
   }) async {
     await sendMediaAlbum(
-      files: [(bytes: bytes, filename: filename, mimeType: mimeType)],
+      files: [
+        PickedBytes(
+          bytes: bytes is Uint8List ? bytes : Uint8List.fromList(bytes),
+          filename: filename,
+          mimeType: mimeType,
+        ),
+      ],
       caption: caption,
       asVoice: asVoice,
       replyToId: replyToId,
@@ -5878,7 +5945,7 @@ Examples:
   }
 
   Future<void> sendMediaAlbum({
-    required List<({List<int> bytes, String filename, String mimeType})> files,
+    required List<PickedBytes> files,
     String? caption,
     bool asVoice = false,
     String? replyToId,
@@ -5917,7 +5984,7 @@ Examples:
             kind: mediaKindFromMime(f.mimeType, filename: f.filename),
             mimeType: f.mimeType,
             fileName: f.filename,
-            fileSize: f.bytes.length,
+            fileSize: f.fileSize > 0 ? f.fileSize : f.bytes.length,
           ),
       ],
       createdAt: DateTime.now(),
@@ -5934,10 +6001,9 @@ Examples:
       final uploaded = <MediaAttachment>[];
       for (var i = 0; i < files.length; i++) {
         final file = files[i];
-        final up = await _api.uploadBytes(
-          bytes: file.bytes,
-          filename: file.filename,
-          mimeType: file.mimeType,
+        final up = await uploadPicked(
+          _api,
+          file,
           asVoice: asVoice && files.length == 1,
           onProgress: (p) {
             setMediaTransferProgress(clientId, (i + p) / files.length);
@@ -5958,13 +6024,15 @@ Examples:
         // sent image appears instantly instead of re-downloading what we just
         // uploaded.
         final absolute = _api.absoluteMediaUrl(up.mediaUrl);
-        if (up.kind == 'image') {
-          await mediaCacheWarmBytes(
-            absolute,
-            Uint8List.fromList(file.bytes),
-          );
+        if (up.kind == 'image' && file.bytes.isNotEmpty) {
+          await mediaCacheWarmBytes(absolute, file.bytes);
         } else if (up.kind == 'video') {
-          await videoCacheWarmBytes(absolute, file.bytes);
+          final localPath = file.path;
+          if (localPath != null && localPath.isNotEmpty) {
+            await videoCacheWarmFile(absolute, localPath);
+          } else if (file.bytes.isNotEmpty) {
+            await videoCacheWarmBytes(absolute, file.bytes);
+          }
         }
       }
       setMediaTransferProgress(clientId, 1);
@@ -7020,46 +7088,75 @@ Examples:
   /// Pull the inbox after the socket (re)connects and raise the OS toast/chime
   /// for anything that landed during the dead window — WS events from the gap
   /// are gone, so the unread delta is the only signal we get.
-  Future<void> _resyncAfterReconnect() async {
-    if (_resyncingAfterReconnect) return;
+  Future<void> _resyncAfterReconnect({bool forceActiveHistory = false}) async {
+    if (_resyncingAfterReconnect) {
+      _resyncAgainAfterReconnect = true;
+      return;
+    }
     _resyncingAfterReconnect = true;
     try {
-      final before = <String, int>{
-        for (final c in conversations) c.id: c.unreadCount,
-      };
-      try {
-        await refreshInbox();
-      } catch (_) {
-        return;
-      }
-      final backgrounded = documentHidden || !documentHasFocus;
-      for (final c in conversations) {
-        final last = c.lastMessage;
-        if (last == null || c.muted) continue;
-        if (last.sender.id == user?.id) continue;
-        final had = before[c.id];
-        final gained = had == null ? c.unreadCount > 0 : c.unreadCount > had;
-        if (!gained) continue;
-        // Already looking at that chat in a focused window — no need to shout.
-        if (activeConversationId == c.id && !backgrounded) continue;
-        if (soundEnabled) playMessageSound(messageId: last.id);
-        if (!notificationsEnabled) continue;
-        // Phones backgrounded: FCM owns the OS toast.
-        if (_isMobilePlatform && !mobileAppInForeground) continue;
-        final senderName = last.sender.displayName.isNotEmpty
-            ? last.sender.displayName
-            : (last.sender.handle.isNotEmpty
-                ? '@${last.sender.handle}'
-                : 'Privet');
-        showWebNotification(
-          title: c.isGroup ? c.title : senderName,
-          body: _notificationPreview(last),
-          tag: c.id,
-          onClick: () => openConversation(c.id),
+      do {
+        _resyncAgainAfterReconnect = false;
+        await _resyncAfterReconnectOnce(
+          forceActiveHistory: forceActiveHistory,
         );
-      }
+      } while (_resyncAgainAfterReconnect);
     } finally {
       _resyncingAfterReconnect = false;
+    }
+  }
+
+  Future<void> _resyncAfterReconnectOnce({
+    required bool forceActiveHistory,
+  }) async {
+    final before = <String, int>{
+      for (final c in conversations) c.id: c.unreadCount,
+    };
+    var refreshed = false;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        await refreshInbox();
+        refreshed = true;
+        break;
+      } catch (_) {
+        if (attempt == 2) return;
+        await Future<void>.delayed(
+          Duration(milliseconds: 400 * (attempt + 1)),
+        );
+      }
+    }
+    if (!refreshed) return;
+    if (forceActiveHistory) {
+      final active = activeConversationId;
+      if (active != null) {
+        await _resyncHistory(active);
+      }
+    }
+    final backgrounded = documentHidden || !documentHasFocus;
+    for (final c in conversations) {
+      final last = c.lastMessage;
+      if (last == null || c.muted) continue;
+      if (last.sender.id == user?.id) continue;
+      final had = before[c.id];
+      final gained = had == null ? c.unreadCount > 0 : c.unreadCount > had;
+      if (!gained) continue;
+      // Already looking at that chat in a focused window — no need to shout.
+      if (activeConversationId == c.id && !backgrounded) continue;
+      if (soundEnabled) playMessageSound(messageId: last.id);
+      if (!notificationsEnabled) continue;
+      // Phones backgrounded: FCM owns the OS toast.
+      if (_isMobilePlatform && !mobileAppInForeground) continue;
+      final senderName = last.sender.displayName.isNotEmpty
+          ? last.sender.displayName
+          : (last.sender.handle.isNotEmpty
+              ? '@${last.sender.handle}'
+              : 'Privet');
+      showWebNotification(
+        title: c.isGroup ? c.title : senderName,
+        body: _notificationPreview(last),
+        tag: c.id,
+        onClick: () => openConversation(c.id),
+      );
     }
   }
 
