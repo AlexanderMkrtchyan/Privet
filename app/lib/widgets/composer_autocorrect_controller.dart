@@ -116,6 +116,56 @@ class ComposerAutocorrectController extends TextEditingController {
     refreshSpelling();
   }
 
+  /// Inserts [parsed] plain text + format runs at the current selection,
+  /// replacing any selected range. Existing runs outside the edit are kept.
+  void insertParsedMarkup(ParsedMarkup parsed) {
+    if (parsed.plainText.isEmpty) return;
+    var selection = value.selection;
+    if (!selection.isValid) {
+      selection = TextSelection.collapsed(offset: text.length);
+    }
+    final start = selection.start;
+    final end = selection.end;
+    final inserted = parsed.plainText;
+    final newText = text.replaceRange(start, end, inserted);
+    final delta = inserted.length - (end - start);
+
+    final nextRuns = <FormatRun>[];
+    for (final r in _formatRuns) {
+      if (r.end <= start) {
+        nextRuns.add(r);
+      } else if (r.start >= end) {
+        nextRuns.add(FormatRun(r.start + delta, r.end + delta, r.format));
+      } else {
+        if (r.start < start) {
+          nextRuns.add(FormatRun(r.start, start, r.format));
+        }
+        if (r.end > end) {
+          nextRuns.add(
+            FormatRun(start + inserted.length, r.end + delta, r.format),
+          );
+        }
+      }
+    }
+    for (final r in parsed.runs) {
+      final s = start + r.start;
+      final e = start + r.end;
+      if (e > s) nextRuns.add(FormatRun(s, e, r.format));
+    }
+
+    _loadingMarkup = true;
+    try {
+      _formatRuns = nextRuns;
+      value = TextEditingValue(
+        text: newText,
+        selection: TextSelection.collapsed(offset: start + inserted.length),
+      );
+    } finally {
+      _loadingMarkup = false;
+    }
+    refreshSpelling();
+  }
+
   @override
   set value(TextEditingValue newValue) {
     if (!_loadingMarkup) {

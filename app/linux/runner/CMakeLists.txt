@@ -10,6 +10,7 @@ add_executable(${BINARY_NAME}
   "main.cc"
   "my_application.cc"
   "remote_input_plugin.cc"
+  "window_present_plugin.cc"
   "glib_compat.cc"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
 )

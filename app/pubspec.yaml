@@ -1,7 +1,7 @@
 name: privet
 description: Privet messenger — Android, Web, Windows, Linux
 publish_to: 'none'
-version: 0.1.36+21
+version: 0.1.37+22
 
 environment:
   sdk: ^3.12.2
@@ -45,6 +45,7 @@ dependencies:
   firebase_core: ^3.8.1
   firebase_messaging: ^15.1.5
   image_picker: ^1.2.3
+  html: ^0.15.7
 
 dev_dependencies:
   flutter_test:

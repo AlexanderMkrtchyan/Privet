@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui' as ui;
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart'
@@ -1804,23 +1803,17 @@ class _SingleMediaBody extends StatelessWidget {
                               ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(10),
-                        // Morph the loading "ready box" (fixed height) into the
-                        // image's natural aspect instead of popping.
-                        child: AnimatedSize(
-                          duration: privetAnim(
-                            const Duration(milliseconds: 220),
-                          ),
-                          curve: Curves.easeOutCubic,
-                          alignment: Alignment.topCenter,
-                          child: _ChatImage(
-                            url: _url,
-                            fit: BoxFit.cover,
-                            width: 260,
-                            placeholderHeight: 180,
-                            cacheWidth: ImageDecodeCaps.cacheWidth(
-                              260,
-                              dpr: MediaQuery.devicePixelRatioOf(context),
-                            ),
+                        // Fixed ready-box → image: no AnimatedSize morph —
+                        // that layout tween stuttered during upload on desktop.
+                        child: _ChatImage(
+                          url: _url,
+                          fit: BoxFit.cover,
+                          width: 260,
+                          placeholderHeight: 180,
+                          transferId: transferId,
+                          cacheWidth: ImageDecodeCaps.cacheWidth(
+                            260,
+                            dpr: MediaQuery.devicePixelRatioOf(context),
                           ),
                         ),
                       ),
@@ -1846,7 +1839,7 @@ class _SingleMediaBody extends StatelessWidget {
           children: [
             ExcludeSemantics(
               child: pending && _url.isEmpty
-                  ? _PendingVideoUpload(
+                  ? _PendingMediaUpload(
                       width: 260,
                       height: 160,
                       transferId: transferId,
@@ -2084,6 +2077,7 @@ class _AttachmentTile extends StatelessWidget {
                 fit: BoxFit.cover,
                 width: width,
                 height: height,
+                transferId: transferId,
                 cacheWidth: ImageDecodeCaps.cacheWidth(
                   width,
                   dpr: MediaQuery.devicePixelRatioOf(context),
@@ -2094,7 +2088,7 @@ class _AttachmentTile extends StatelessWidget {
         );
       case 'video':
         content = pending && url.isEmpty
-            ? _PendingVideoUpload(
+            ? _PendingMediaUpload(
                 width: width,
                 height: height,
                 transferId: transferId,
@@ -2139,10 +2133,12 @@ class _AttachmentTile extends StatelessWidget {
 }
 
 /// A chat image with a Teams-style "ready box": while bytes are still being
-/// uploaded / fetched it reserves a fixed box with an animated shimmer sweep
-/// (and a muted image glyph), then fades the decoded frame in instead of
-/// popping it. An empty [url] (the optimistic pre-upload bubble) keeps the
-/// ready box animating until the real URL replaces it.
+/// uploaded / fetched it reserves a fixed box (static fill + optional upload
+/// percent), then fades the decoded frame in instead of popping it.
+///
+/// No continuous shimmer — a repeating CustomPaint fought the upload on
+/// desktop and felt jerky; Low RAM mode felt smoother precisely because that
+/// ticker was off. Progress updates only when transfer bytes move.
 class _ChatImage extends StatefulWidget {
   const _ChatImage({
     required this.url,
@@ -2151,6 +2147,7 @@ class _ChatImage extends StatefulWidget {
     this.height,
     this.cacheWidth,
     this.placeholderHeight = 180,
+    this.transferId,
   });
 
   final String url;
@@ -2163,31 +2160,22 @@ class _ChatImage extends StatefulWidget {
   /// images size to their natural aspect once decoded).
   final double placeholderHeight;
 
+  /// Optimistic upload id — when set and [url] is empty, show live percent.
+  final String? transferId;
+
   @override
   State<_ChatImage> createState() => _ChatImageState();
 }
 
 class _ChatImageState extends State<_ChatImage>
     with SingleTickerProviderStateMixin {
-  /// Fade-in after the first decoded frame.
+  /// One-shot fade-in after the first decoded frame (not a repeating ticker).
   late final AnimationController _fade = AnimationController(
     vsync: this,
-    duration: privetAnim(const Duration(milliseconds: 260)),
-  );
-
-  /// Drives the placeholder shimmer sweep.
-  late final AnimationController _shimmer = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1500),
+    duration: privetAnim(const Duration(milliseconds: 180)),
   );
 
   bool _frameReady = false;
-
-  @override
-  void initState() {
-    super.initState();
-    if (!privetLowResource) _shimmer.repeat();
-  }
 
   @override
   void didUpdateWidget(covariant _ChatImage oldWidget) {
@@ -2195,39 +2183,41 @@ class _ChatImageState extends State<_ChatImage>
     if (oldWidget.url != widget.url) {
       _frameReady = false;
       _fade.value = 0;
-      if (!privetLowResource && !_shimmer.isAnimating) _shimmer.repeat();
     }
   }
 
   @override
   void dispose() {
     _fade.dispose();
-    _shimmer.dispose();
     super.dispose();
   }
 
   void _markLoaded() {
     if (_frameReady) return;
     _frameReady = true;
-    _shimmer.stop();
-    _fade.forward(from: 0);
+    if (privetLowResource || _fade.duration == Duration.zero) {
+      _fade.value = 1;
+    } else {
+      _fade.forward(from: 0);
+    }
     if (widget.url.isNotEmpty) unawaited(prefetchImageForCopy(widget.url));
   }
 
-  Widget _readyBox() {
+  Widget _readyBox({Widget? overlay}) {
     return SizedBox(
       width: widget.width,
       height: widget.height ?? widget.placeholderHeight,
       child: ClipRRect(
         borderRadius: BorderRadius.circular(10),
-        child: _ShimmerBox(
-          animation: _shimmer,
+        child: ColoredBox(
+          color: PrivetTheme.panelElevated.withValues(alpha: 0.65),
           child: Center(
-            child: Icon(
-              Icons.image_outlined,
-              size: 30,
-              color: PrivetTheme.paper.withValues(alpha: 0.38),
-            ),
+            child: overlay ??
+                Icon(
+                  Icons.image_outlined,
+                  size: 30,
+                  color: PrivetTheme.paper.withValues(alpha: 0.38),
+                ),
           ),
         ),
       ),
@@ -2253,8 +2243,13 @@ class _ChatImageState extends State<_ChatImage>
   @override
   Widget build(BuildContext context) {
     if (widget.url.isEmpty) {
-      // Optimistic pre-upload bubble — no URL yet, keep the ready box going.
-      return _readyBox();
+      // Optimistic pre-upload bubble — static ready box + live percent.
+      // Avoid indeterminate spinners (they tick every frame like shimmer).
+      final id = widget.transferId;
+      if (id == null) return _readyBox();
+      return _readyBox(
+        overlay: _PendingMediaUploadLabel(transferId: id),
+      );
     }
     // Prefer the on-device cache (instant when already seen); the network
     // path warms the cache in the background via the widget.
@@ -2268,11 +2263,11 @@ class _ChatImageState extends State<_ChatImage>
       frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
         if (wasSynchronouslyLoaded) {
           _frameReady = true;
-          _shimmer.stop();
           return child;
         }
         if (frame != null) {
           if (!_frameReady) _markLoaded();
+          if (privetLowResource || _fade.value >= 1) return child;
           return FadeTransition(opacity: _fade, child: child);
         }
         return _readyBox();
@@ -2282,90 +2277,10 @@ class _ChatImageState extends State<_ChatImage>
   }
 }
 
-/// Animated "ready box" surface: a soft diagonal highlight sweeping across
-/// the fill, Teams-style. Static flat fill in low-resource mode.
-class _ShimmerBox extends StatelessWidget {
-  const _ShimmerBox({required this.animation, required this.child});
-
-  final Animation<double> animation;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    if (privetLowResource) {
-      return ColoredBox(color: _base(), child: child);
-    }
-    return AnimatedBuilder(
-      animation: animation,
-      builder: (context, _) => CustomPaint(
-        painter: _ShimmerPainter(
-          slide: animation.value,
-          base: _base(),
-          highlight: PrivetTheme.isLight
-              ? Colors.black.withValues(alpha: 0.05)
-              : Colors.white.withValues(alpha: 0.08),
-        ),
-        child: child,
-      ),
-    );
-  }
-
-  Color _base() => PrivetTheme.panelElevated.withValues(alpha: 0.65);
-}
-
-class _ShimmerPainter extends CustomPainter {
-  const _ShimmerPainter({
-    required this.slide,
-    required this.base,
-    required this.highlight,
-  });
-
-  final double slide;
-  final Color base;
-  final Color highlight;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rect = Offset.zero & size;
-    canvas.drawRect(rect, Paint()..color = base);
-    final paint = Paint()
-      ..shader = LinearGradient(
-        begin: Alignment.centerLeft,
-        end: Alignment.centerRight,
-        colors: [base, highlight, base],
-        stops: const [0.35, 0.5, 0.65],
-        transform: _SlidingGradientTransform(slidePercent: slide),
-      ).createShader(rect);
-    canvas.drawRect(rect, paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant _ShimmerPainter oldDelegate) =>
-      oldDelegate.slide != slide ||
-      oldDelegate.base != base ||
-      oldDelegate.highlight != highlight;
-}
-
-/// Slides a [LinearGradient] horizontally so the shimmer highlight sweeps
-/// across the ready box. Based on the standard Flutter docs shimmer recipe.
-class _SlidingGradientTransform extends GradientTransform {
-  const _SlidingGradientTransform({required this.slidePercent});
-
-  final double slidePercent;
-
-  @override
-  Matrix4? transform(Rect bounds, {ui.TextDirection? textDirection}) {
-    return Matrix4.translationValues(
-      bounds.width * (slidePercent * 2 - 1) * 1.5,
-      0,
-      0,
-    );
-  }
-}
-
-/// Ready-box shown while a video is still uploading, with live percent.
-class _PendingVideoUpload extends StatelessWidget {
-  const _PendingVideoUpload({
+/// Ready-box shown while media is still uploading, with live percent.
+/// Determinate ring only — no indeterminate spin (that is a continuous ticker).
+class _PendingMediaUpload extends StatelessWidget {
+  const _PendingMediaUpload({
     required this.width,
     required this.height,
     this.transferId,
@@ -2377,28 +2292,39 @@ class _PendingVideoUpload extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final progress = transferId == null
-        ? null
-        : mediaTransferProgressOf(transferId!);
     return SizedBox(
       width: width,
       height: height,
       child: ColoredBox(
         color: PrivetTheme.ink,
         child: Center(
-          child: progress == null
-              ? _pendingLabel(null)
-              : ValueListenableBuilder<double>(
-                  valueListenable: progress,
-                  builder: (_, value, __) => _pendingLabel(value),
-                ),
+          child: _PendingMediaUploadLabel(transferId: transferId),
         ),
       ),
     );
   }
+}
 
-  Widget _pendingLabel(double? value) {
+class _PendingMediaUploadLabel extends StatelessWidget {
+  const _PendingMediaUploadLabel({this.transferId});
+
+  final String? transferId;
+
+  @override
+  Widget build(BuildContext context) {
+    final progress =
+        transferId == null ? null : mediaTransferProgressOf(transferId!);
+    if (progress == null) return _label(null);
+    return ValueListenableBuilder<double>(
+      valueListenable: progress,
+      builder: (_, value, _) => _label(value),
+    );
+  }
+
+  Widget _label(double? value) {
     final pct = value == null ? '' : ' ${formatTransferPercent(value)}';
+    // Hold at 0 (static ring) until the first byte report — never spin.
+    final ringValue = value == null ? 0.0 : value.clamp(0.0, 1.0);
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -2408,7 +2334,7 @@ class _PendingVideoUpload extends StatelessWidget {
           child: CircularProgressIndicator(
             strokeWidth: 2.2,
             color: PrivetTheme.signal,
-            value: value != null && value > 0 ? value : null,
+            value: ringValue,
           ),
         ),
         const SizedBox(height: 8),

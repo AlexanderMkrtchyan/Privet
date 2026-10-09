@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:privet/util/clipboard_files.dart';
 import 'package:privet/util/composer_media_attach.dart';
@@ -186,5 +187,52 @@ void main() {
     await tester.pumpAndSettle(const Duration(milliseconds: 50));
 
     expect(find.byTooltip('Close'), findsNothing);
+  });
+
+  testWidgets('lightbox: next arrow advances a multi-image message',
+      (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => showImageLightbox(
+                  context,
+                  urls: const [
+                    'https://example.test/a.png',
+                    'https://example.test/b.png',
+                    'https://example.test/c.png',
+                  ],
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle(const Duration(milliseconds: 50));
+    expect(find.text('1 / 3'), findsOneWidget);
+
+    // Wayland fractional scaling moves the pointer a few pixels between
+    // button-down and button-up, which cancels an InkWell tap. Navigation
+    // must commit on pointer down.
+    final next = find.byTooltip('Next');
+    final gesture = await tester.startGesture(tester.getCenter(next));
+    await gesture.moveBy(const Offset(3, 2));
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(find.text('2 / 3'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pumpAndSettle();
+    expect(find.text('3 / 3'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pumpAndSettle();
+    expect(find.text('2 / 3'), findsOneWidget);
   });
 }

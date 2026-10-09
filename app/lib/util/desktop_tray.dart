@@ -12,7 +12,11 @@ abstract final class DesktopTray {
   static Future<void> init() => impl.initDesktopTray();
 
   /// Bring the main window back and focus it.
-  static Future<void> show() => impl.showDesktopWindow();
+  ///
+  /// [activationToken] is the startup id from a notification click or from a
+  /// second launch. GNOME 50 will not raise the window without it.
+  static Future<void> show({String? activationToken}) =>
+      impl.showDesktopWindow(activationToken: activationToken);
 
   /// Hide to tray without quitting.
   static Future<void> hideToTray() => impl.hideDesktopToTray();

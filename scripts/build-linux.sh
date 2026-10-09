@@ -311,6 +311,94 @@ else
   echo "WARNING: could not locate flutter_webrtc linux CMakeLists to patch" >&2
 fi
 
+# audioplayers_linux throws a const char* from AudioPlayer's constructor when
+# GStreamer's playbin element is missing (blacklisted registry). That throw is
+# outside the method-call try/catch, so the process abort()s as soon as a chat
+# builds a voice player. Catch it and return a method error instead.
+AUDIO_PLUGIN_CC="$(find "$HOME/.pub-cache/hosted" -path '*audioplayers_linux-*/linux/audioplayers_linux_plugin.cc' 2>/dev/null | sort | tail -1 || true)"
+if [[ -n "$AUDIO_PLUGIN_CC" ]]; then
+  python3 - "$AUDIO_PLUGIN_CC" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+old = '''static void audioplayers_linux_plugin_create_player(
+    const std::string& playerId) {
+  g_autoptr(FlStandardMethodCodec) eventCodec = fl_standard_method_codec_new();
+  auto eventChannel = fl_event_channel_new(
+      binaryMessenger, ("xyz.luan/audioplayers/events/" + playerId).c_str(),
+      FL_METHOD_CODEC(eventCodec));
+
+  auto player = std::make_unique<AudioPlayer>(playerId, methods, eventChannel);
+  audioPlayers.insert(std::make_pair(playerId, std::move(player)));
+}'''
+new = '''static bool audioplayers_linux_plugin_create_player(
+    const std::string& playerId,
+    std::string* error_out) {
+  try {
+    g_autoptr(FlStandardMethodCodec) eventCodec =
+        fl_standard_method_codec_new();
+    auto eventChannel = fl_event_channel_new(
+        binaryMessenger, ("xyz.luan/audioplayers/events/" + playerId).c_str(),
+        FL_METHOD_CODEC(eventCodec));
+
+    auto player =
+        std::make_unique<AudioPlayer>(playerId, methods, eventChannel);
+    audioPlayers.insert(std::make_pair(playerId, std::move(player)));
+    return true;
+  } catch (const gchar* error) {
+    // Missing playbin throws a string literal. Leave it uncaught and the
+    // process abort()s the whole messenger when a chat opens.
+    if (error_out) *error_out = error ? error : "Audio player failed";
+    return false;
+  } catch (const std::exception& error) {
+    if (error_out) *error_out = error.what();
+    return false;
+  } catch (...) {
+    if (error_out) *error_out = "Audio player failed";
+    return false;
+  }
+}'''
+old_call = '''  if (strcmp(method, "create") == 0) {
+    audioplayers_linux_plugin_create_player(playerId);
+    response =
+        FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_int(1)));
+    fl_method_call_respond(method_call, response, nullptr);
+    return;
+  }'''
+new_call = '''  if (strcmp(method, "create") == 0) {
+    std::string create_error;
+    if (!audioplayers_linux_plugin_create_player(playerId, &create_error)) {
+      response = FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "LinuxAudioError", create_error.c_str(), nullptr));
+      fl_method_call_respond(method_call, response, nullptr);
+      return;
+    }
+    response =
+        FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_int(1)));
+    fl_method_call_respond(method_call, response, nullptr);
+    return;
+  }'''
+changed = False
+if old in text:
+    text = text.replace(old, new, 1)
+    changed = True
+if old_call in text:
+    text = text.replace(old_call, new_call, 1)
+    changed = True
+if '#include <exception>' not in text:
+    text = text.replace('#include <map>\n', '#include <exception>\n#include <map>\n', 1)
+    changed = True
+if changed:
+    path.write_text(text)
+    print(f'patched {path}')
+else:
+    print(f'audioplayers_linux already patched ({path})')
+PY
+else
+  echo "WARNING: could not locate audioplayers_linux to patch" >&2
+fi
+
 flutter build linux --release \
   --dart-define=PRIVET_BUILD="$STAMP" \
   --dart-define=PRIVET_VERSION="$VERSION" \
@@ -427,17 +515,21 @@ APP_DIR="/usr/lib/privet"
 unset __EGL_VENDOR_LIBRARY_DIRS
 unset LIBGL_ALWAYS_SOFTWARE
 unset GDK_GL
-# Prefer X11 when on Wayland+NVIDIA (Flutter EGL often fails to show first frame).
-if [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]] && [[ -e /proc/driver/nvidia/version || -e /dev/nvidia0 ]]; then
-  export GDK_BACKEND="${GDK_BACKEND:-x11}"
+# Stay on native Wayland. Forcing GDK_BACKEND=x11 puts Flutter on XWayland,
+# where each frame is read back on the GTK thread (gdk_cairo_draw_from_gl).
+# Mutter then paints "(Not Responding)" because _NET_WM_PING goes unanswered.
+if [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]]; then
+  unset GDK_BACKEND
 fi
-if [[ -e /dev/nvidia0 ]]; then
+if [[ -e /dev/nvidia0 || -e /proc/driver/nvidia/version ]]; then
   export __GLX_VENDOR_LIBRARY_NAME=nvidia
   export __EGL_VENDOR_LIBRARY_DIRS=/usr/share/glvnd/egl_vendor.d
-  # Threaded GL opts + Flutter vsync double-wait (avgVsyncMs~30). Off by default.
-  export __GL_THREADED_OPTIMIZATIONS="${__GL_THREADED_OPTIMIZATIONS:-0}"
-  export __GL_SYNC_TO_VBLANK="${__GL_SYNC_TO_VBLANK:-0}"
-  unset __GL_MaxFramesAllowed
+  # GLX-only. On Wayland these pin buffer swaps to the GTK thread.
+  if [[ "${XDG_SESSION_TYPE:-}" != "wayland" ]]; then
+    export __GL_THREADED_OPTIMIZATIONS="${__GL_THREADED_OPTIMIZATIONS:-0}"
+    export __GL_SYNC_TO_VBLANK="${__GL_SYNC_TO_VBLANK:-0}"
+    unset __GL_MaxFramesAllowed
+  fi
 fi
 # Detect OpenGL version. Flutter's opengl renderer requires GL ≥ 3.0.
 # Ancient GPUs like Radeon HD 2xxx (GL 2.0) will crash — fall back to software.
@@ -543,17 +635,21 @@ cd "$INSTALL_DIR"
 unset __EGL_VENDOR_LIBRARY_DIRS
 unset LIBGL_ALWAYS_SOFTWARE
 unset GDK_GL
-# Prefer X11 when on Wayland+NVIDIA (Flutter EGL often fails to show first frame).
-if [[ "\${XDG_SESSION_TYPE:-}" == "wayland" ]] && [[ -e /proc/driver/nvidia/version || -e /dev/nvidia0 ]]; then
-  export GDK_BACKEND="\${GDK_BACKEND:-x11}"
+# Stay on native Wayland. Forcing GDK_BACKEND=x11 puts Flutter on XWayland,
+# where each frame is read back on the GTK thread (gdk_cairo_draw_from_gl).
+# Mutter then paints "(Not Responding)" because _NET_WM_PING goes unanswered.
+if [[ "\${XDG_SESSION_TYPE:-}" == "wayland" ]]; then
+  unset GDK_BACKEND
 fi
-if [[ -e /dev/nvidia0 ]]; then
+if [[ -e /dev/nvidia0 || -e /proc/driver/nvidia/version ]]; then
   export __GLX_VENDOR_LIBRARY_NAME=nvidia
   export __EGL_VENDOR_LIBRARY_DIRS=/usr/share/glvnd/egl_vendor.d
-  # Threaded GL opts + Flutter vsync double-wait (avgVsyncMs~30). Off by default.
-  export __GL_THREADED_OPTIMIZATIONS="\${__GL_THREADED_OPTIMIZATIONS:-0}"
-  export __GL_SYNC_TO_VBLANK="\${__GL_SYNC_TO_VBLANK:-0}"
-  unset __GL_MaxFramesAllowed
+  # GLX-only. On Wayland these pin buffer swaps to the GTK thread.
+  if [[ "\${XDG_SESSION_TYPE:-}" != "wayland" ]]; then
+    export __GL_THREADED_OPTIMIZATIONS="\${__GL_THREADED_OPTIMIZATIONS:-0}"
+    export __GL_SYNC_TO_VBLANK="\${__GL_SYNC_TO_VBLANK:-0}"
+    unset __GL_MaxFramesAllowed
+  fi
 fi
 # Detect OpenGL version. Flutter's opengl renderer requires GL >= 3.0.
 # Ancient GPUs like Radeon HD 2xxx (GL 2.0) will crash — fall back to software.
@@ -578,6 +674,16 @@ if [[ -z "\${FLUTTER_LINUX_RENDERER:-}" ]]; then
     export FLUTTER_LINUX_RENDERER=opengl
   else
     export FLUTTER_LINUX_RENDERER=software
+  fi
+fi
+# A poisoned GStreamer registry blacklists playbin. audioplayers then throws
+# from its player constructor and aborts the process when a chat opens.
+# Rebuild the user cache before start if the element is missing.
+if command -v gst-inspect-1.0 >/dev/null 2>&1; then
+  if ! gst-inspect-1.0 playbin >/dev/null 2>&1; then
+    echo "Privet: GStreamer playbin missing; rebuilding plugin registry."
+    rm -f "\$HOME/.cache/gstreamer-1.0/registry.x86_64.bin"
+    gst-inspect-1.0 playbin >/dev/null 2>&1 || true
   fi
 fi
 exec "$INSTALL_DIR/privet" "\$@"

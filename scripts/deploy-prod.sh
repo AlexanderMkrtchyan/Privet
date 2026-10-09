@@ -4,19 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="${HOME}/development/flutter/bin:${PATH}"
 
-REMOTE_HOST="${PRIVET_REMOTE_HOST:-root@213.255.227.131}"
+REMOTE_HOST="${PRIVET_REMOTE_HOST:-root@78.138.46.160}"
 REMOTE_DIR="${PRIVET_REMOTE_DIR:-/home/alex/privet/server}"
 
 preserve_static_extras() {
   local stage="$1"
   rm -rf "$stage"
   mkdir -p "$stage"
-  if [[ -d "$ROOT/server/public/install" ]]; then
-    cp -a "$ROOT/server/public/install" "$stage/install"
-  fi
-  if [[ -d "$ROOT/server/public/downloads" ]]; then
-    cp -a "$ROOT/server/public/downloads" "$stage/downloads"
-  fi
+  # downloads/ and install/ stay in place. Copying them aside blows the /tmp
+  # quota (each Android APK is ~500MB, and old releases are kept).
   if [[ -f "$ROOT/server/public/version.json" ]]; then
     cp -a "$ROOT/server/public/version.json" "$stage/version.json"
   fi
@@ -24,14 +20,6 @@ preserve_static_extras() {
 
 restore_static_extras() {
   local stage="$1"
-  if [[ -d "$stage/install" ]]; then
-    rm -rf "$ROOT/server/public/install"
-    cp -a "$stage/install" "$ROOT/server/public/install"
-  fi
-  if [[ -d "$stage/downloads" ]]; then
-    rm -rf "$ROOT/server/public/downloads"
-    cp -a "$stage/downloads" "$ROOT/server/public/downloads"
-  fi
   if [[ -f "$stage/version.json" ]]; then
     cp -a "$stage/version.json" "$ROOT/server/public/version.json"
   fi
@@ -70,7 +58,10 @@ flutter build web --release \
   --dart-define=PRIVET_BUILD_NUMBER="$BUILD_NUMBER" \
   --no-wasm-dry-run
 
-rsync -a --delete "$ROOT/app/build/web/" "$ROOT/server/public/"
+rsync -a --delete \
+  --exclude 'downloads/' \
+  --exclude 'install/' \
+  "$ROOT/app/build/web/" "$ROOT/server/public/"
 rm -f "$ROOT/server/public/flutter_service_worker.js"
 restore_static_extras "$STAGE"
 
@@ -168,9 +159,27 @@ rsync -az --delete \
   --exclude 'install/' \
   "$ROOT/server/public/" "${REMOTE_HOST}:${REMOTE_DIR}/public/"
 
-# Always ship install + downloads + version.json explicitly (may be newer than remote).
+# Always ship install + the current release + version.json.
+# Do not sync the whole downloads archive: each old APK is ~500MB and the
+# production disk is 20GB.
 rsync -az "$ROOT/server/public/install/" "${REMOTE_HOST}:${REMOTE_DIR}/public/install/"
-rsync -az "$ROOT/server/public/downloads/" "${REMOTE_HOST}:${REMOTE_DIR}/public/downloads/"
+DL="$ROOT/server/public/downloads"
+ssh -o BatchMode=yes "$REMOTE_HOST" "mkdir -p '${REMOTE_DIR}/public/downloads'"
+CURRENT_DOWNLOADS=(
+  "$DL/privet-android.apk"
+  "$DL/privet-android-${VERSION}.apk"
+  "$DL/privet-linux-amd64.deb"
+  "$DL/privet_${VERSION}_amd64.deb"
+  "$DL/privet-linux-x64.tar.gz"
+  "$DL/Privet-Setup.exe"
+)
+if [[ -f "$DL/Privet-Setup-${VERSION}.exe" ]]; then
+  CURRENT_DOWNLOADS+=("$DL/Privet-Setup-${VERSION}.exe")
+fi
+if [[ -f "$DL/SHA256SUMS.txt" ]]; then
+  CURRENT_DOWNLOADS+=("$DL/SHA256SUMS.txt")
+fi
+rsync -az "${CURRENT_DOWNLOADS[@]}" "${REMOTE_HOST}:${REMOTE_DIR}/public/downloads/"
 if [[ -f "$ROOT/server/public/version.json" ]]; then
   rsync -az "$ROOT/server/public/version.json" "${REMOTE_HOST}:${REMOTE_DIR}/public/version.json"
 fi

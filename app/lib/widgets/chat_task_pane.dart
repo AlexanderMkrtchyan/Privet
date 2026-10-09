@@ -846,7 +846,40 @@ class _HeaderChipHoverCloseState extends State<_HeaderChipHoverClose> {
   }
 }
 
+/// Thin progress line, same shape as the board-wide Progress bar, at half
+/// its thickness. 9/10 fills nine tenths of the line.
+class _ChargeLine extends StatelessWidget {
+  const _ChargeLine({required this.fraction});
+
+  final double fraction;
+
+  static const height = 4.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final level = fraction.clamp(0.0, 1.0);
+    final color = level >= 1 ? PrivetTheme.signal : PrivetTheme.signalDim;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(99),
+      child: TweenAnimationBuilder<double>(
+        tween: Tween<double>(end: level),
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+        builder: (context, value, _) {
+          return LinearProgressIndicator(
+            value: value.clamp(0.0, 1.0),
+            minHeight: height,
+            backgroundColor: color.withValues(alpha: 0.16),
+            color: color,
+          );
+        },
+      ),
+    );
+  }
+}
+
 /// Compact header control: pinned task name + 3/10 progress (or "Task done").
+/// A thin charge line sits along the bottom of the chip.
 class TaskHeaderChip extends StatelessWidget {
   const TaskHeaderChip({
     super.key,
@@ -871,9 +904,6 @@ class TaskHeaderChip extends StatelessWidget {
         : (done: board.doneCount, total: board.total);
     final done = prog.total == 0 || prog.done >= prog.total;
     final fill = done ? PrivetTheme.signal : PrivetTheme.signalDim;
-    final track = done
-        ? PrivetTheme.signal.withValues(alpha: 0.22)
-        : PrivetTheme.signalDim.withValues(alpha: 0.18);
     final name = (pinned?.body.trim().isNotEmpty == true)
         ? markupToPlain(pinned!.body).trim()
         : 'Task';
@@ -927,11 +957,16 @@ class TaskHeaderChip extends StatelessWidget {
                                     minWidth: 72,
                                     maxWidth: 170,
                                   ),
-                                  padding: const EdgeInsets.fromLTRB(10, 3, 6, 3),
+                                  padding: const EdgeInsets.fromLTRB(
+                                    10,
+                                    4,
+                                    6,
+                                    5,
+                                  ),
                                   child: Column(
-                                    mainAxisSize: MainAxisSize.min,
                                     mainAxisAlignment: MainAxisAlignment.center,
-                                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
                                     children: [
                                       Row(
                                         mainAxisSize: MainAxisSize.min,
@@ -959,34 +994,8 @@ class TaskHeaderChip extends StatelessWidget {
                                           ),
                                         ],
                                       ),
-                                      const SizedBox(height: 2),
-                                      IgnorePointer(
-                                        child: ExcludeSemantics(
-                                          child: ClipRRect(
-                                            borderRadius: BorderRadius.circular(
-                                              99,
-                                            ),
-                                            child: TweenAnimationBuilder<double>(
-                                              tween: Tween(
-                                                begin: 0,
-                                                end: progressValue,
-                                              ),
-                                              duration: const Duration(
-                                                milliseconds: 280,
-                                              ),
-                                              curve: Curves.easeOutCubic,
-                                              builder: (context, value, _) {
-                                                return LinearProgressIndicator(
-                                                  value: value.clamp(0.0, 1.0),
-                                                  minHeight: 3,
-                                                  backgroundColor: track,
-                                                  color: fill,
-                                                );
-                                              },
-                                            ),
-                                          ),
-                                        ),
-                                      ),
+                                      const SizedBox(height: 4),
+                                      _ChargeLine(fraction: progressValue),
                                     ],
                                   ),
                                 ),
@@ -1048,6 +1057,11 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
   String? _filterPriority; // null = all
   String? _filterAssignee; // null = all, '' = unassigned, else user id
   bool _boardView = false;
+  /// Waiting-for-review roots stay collapsed so a finished checklist does not
+  /// fill the working list. Search and message-reveal open it when needed.
+  bool _reviewSectionOpen = false;
+  /// Done tasks stay collapsed until the header is opened.
+  bool _historySectionOpen = false;
 
   /// Roots that contain the current search, active first then archived.
   List<String> _searchHitIds = [];
@@ -1179,9 +1193,19 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     // Persist expanded so a subtask target is actually visible inside the row.
     widget.state.setTaskExpanded(rootId, true);
     _revealTimer?.cancel();
+    final board = widget.state.taskBoardFor(widget.conversationId);
+    final awaiting = board.activeItems.any(
+      (t) => t.id == rootId && board.taskAwaitingReview(t),
+    );
+    final inHistory = widget.state
+        .taskHistoryBoardFor(widget.conversationId)
+        .rootItems
+        .any((t) => t.id == rootId);
     setState(() {
       _revealRootId = rootId;
       _revealRowKey = GlobalKey();
+      if (awaiting) _reviewSectionOpen = true;
+      if (inHistory) _historySectionOpen = true;
     });
     await _bringRowIntoView(rootId);
     if (!mounted) return;
@@ -1254,6 +1278,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
   }
 
   void _onTaskScroll() {
+    if (!_historySectionOpen) return;
     if (!_taskScrollCtrl.hasClients || _loadingTaskHistory) return;
     final pos = _taskScrollCtrl.position;
     if (pos.pixels >= pos.maxScrollExtent - 160) {
@@ -1489,9 +1514,19 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     final rootId = _searchHitIds[safe];
     widget.state.setTaskExpanded(rootId, true);
     _searchRowKey = GlobalKey();
+    final board = widget.state.taskBoardFor(widget.conversationId);
+    final awaiting = board.activeItems.any(
+      (t) => t.id == rootId && board.taskAwaitingReview(t),
+    );
+    final inHistory = widget.state
+        .taskHistoryBoardFor(widget.conversationId)
+        .rootItems
+        .any((t) => t.id == rootId);
     setState(() {
       _searchHitIndex = safe;
       _searchFocusRootId = rootId;
+      if (awaiting) _reviewSectionOpen = true;
+      if (inHistory) _historySectionOpen = true;
     });
     await _bringRowIntoView(rootId);
   }
@@ -2108,6 +2143,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     required ConversationTasks board,
     bool history = false,
     String? progressLabel,
+    double charge = 0,
     int? reorderIndex,
   }) {
     return Padding(
@@ -2121,6 +2157,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         myUserId: widget.state.user?.id,
         subtasks: board.subtasksOf(item.id),
         progressLabel: progressLabel,
+        charge: charge,
         reorderIndex: reorderIndex,
         onToggle: history ? null : () => widget.state.toggleTaskDone(item),
         onSetStatus:
@@ -2267,10 +2304,19 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
     final orderedIds = visible.map((t) => t.id).toList();
     final moved = orderedIds.removeAt(oldIndex);
     orderedIds.insert(newIndex, moved);
+    // Review rows are listed separately, but the server wants every active
+    // root. Keep those rows in place and only reshuffle the working ones.
+    final board = widget.state.taskBoardFor(widget.conversationId);
+    final working = orderedIds.toSet();
+    var wi = 0;
+    final full = <String>[
+      for (final t in board.activeItems)
+        if (working.contains(t.id)) orderedIds[wi++] else t.id,
+    ];
     try {
       await widget.state.reorderTasks(
         conversationId: widget.conversationId,
-        orderedIds: orderedIds,
+        orderedIds: full,
       );
     } catch (e) {
       if (!mounted) return;
@@ -2294,12 +2340,31 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         _filterStatus != null ||
         _filterPriority != null ||
         _filterAssignee != null;
-    // Reorder only when the full active set is visible — filters scramble
-    // indices and would leave unseen siblings out of the order payload.
-    final canReorder = !hasFilters && filtered.length > 1;
+    // Fully checked tasks wait in their own section. An explicit status filter
+    // keeps the status the user asked for in that section.
+    final working = <TaskItem>[];
+    final awaiting = <TaskItem>[];
+    if (_filterStatus == null) {
+      for (final t in filtered) {
+        if (board.taskAwaitingReview(t)) {
+          awaiting.add(t);
+        } else {
+          working.add(t);
+        }
+      }
+    } else if (_filterStatus == 'review') {
+      awaiting.addAll(filtered);
+    } else {
+      working.addAll(filtered);
+    }
+    final reviewOpen = _reviewSectionOpen || _filterStatus == 'review';
+    // Reorder only the working rows. Review rows are stitched back into the
+    // full active order so the server still sees every non-done root.
+    final canReorder = !hasFilters && working.length > 1;
     final emptyAll = board.activeItems.isEmpty && historyRoots.isEmpty;
 
-    Widget activeRow(TaskItem item, int index) {
+    Widget taskRow(TaskItem item, int index, List<TaskItem> group,
+        {required bool reorder}) {
       final prog = board.progressFor(item);
       return _revealWrap(
         rootId: item.id,
@@ -2313,9 +2378,12 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
               progressLabel: (item.subtaskTotal ?? 0) > 0
                   ? '${prog.done}/${prog.total}'
                   : null,
-              reorderIndex: canReorder ? index : null,
+              charge: (item.subtaskTotal ?? 0) > 0 && prog.total > 0
+                  ? prog.done / prog.total
+                  : 0,
+              reorderIndex: reorder ? index : null,
             ),
-            if (index < filtered.length - 1) const _TaskDivider(),
+            if (index < group.length - 1) const _TaskDivider(),
           ],
         ),
       );
@@ -2336,10 +2404,13 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                   subtitle:
                       'Add a task with subtasks below, or right-click any message → Add to task',
                 )
-              else if (filtered.isNotEmpty) ...[
-                _SectionLabel('To do — ${filtered.length}'),
+              else if (working.isNotEmpty) ...[
+                _SectionLabel('To do — ${working.length}'),
                 const SizedBox(height: 6),
-              ] else if (board.activeItems.isNotEmpty)
+              ] else if (awaiting.isNotEmpty && !hasFilters) ...[
+                const _SectionLabel('To do — 0'),
+                const SizedBox(height: 6),
+              ] else if (board.activeItems.isNotEmpty && awaiting.isEmpty)
                 _EmptyState(
                   icon: Icons.filter_alt_off_outlined,
                   color: PrivetTheme.mist,
@@ -2349,14 +2420,14 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
             ]),
           ),
         ),
-        if (!emptyAll && filtered.isNotEmpty)
+        if (!emptyAll && working.isNotEmpty)
           SliverPadding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
             sliver: canReorder
                 ? SliverReorderableList(
-                    itemCount: filtered.length,
+                    itemCount: working.length,
                     onReorderItem: (oldIndex, newIndex) {
-                      _onReorderActiveTasks(filtered, oldIndex, newIndex);
+                      _onReorderActiveTasks(working, oldIndex, newIndex);
                     },
                     proxyDecorator: (child, index, animation) {
                       return AnimatedBuilder(
@@ -2374,30 +2445,57 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                       );
                     },
                     itemBuilder: (context, index) {
-                      final item = filtered[index];
+                      final item = working[index];
                       return KeyedSubtree(
                         key: ValueKey(item.id),
-                        child: activeRow(item, index),
+                        child: taskRow(item, index, working, reorder: true),
                       );
                     },
                   )
                 : SliverList(
                     delegate: SliverChildBuilderDelegate(
-                      (context, index) => activeRow(filtered[index], index),
-                      childCount: filtered.length,
+                      (context, index) =>
+                          taskRow(working[index], index, working, reorder: false),
+                      childCount: working.length,
                     ),
                   ),
+          ),
+        if (!emptyAll && awaiting.isNotEmpty)
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+            sliver: SliverList(
+              delegate: SliverChildListDelegate([
+                _CollapsibleSectionHeader(
+                  label: 'Waiting for review — ${awaiting.length}',
+                  color: const Color(0xFFF0A83D),
+                  open: reviewOpen,
+                  onTap: () =>
+                      setState(() => _reviewSectionOpen = !reviewOpen),
+                ),
+                if (reviewOpen) ...[
+                  const SizedBox(height: 6),
+                  ...awaiting.asMap().entries.map(
+                        (e) => taskRow(e.value, e.key, awaiting, reorder: false),
+                      ),
+                ],
+              ]),
+            ),
           ),
         if (!emptyAll && historyFiltered.isNotEmpty)
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
             sliver: SliverList(
               delegate: SliverChildListDelegate([
-                _SectionLabel(
-                  historyHasMore && _taskSearch.trim().isEmpty
+                _CollapsibleSectionHeader(
+                  label: historyHasMore && _taskSearch.trim().isEmpty
                       ? 'History — ${historyRoots.length}+'
                       : 'History — ${historyFiltered.length}',
+                  open: _historySectionOpen,
+                  onTap: () => setState(
+                    () => _historySectionOpen = !_historySectionOpen,
+                  ),
                 ),
+                if (_historySectionOpen) ...[
                 const SizedBox(height: 6),
                 ...historyFiltered.asMap().entries.map((e) => _revealWrap(
                       rootId: e.value.id,
@@ -2439,6 +2537,7 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                       ),
                     ),
                   ),
+                ],
               ]),
             ),
           )
@@ -3714,6 +3813,53 @@ class _ReminderKindTab extends StatelessWidget {
   }
 }
 
+class _CollapsibleSectionHeader extends StatelessWidget {
+  const _CollapsibleSectionHeader({
+    required this.label,
+    required this.open,
+    required this.onTap,
+    this.color,
+  });
+
+  final String label;
+  final bool open;
+  final VoidCallback onTap;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final tint = color ?? PrivetTheme.mist.withValues(alpha: 0.75);
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.only(left: 2, bottom: 2),
+          child: Row(
+            children: [
+              Icon(
+                open ? Icons.expand_more_rounded : Icons.chevron_right_rounded,
+                size: 16,
+                color: tint,
+              ),
+              const SizedBox(width: 2),
+              Text(
+                label,
+                style: GoogleFonts.ibmPlexSans(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: tint,
+                  letterSpacing: 0.4,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _SectionLabel extends StatelessWidget {
   const _SectionLabel(this.text);
   final String text;
@@ -4126,6 +4272,7 @@ class _TaskRow extends StatefulWidget {
     required this.myUserId,
     required this.subtasks,
     required this.progressLabel,
+    this.charge = 0,
     required this.onToggle,
     required this.onSetStatus,
     required this.onRestore,
@@ -4164,6 +4311,9 @@ class _TaskRow extends StatefulWidget {
   final String? myUserId;
   final List<TaskItem> subtasks;
   final String? progressLabel;
+
+  /// Share of subtasks done, 0–1. 9/10 paints 90% of the header.
+  final double charge;
   /// When set, shows a drag handle that starts [SliverReorderableList] drag.
   final int? reorderIndex;
   final VoidCallback? onToggle;
@@ -4569,6 +4719,10 @@ class _TaskRowState extends State<_TaskRow> {
                   ),
                 ),
               ),
+              if (widget.progressLabel != null) ...[
+                const SizedBox(height: 6),
+                _ChargeLine(fraction: widget.charge),
+              ],
               if (_expanded && media.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(left: 38, top: 8),
@@ -5320,10 +5474,17 @@ class _TaskBoardCard extends StatelessWidget {
     final statusColor = _taskStatusColor(item.status);
     final subtasks = board.subtasksOf(item.id);
     final prog = board.progressFor(item);
+    final charge = subtasks.isEmpty || prog.total == 0
+        ? 0.0
+        : prog.done / prog.total;
     return Material(
       color: PrivetTheme.panelElevated,
       borderRadius: BorderRadius.circular(12),
-      child: Padding(
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
         padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -5460,6 +5621,13 @@ class _TaskBoardCard extends StatelessWidget {
             ),
           ],
         ),
+      ),
+          if (subtasks.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+              child: _ChargeLine(fraction: charge),
+            ),
+        ],
       ),
     );
   }

@@ -2,7 +2,7 @@ bool get isSupported => false;
 
 Future<void> initDesktopTray() async {}
 
-Future<void> showDesktopWindow() async {}
+Future<void> showDesktopWindow({String? activationToken}) async {}
 
 Future<void> hideDesktopToTray() async {}
 

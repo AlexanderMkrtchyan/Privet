@@ -81,7 +81,6 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   final GlobalKey<ScaffoldMessengerState> _snackKey =
       GlobalKey<ScaffoldMessengerState>();
 
-  late final PageController _pageController;
   late final List<TransformationController> _transforms;
   late final List<List<ImageMark>> _marks;
   late final List<GlobalKey> _captureImageKeys;
@@ -105,6 +104,15 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   bool _cursorOver = false;
   bool _exporting = false;
   bool _hasCommittedMarks = false;
+
+  /// The key-down already applied. Wayland delivers the same press to both the
+  /// hardware handler and the focused widget; without this, one click skips
+  /// two images and the next click looks dead.
+  LogicalKeyboardKey? _navKeyDown;
+
+  /// Keyboard focus for the viewer. On Wayland the composer TextField under
+  /// the route often keeps primary focus, so arrow keys never reach [Focus].
+  final FocusNode _keyFocus = FocusNode(debugLabel: 'image-lightbox');
 
   /// High-frequency draw updates — must not rebuild Image.network.
   final ValueNotifier<int> _draftTick = ValueNotifier<int>(0);
@@ -176,7 +184,6 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
   void initState() {
     super.initState();
     _index = widget.initialIndex;
-    _pageController = PageController(initialPage: _index);
     _transforms = List.generate(
       widget.urls.length,
       (_) => TransformationController(),
@@ -185,14 +192,19 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     _markPictures = List.generate(widget.urls.length, (_) => null);
     _captureImageKeys = List.generate(widget.urls.length, (_) => GlobalKey());
     _captureAnnotKeys = List.generate(widget.urls.length, (_) => GlobalKey());
+    HardwareKeyboard.instance.addHandler(_onHardwareKey);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _keyFocus.requestFocus();
+    });
   }
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onHardwareKey);
+    _keyFocus.dispose();
     setPrivetAnnotHover(false);
     _draftTick.dispose();
     _cursorTick.dispose();
-    _pageController.dispose();
     for (final p in _markPictures) {
       p?.dispose();
     }
@@ -223,16 +235,20 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     );
   }
 
-  void _onPageChanged(int page) {
+  void _go(int delta) {
+    if (!_gallery || _drawingLocked) return;
+    final next = (_index + delta).clamp(0, widget.urls.length - 1);
+    if (next == _index) return;
     _transforms[_index].value = Matrix4.identity();
+    _transforms[next].value = Matrix4.identity();
     _draft = null;
     _cursorLocal = null;
     _cursorOver = false;
     setState(() {
-      _index = page;
+      _index = next;
       _zoomed = false;
       _grabDragging = false;
-      _hasCommittedMarks = _marks[page].isNotEmpty;
+      _hasCommittedMarks = _marks[next].isNotEmpty;
     });
     _bumpDraft();
     _bumpCursor();
@@ -281,17 +297,6 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     } else {
       _setScale(2.5, focal: details.localPosition);
     }
-  }
-
-  void _go(int delta) {
-    if (!_gallery || _zoomed || _drawingLocked) return;
-    final next = (_index + delta).clamp(0, widget.urls.length - 1);
-    if (next == _index) return;
-    _pageController.animateToPage(
-      next,
-      duration: privetAnim(const Duration(milliseconds: 220)),
-      curve: Curves.easeOutCubic,
-    );
   }
 
   void _setAnnotateMode(bool on) {
@@ -606,10 +611,30 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     }
   }
 
+  bool _isLeft(KeyEvent event) =>
+      event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+      event.physicalKey == PhysicalKeyboardKey.arrowLeft;
+
+  bool _isRight(KeyEvent event) =>
+      event.logicalKey == LogicalKeyboardKey.arrowRight ||
+      event.physicalKey == PhysicalKeyboardKey.arrowRight;
+
+  /// Runs before focus dispatch so Wayland still navigates when the composer
+  /// under this route keeps the text caret.
+  bool _onHardwareKey(KeyEvent event) {
+    if (!mounted) return false;
+    return _onKey(_keyFocus, event) == KeyEventResult.handled;
+  }
+
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
-    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    if (event is KeyUpEvent) {
+      if (event.logicalKey == _navKeyDown) _navKeyDown = null;
+      return KeyEventResult.ignored;
+    }
     final key = event.logicalKey;
     if (key == LogicalKeyboardKey.escape) {
+      // Key-repeat would pop the chat under this route after the first close.
+      if (event is! KeyDownEvent) return KeyEventResult.handled;
       if (_annotateMode) {
         _setAnnotateMode(false);
       } else {
@@ -617,13 +642,16 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
       }
       return KeyEventResult.handled;
     }
-    if (_drawingLocked) return KeyEventResult.ignored;
-    if (key == LogicalKeyboardKey.arrowLeft) {
-      _go(-1);
-      return KeyEventResult.handled;
+    if (_drawingLocked) {
+      if (_isLeft(event) || _isRight(event)) return KeyEventResult.handled;
+      return KeyEventResult.ignored;
     }
-    if (key == LogicalKeyboardKey.arrowRight) {
-      _go(1);
+    if (_isLeft(event) || _isRight(event)) {
+      if (event is KeyDownEvent && _navKeyDown == key) {
+        return KeyEventResult.handled;
+      }
+      if (event is KeyDownEvent) _navKeyDown = key;
+      _go(_isLeft(event) ? -1 : 1);
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.equal ||
@@ -957,34 +985,11 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
     );
   }
 
-  Widget _viewToolbar({required bool canPrev, required bool canNext}) {
+  Widget _viewToolbar() {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         if (_hasMarks) ...[_addToMessageButton(), const SizedBox(height: 10)],
-        if (canPrev || canNext)
-          Row(
-            children: [
-              if (canPrev)
-                _ChromeIconButton(
-                  tooltip: 'Previous',
-                  icon: Icons.chevron_left_rounded,
-                  onPressed: () => _go(-1),
-                )
-              else
-                const SizedBox(width: 44),
-              const Spacer(),
-              if (canNext)
-                _ChromeIconButton(
-                  tooltip: 'Next',
-                  icon: Icons.chevron_right_rounded,
-                  onPressed: () => _go(1),
-                )
-              else
-                const SizedBox(width: 44),
-            ],
-          ),
-        if (canPrev || canNext) const SizedBox(height: 8),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -1019,18 +1024,16 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
 
   @override
   Widget build(BuildContext context) {
-    final canPrev = _gallery && !_zoomed && !_annotateMode && _index > 0;
+    final canPrev = _gallery && !_annotateMode && _index > 0;
     final canNext =
-        _gallery &&
-        !_zoomed &&
-        !_annotateMode &&
-        _index < widget.urls.length - 1;
+        _gallery && !_annotateMode && _index < widget.urls.length - 1;
 
     return ScaffoldMessenger(
       key: _snackKey,
       child: Scaffold(
         backgroundColor: Colors.transparent,
         body: Focus(
+          focusNode: _keyFocus,
           autofocus: true,
           onKeyEvent: _onKey,
           child: Material(
@@ -1041,17 +1044,16 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: (_zoomed || _annotateMode) ? null : _close,
+                  onHorizontalDragEnd: (_zoomed || _annotateMode)
+                      ? null
+                      : (details) {
+                          final velocity = details.primaryVelocity ?? 0;
+                          if (velocity <= -250) _go(1);
+                          if (velocity >= 250) _go(-1);
+                        },
                   child: const SizedBox.expand(),
                 ),
-                PageView.builder(
-                  controller: _pageController,
-                  itemCount: widget.urls.length,
-                  physics: (_zoomed || _annotateMode)
-                      ? const NeverScrollableScrollPhysics()
-                      : const PageScrollPhysics(),
-                  onPageChanged: _onPageChanged,
-                  itemBuilder: (context, i) => _buildImagePage(i),
-                ),
+                _buildImagePage(_index),
                 // Chrome overlays only — middle stays pass-through so drawing and
                 // tool buttons are not fighting a full-screen hit target.
                 SafeArea(
@@ -1105,6 +1107,30 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                     ),
                   ),
                 ),
+                if (canPrev)
+                  Positioned(
+                    left: 0,
+                    top: 64,
+                    bottom: 88,
+                    width: 120,
+                    child: _GalleryEdgeButton(
+                      tooltip: 'Previous',
+                      icon: Icons.chevron_left_rounded,
+                      onPressed: () => _go(-1),
+                    ),
+                  ),
+                if (canNext)
+                  Positioned(
+                    right: 0,
+                    top: 64,
+                    bottom: 88,
+                    width: 120,
+                    child: _GalleryEdgeButton(
+                      tooltip: 'Next',
+                      icon: Icons.chevron_right_rounded,
+                      onPressed: () => _go(1),
+                    ),
+                  ),
                 SafeArea(
                   child: Align(
                     alignment: Alignment.bottomCenter,
@@ -1114,12 +1140,58 @@ class _ImageLightboxPageState extends State<_ImageLightboxPage> {
                         onEnter: (_) => setPrivetAnnotHover(false),
                         child: _annotateMode
                             ? _annotateToolbar()
-                            : _viewToolbar(canPrev: canPrev, canNext: canNext),
+                            : _viewToolbar(),
                       ),
                     ),
                   ),
                 ),
               ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GalleryEdgeButton extends StatelessWidget {
+  const _GalleryEdgeButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: Listener(
+          // Full-height strip, not the 48px circle. Wayland pointer coords
+          // often land a short distance off the painted icon.
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (event) {
+            if ((event.buttons & kSecondaryMouseButton) != 0 &&
+                (event.buttons & kPrimaryMouseButton) == 0) {
+              return;
+            }
+            onPressed();
+          },
+          child: Align(
+            alignment: Alignment.center,
+            child: Material(
+              color: Colors.black.withValues(alpha: 0.45),
+              shape: const CircleBorder(),
+              child: SizedBox(
+                width: 48,
+                height: 48,
+                child: Icon(icon, color: PrivetTheme.paper),
+              ),
             ),
           ),
         ),
@@ -1150,16 +1222,38 @@ class _ChromeIconButton extends StatelessWidget {
     final fg = active
         ? PrivetTheme.onAccent
         : PrivetTheme.paper.withValues(alpha: enabled ? 1 : 0.35);
-    return Material(
-      color: bg,
-      shape: const CircleBorder(),
-      child: IconButton(
-        tooltip: tooltip,
-        onPressed: onPressed,
-        mouseCursor: enabled
-            ? SystemMouseCursors.click
-            : SystemMouseCursors.basic,
-        icon: Icon(icon, color: fg),
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: bg,
+        shape: const CircleBorder(),
+        // Listener/onPointerDown, not IconButton/InkWell: mouse tap slop is
+        // about 1px, and Wayland fractional scaling cancels the tap before
+        // onPressed (same failure as the jump-to-latest button).
+        child: Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: !enabled
+              ? null
+              : (event) {
+                  // Wayland often reports the press with an empty button mask.
+                  // Treat that as a left click. Skip an explicit right click.
+                  if ((event.buttons & kSecondaryMouseButton) != 0 &&
+                      (event.buttons & kPrimaryMouseButton) == 0) {
+                    return;
+                  }
+                  onPressed!();
+                },
+          child: MouseRegion(
+            cursor: enabled
+                ? SystemMouseCursors.click
+                : SystemMouseCursors.basic,
+            child: SizedBox(
+              width: 48,
+              height: 48,
+              child: Icon(icon, color: fg),
+            ),
+          ),
+        ),
       ),
     );
   }

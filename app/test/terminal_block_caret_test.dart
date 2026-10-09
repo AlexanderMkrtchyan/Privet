@@ -3,6 +3,28 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:privet/widgets/terminal_block_caret.dart';
 
 void main() {
+  group('graphemeAtCaret', () {
+    test('returns the grapheme at the insertion point', () {
+      expect(graphemeAtCaret('abc', 0), 'a');
+      expect(graphemeAtCaret('abc', 1), 'b');
+      expect(graphemeAtCaret('abc', 2), 'c');
+    });
+
+    test('returns null at EOF and on newlines', () {
+      expect(graphemeAtCaret('abc', 3), isNull);
+      expect(graphemeAtCaret('a\nb', 1), isNull);
+      expect(graphemeAtCaret('', 0), isNull);
+    });
+
+    test('handles multi-code-unit graphemes', () {
+      // Woman emoji + ZWJ + laptop = one grapheme (technically may vary;
+      // thumbs-up with skin tone is a common multi-unit cluster).
+      const cluster = '👍🏽';
+      expect(graphemeAtCaret('${cluster}x', 0), cluster);
+      expect(graphemeAtCaret('${cluster}x', cluster.length), 'x');
+    });
+  });
+
   group('composerOverlayFieldClip', () {
     test('keeps the visible field inside the overlay', () {
       final clip = composerOverlayFieldClip(

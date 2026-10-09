@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
-import '../util/low_resource.dart';
 
 /// Teams-style “someone is typing” row: pill bubble + bouncing dots.
 class TypingIndicatorBubble extends StatefulWidget {
@@ -22,6 +21,8 @@ class TypingIndicatorBubble extends StatefulWidget {
 class _TypingIndicatorBubbleState extends State<TypingIndicatorBubble> {
   /// Same period as the old AnimationController; advanced by a Dart [Timer]
   /// so Windows merged-thread / idle-vsync stalls cannot freeze the dots.
+  /// Always runs — Low RAM & CPU sets [MediaQueryData.disableAnimations],
+  /// which used to freeze these dots. A 32 ms tick is cheap enough to keep.
   static const Duration _loop = Duration(milliseconds: 1200);
   static const Duration _tick = Duration(milliseconds: 32);
 
@@ -31,56 +32,23 @@ class _TypingIndicatorBubbleState extends State<TypingIndicatorBubble> {
   @override
   void initState() {
     super.initState();
-    privetLowResourceListenable.addListener(_onLowResourceChanged);
-    // MediaQuery is not available yet — flag only.
-    _applyReduceMotion(privetLowResource);
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _applyReduceMotion(
-      privetLowResource || MediaQuery.disableAnimationsOf(context),
-    );
+    _timer = Timer.periodic(_tick, (_) {
+      if (!mounted) return;
+      setState(() {
+        _t = (_t + _tick.inMilliseconds / _loop.inMilliseconds) % 1.0;
+      });
+    });
   }
 
   @override
   void dispose() {
-    privetLowResourceListenable.removeListener(_onLowResourceChanged);
-    _stop();
-    super.dispose();
-  }
-
-  void _onLowResourceChanged() {
-    final osReduce =
-        mounted && (MediaQuery.maybeOf(context)?.disableAnimations ?? false);
-    _applyReduceMotion(privetLowResource || osReduce);
-  }
-
-  void _applyReduceMotion(bool reduce) {
-    if (!reduce && _timer == null) {
-      _timer = Timer.periodic(_tick, (_) {
-        if (!mounted) return;
-        setState(() {
-          _t = (_t + _tick.inMilliseconds / _loop.inMilliseconds) % 1.0;
-        });
-      });
-      if (mounted) setState(() {});
-    } else if (reduce && _timer != null) {
-      _stop();
-      if (mounted) setState(() {});
-    }
-  }
-
-  void _stop() {
     _timer?.cancel();
     _timer = null;
-    _t = 0.5;
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final animating = _timer != null;
     // Repaint boundary keeps the bouncing dots' per-frame repaint inside this
     // row instead of the whole message list layer.
     return RepaintBoundary(
@@ -117,7 +85,7 @@ class _TypingIndicatorBubbleState extends State<TypingIndicatorBubble> {
                   ),
                   border: Border.all(color: PrivetTheme.line),
                 ),
-                child: _TypingDots(t: animating ? _t : 0.5),
+                child: _TypingDots(t: _t),
               ),
             ],
           ),

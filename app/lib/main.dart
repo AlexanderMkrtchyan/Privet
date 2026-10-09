@@ -71,9 +71,12 @@ Future<void> main() async {
   // is updated to this revision.
   if (DesktopTray.isSupported) {
     final primary = await DesktopSingleInstance.ensurePrimary(
-      onRaise: () => unawaited(DesktopTray.show()),
+      onRaise: (token) => unawaited(DesktopTray.show(activationToken: token)),
     );
-    if (!primary) return;
+    if (!primary) {
+      DesktopSingleInstance.exitSecondary();
+      return;
+    }
     await DesktopTray.init();
   }
   // Prefer bundled assets/google_fonts/<Family>-<Variant>.ttf (no network).

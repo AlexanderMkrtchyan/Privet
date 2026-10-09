@@ -37,8 +37,10 @@ import '../util/greeting_style.dart';
 import '../util/composer_autocorrect.dart';
 import '../util/composer_media_attach.dart';
 import '../util/desktop_tray.dart';
+import '../util/html_clipboard_markup.dart';
 import '../util/media_kind.dart';
 import '../util/media_permissions.dart';
+import '../util/remote_input.dart';
 import '../util/storage_access.dart';
 import '../util/task_event_payload.dart';
 import '../util/media_ui_wake.dart';
@@ -65,6 +67,7 @@ import '../widgets/composer_selection_overlay.dart';
 import '../widgets/composer_voice_bar.dart';
 import '../widgets/custom_shortcodes_editor.dart';
 import '../widgets/english_trainer_ui.dart';
+import '../widgets/pronunciation_coach_dialog.dart';
 import '../widgets/kolobok_plain_text.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/selectable_markup_text.dart';
@@ -2446,7 +2449,8 @@ class InboxPane extends StatelessWidget {
                           contentPadding: EdgeInsets.zero,
                           title: const Text('Terminal cursor'),
                           subtitle: Text(
-                            'Block caret like Ubuntu terminal / vim. '
+                            'Block caret like Ubuntu terminal / vim — '
+                            'character under the cursor turns black. '
                             'Off uses a thin beam — same blink and colors',
                             style: TextStyle(
                               color: PrivetTheme.mist,
@@ -3226,6 +3230,13 @@ class _ConversationPaneState extends State<ConversationPane>
   OverlayEntry? _composerFormatBar;
   bool _showEmoji = false;
   bool _recording = false;
+
+  /// Ctrl/Cmd+V is delivered twice: this pane's hardware handler and the
+  /// focused field's paste shortcut. Both read the clipboard asynchronously,
+  /// so the slower one (rich HTML from Chrome / Google) appends a second copy.
+  /// The first call wins until the paste key is released, which also drops
+  /// key-repeat pastes.
+  bool _composerPasteSuppressed = false;
   VoiceDraft? _draftVoice;
   Timer? _recordingTimer;
   Duration _recordingElapsed = Duration.zero;
@@ -3296,7 +3307,6 @@ class _ConversationPaneState extends State<ConversationPane>
 
   /// Selected snippet when replying to part of a message (quote preview).
   String? _replySnippet;
-  int? _pasteBindId;
   ChatMediaFolderKind? _mediaFolder;
   bool _showTasks = false;
   int _tasksInitialTab = 0;
@@ -3337,14 +3347,6 @@ class _ConversationPaneState extends State<ConversationPane>
         if (mounted) _controller.refreshSpelling();
       }),
     );
-    _pasteBindId = bindImagePaste((file) {
-      if (!mounted || widget.state.activeConversationId == null) return;
-      setState(() {
-        _draftMedia.add(file);
-        _syncEmojiPanel(false);
-      });
-      _syncComposerHasContent();
-    });
     _composerMediaAttachId = registerComposerMediaAttach(
       _onAnnotatedImageFromLightbox,
     );
@@ -3368,7 +3370,13 @@ class _ConversationPaneState extends State<ConversationPane>
   /// Ctrl/Cmd+C copies the message-body selection (web CustomPaint has no
   /// native copy). Escape closes tasks / photos / files back to chat (same as
   /// the pane X / re-tapping the chat in the sidebar).
+  /// Ctrl/Cmd+V while the composer is focused is owned by [PasteTextIntent]
+  /// (see [_bindComposerPaste]). This handler only pastes when the composer
+  /// is not focused, so the two paths cannot both insert.
   bool _onGlobalKey(KeyEvent event) {
+    if (event is KeyUpEvent) {
+      _releaseComposerPasteSuppression();
+    }
     if (event is! KeyDownEvent) return false;
 
     if (event.logicalKey == LogicalKeyboardKey.escape) {
@@ -3385,6 +3393,20 @@ class _ConversationPaneState extends State<ConversationPane>
         event.logicalKey == LogicalKeyboardKey.end) {
       if (ModalRoute.of(context)?.isCurrent != true) return false;
       _scrollToEnd();
+      return true;
+    }
+
+    // Ctrl/Cmd+V — image / rich HTML / plain text via [_composerPaste].
+    if ((keys.isControlPressed || keys.isMetaPressed) &&
+        event.logicalKey == LogicalKeyboardKey.keyV) {
+      if (ModalRoute.of(context)?.isCurrent != true) return false;
+      if (widget.state.activeConversationId == null) return false;
+      // Web: leave EditableText paste alone (in-app mirror / DOM paste).
+      if (kIsWeb) return false;
+      // Focused composer: the field shortcut inserts once. Pasting here too
+      // races that read and duplicates the clipboard (common with Google HTML).
+      if (_composerFocus.hasFocus) return false;
+      unawaited(_composerPaste());
       return true;
     }
 
@@ -3620,6 +3642,7 @@ class _ConversationPaneState extends State<ConversationPane>
   }
 
   Future<void> _pasteFromSystemClipboard() async {
+    if (await _pasteRichHtmlFromClipboard()) return;
     final text = await AppClipboard.getText();
     if (text == null || text.isEmpty) return;
     insertTextIntoController(_controller, text);
@@ -3627,11 +3650,94 @@ class _ConversationPaneState extends State<ConversationPane>
     widget.state.notifyTyping();
   }
 
+  /// Prefer OS `text/html` when it carries real formatting (colors, lists,
+  /// bold/italic, tables). Falls back to plain text when HTML is missing,
+  /// plain-looking, or the conversion lost tab/column structure that
+  /// `text/plain` still has (common for spreadsheet / browser table copies).
+  Future<bool> _pasteRichHtmlFromClipboard() async {
+    if (kIsWeb) return false;
+    try {
+      final html = await RemoteInput.getClipboardHtml();
+      if (html == null || html.isEmpty) return false;
+      if (!htmlClipboardLooksRich(html)) return false;
+      final parsed = htmlToMarkup(html);
+      if (parsed.plainText.isEmpty) return false;
+
+      final plain = await AppClipboard.getText();
+      if (plain != null &&
+          plain.isNotEmpty &&
+          htmlSelectionWasDoubled(plain, parsed.plainText)) {
+        // Chrome sometimes serializes the same selection twice in text/html
+        // (Google results do this). text/plain has the single copy.
+        insertTextIntoController(_controller, plain);
+        _composerFocus.requestFocus();
+        widget.state.notifyTyping();
+        return true;
+      }
+      if (plain != null &&
+          plain.isNotEmpty &&
+          plainTextLooksMoreStructured(plain, parsed.plainText)) {
+        // Browser/OS plain TSV kept columns better — paste that instead.
+        insertTextIntoController(_controller, plain);
+        _composerFocus.requestFocus();
+        widget.state.notifyTyping();
+        return true;
+      }
+
+      _controller.insertParsedMarkup(parsed);
+      _composerFocus.requestFocus();
+      widget.state.notifyTyping();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool get _pasteChordHeld {
+    final keys = HardwareKeyboard.instance;
+    return keys.isLogicalKeyPressed(LogicalKeyboardKey.keyV) ||
+        keys.isLogicalKeyPressed(LogicalKeyboardKey.insert);
+  }
+
+  void _releaseComposerPasteSuppression() {
+    if (!_pasteChordHeld) _composerPasteSuppressed = false;
+  }
+
+  /// Replaces the composer's default paste so images and rich HTML win, and
+  /// so Ctrl/Cmd+V is not also inserted by [EditableText].
+  Widget _bindComposerPaste(Widget child) {
+    if (kIsWeb) return child;
+    return Actions(
+      actions: <Type, Action<Intent>>{
+        PasteTextIntent: CallbackAction<PasteTextIntent>(
+          onInvoke: (_) {
+            unawaited(_composerPaste());
+            return null;
+          },
+        ),
+      },
+      child: child,
+    );
+  }
+
   /// Paste into the composer. Web pastes from the in-app mirror only
   /// (clipboard.readText would trigger Chromium's permission bubble); native
-  /// lets the OS clipboard decide — an image wins over text, then the in-app
-  /// fallbacks (last-copied image, then mirror text) are consulted.
+  /// lets the OS clipboard decide — an image wins over text, then rich HTML,
+  /// then plain text / in-app image fallbacks.
   Future<void> _composerPaste() async {
+    if (_composerPasteSuppressed) return;
+    _composerPasteSuppressed = true;
+    final untilKeyUp = _pasteChordHeld;
+    try {
+      await _composerPasteImpl();
+    } finally {
+      if (!untilKeyUp || !_pasteChordHeld) {
+        _composerPasteSuppressed = false;
+      }
+    }
+  }
+
+  Future<void> _composerPasteImpl() async {
     if (kIsWeb) {
       var text = AppClipboard.peek();
       if (text == null || text.isEmpty) {
@@ -3661,6 +3767,10 @@ class _ConversationPaneState extends State<ConversationPane>
       });
       _syncComposerHasContent();
       _composerFocus.requestFocus();
+      _dismissComposerCtxMenu();
+      return;
+    }
+    if (await _pasteRichHtmlFromClipboard()) {
       _dismissComposerCtxMenu();
       return;
     }
@@ -4954,7 +5064,6 @@ class _ConversationPaneState extends State<ConversationPane>
     _scroll.removeListener(_onScrollForOlder);
     _searchDebounce?.cancel();
     _focusReplyTimer?.cancel();
-    unbindImagePaste(_pasteBindId);
     unregisterComposerMediaAttach(_composerMediaAttachId);
     unregisterComposerTextAttach(_composerTextAttachId);
     _controller.dispose();
@@ -5973,6 +6082,8 @@ class _ConversationPaneState extends State<ConversationPane>
                                         suffixIcon: Row(
                                           mainAxisSize: MainAxisSize.min,
                                           children: [
+                                            if (_pronunciationButton() != null)
+                                              _pronunciationButton()!,
                                             if (cameraCaptureAvailable)
                                               IconButton(
                                                 tooltip: 'Take a picture',
@@ -6121,6 +6232,8 @@ class _ConversationPaneState extends State<ConversationPane>
                                 ),
                               ),
                             ),
+                            if (_pronunciationButton() != null)
+                              _pronunciationButton()!,
                             IconButton(
                               tooltip: _recording
                                   ? 'Stop recording'
@@ -6461,7 +6574,7 @@ class _ConversationPaneState extends State<ConversationPane>
                 selectionHandleColor: PrivetTheme.signal,
               ),
             ),
-            child: TextField(
+            child: _bindComposerPaste(TextField(
               key: _composerFieldKey,
               controller: _controller,
               focusNode: _composerFocus,
@@ -6493,7 +6606,7 @@ class _ConversationPaneState extends State<ConversationPane>
               },
               onTap: _onComposerTap,
               decoration: fieldDecoration,
-            ),
+            )),
           ),
           Positioned.fill(
             child: IgnorePointer(
@@ -6511,6 +6624,7 @@ class _ConversationPaneState extends State<ConversationPane>
                 controller: _controller,
                 height: caretHeight,
                 width: caretWidth,
+                paintUnderGlyph: state.terminalCursorEnabled,
               ),
             ),
           ),
@@ -7648,6 +7762,30 @@ class _ConversationPaneState extends State<ConversationPane>
     });
     _stopRecordingUi(clearLevels: true);
     _syncComposerHasContent();
+  }
+
+  /// Linux desktop only, and only while the English coach is on.
+  Widget? _pronunciationButton() {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.linux) return null;
+    if (!widget.state.englishTrainerEnabled || _recording) return null;
+    return ValueListenableBuilder<bool>(
+      valueListenable: _composerHasContent,
+      builder: (context, hasContent, _) {
+        return IconButton(
+          tooltip: hasContent
+              ? 'Проверить произношение'
+              : 'Напишите фразу, потом проверьте произношение',
+          onPressed: hasContent ? _openPronunciationCoach : null,
+          icon: const Icon(Icons.record_voice_over_rounded),
+        );
+      },
+    );
+  }
+
+  Future<void> _openPronunciationCoach() async {
+    final text = _controller.text.trim();
+    if (text.isEmpty || _recording) return;
+    await showPronunciationCoachDialog(context, text: text);
   }
 
   Future<void> _startRecording() async {

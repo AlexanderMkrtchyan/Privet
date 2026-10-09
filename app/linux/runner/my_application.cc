@@ -1,19 +1,60 @@
 #include "my_application.h"
 
 #include <flutter_linux/flutter_linux.h>
+#include <gdk/gdkkeysyms.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
 #endif
 
 #include "flutter/generated_plugin_registrant.h"
 #include "remote_input_plugin.h"
+#include "window_present_plugin.h"
 
 struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
+  guint key_snooper;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
+
+// Wayland often leaves keyboard focus on the header bar, so Left/Right never
+// reach the Flutter view (gallery arrows, composer caret). Forward those keys
+// when they would otherwise hit another widget in this window. File dialogs
+// are a different toplevel and are left alone.
+static gint privet_forward_navigation_keys(GtkWidget* widget,
+                                           GdkEventKey* event,
+                                           gpointer data) {
+  GtkWidget* view = GTK_WIDGET(data);
+  if (!GTK_IS_WIDGET(view) || widget == nullptr) return FALSE;
+  if (widget == view || gtk_widget_is_ancestor(widget, view)) return FALSE;
+  GtkWidget* view_top = gtk_widget_get_toplevel(view);
+  GtkWidget* event_top = gtk_widget_get_toplevel(widget);
+  if (view_top != event_top) return FALSE;
+
+  switch (event->keyval) {
+    case GDK_KEY_Left:
+    case GDK_KEY_Right:
+    case GDK_KEY_Up:
+    case GDK_KEY_Down:
+    case GDK_KEY_KP_Left:
+    case GDK_KEY_KP_Right:
+    case GDK_KEY_KP_Up:
+    case GDK_KEY_KP_Down:
+    case GDK_KEY_Escape:
+      break;
+    default:
+      return FALSE;
+  }
+
+  gtk_widget_grab_focus(view);
+  gboolean handled = FALSE;
+  const char* signal_name = event->type == GDK_KEY_RELEASE
+                                ? "key-release-event"
+                                : "key-press-event";
+  g_signal_emit_by_name(view, signal_name, event, &handled);
+  return TRUE;
+}
 
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
@@ -78,8 +119,16 @@ static void my_application_activate(GApplication* application) {
   remote_input_plugin_register_with_registrar(
       fl_plugin_registry_get_registrar_for_plugin(FL_PLUGIN_REGISTRY(view),
                                                   "RemoteInputPlugin"));
+  window_present_plugin_register_with_registrar(
+      fl_plugin_registry_get_registrar_for_plugin(FL_PLUGIN_REGISTRY(view),
+                                                  "WindowPresentPlugin"));
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  self->key_snooper = gtk_key_snooper_install(privet_forward_navigation_keys,
+                                              view);
+#pragma clang diagnostic pop
 }
 
 // Implements GApplication::local_command_line.
@@ -114,9 +163,14 @@ static void my_application_startup(GApplication* application) {
 
 // Implements GApplication::shutdown.
 static void my_application_shutdown(GApplication* application) {
-  // MyApplication* self = MY_APPLICATION(object);
-
-  // Perform any actions required at application shutdown.
+  MyApplication* self = MY_APPLICATION(application);
+  if (self->key_snooper != 0) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    gtk_key_snooper_remove(self->key_snooper);
+#pragma clang diagnostic pop
+    self->key_snooper = 0;
+  }
 
   G_APPLICATION_CLASS(my_application_parent_class)->shutdown(application);
 }

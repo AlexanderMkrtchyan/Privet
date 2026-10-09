@@ -16,7 +16,7 @@ import 'gpu_capability.dart';
 bool privetLowResource = false;
 
 /// Fires whenever [privetLowResource] flips so long-lived State objects
-/// (typing dots, emoji) can tear down tickers without waiting for a parent
+/// (emoji) can tear down tickers without waiting for a parent
 /// rebuild that might be paused behind a modal sheet.
 final ValueNotifier<bool> privetLowResourceListenable = ValueNotifier(false);
 

@@ -56,6 +56,7 @@ class PrivetFCMService : FirebaseMessagingService() {
     override fun onCreate() {
         super.onCreate()
         ensureCallChannel(this)
+        MessageNotifier.ensureChannel(this)
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
@@ -63,7 +64,13 @@ class PrivetFCMService : FirebaseMessagingService() {
         if (data.isEmpty()) return
 
         val type = data["type"] ?: ""
-        if (type != "call.incoming") return
+        if (type != "call.incoming") {
+            // Notification-payload chat pushes call this only when FCM thinks
+            // the app is foreground — which, screen on, includes "using
+            // another app". The system will not post a banner in that case.
+            MessageNotifier.showIfSwallowed(this, message)
+            return
+        }
 
         val callId = data["callId"] ?: ""
         if (callId.isEmpty()) return

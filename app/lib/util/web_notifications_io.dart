@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:dbus/dbus.dart';
 import 'package:desktop_notifications/desktop_notifications.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:local_notifier/local_notifier.dart';
 import 'package:window_manager/window_manager.dart';
+
+import 'desktop_window_present_io.dart';
 
 /// Desktop focus / visibility for unread badges (Linux / Windows / macOS).
 ///
@@ -27,6 +30,11 @@ bool _hooksInstalled = false;
 final List<void Function()> _visibleCallbacks = [];
 
 NotificationsClient? _notifyClient;
+DBusClient? _notifyBus;
+StreamSubscription<DBusSignal>? _activationTokenSub;
+/// GNOME 50 emits this on notification click, before ActionInvoked.
+/// Mutter will not raise the window unless the token is applied.
+final Map<int, String> _activationTokensById = {};
 bool _notificationsReady = false;
 bool _notificationsFailed = false;
 final Map<String, int> _replaceIdsByTag = {};
@@ -116,7 +124,9 @@ Future<bool> requestNotificationPermission() async {
     if (_notificationsReady) return true;
     if (_notificationsFailed) return false;
     try {
-      final client = _notifyClient ??= NotificationsClient();
+      final bus = _notifyBus ??= DBusClient.session();
+      final client = _notifyClient ??= NotificationsClient(bus: bus);
+      _listenForActivationTokens(bus);
       await client.getServerInformation();
       _notificationsReady = true;
       return true;
@@ -333,7 +343,8 @@ Future<void> _showLinuxNotification({
       try {
         final action = await notification.action;
         if (action != 'default') return;
-        await _raiseDesktopWindow();
+        final token = await _takeActivationToken(notification.id);
+        await _raiseDesktopWindow(activationToken: token);
         onClick?.call();
       } catch (_) {}
     }());
@@ -357,15 +368,45 @@ Future<String> _resolveAppIcon() async {
   return '';
 }
 
-Future<void> _raiseDesktopWindow() async {
+void _listenForActivationTokens(DBusClient bus) {
+  if (_activationTokenSub != null) return;
+  final signals = DBusRemoteObjectSignalStream(
+    object: DBusRemoteObject(
+      bus,
+      name: 'org.freedesktop.Notifications',
+      path: DBusObjectPath('/org/freedesktop/Notifications'),
+    ),
+    interface: 'org.freedesktop.Notifications',
+    name: 'ActivationToken',
+  );
+  _activationTokenSub = signals.listen((signal) {
+    if (signal.signature != DBusSignature('us')) return;
+    if (signal.values.length < 2) return;
+    final id = signal.values[0];
+    final token = signal.values[1];
+    if (id is! DBusUint32 || token is! DBusString) return;
+    final value = token.value.trim();
+    if (value.isEmpty) return;
+    _activationTokensById[id.value] = value;
+  });
+}
+
+/// Shell emits ActivationToken immediately before ActionInvoked. If the
+/// signals land on different turns, wait briefly so present() still gets it.
+Future<String?> _takeActivationToken(int id) async {
+  final ready = _activationTokensById.remove(id);
+  if (ready != null && ready.isNotEmpty) return ready;
+  for (var i = 0; i < 10; i++) {
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final token = _activationTokensById.remove(id);
+    if (token != null && token.isNotEmpty) return token;
+  }
+  return null;
+}
+
+Future<void> _raiseDesktopWindow({String? activationToken}) async {
   try {
-    if (Platform.isWindows) {
-      try {
-        await windowManager.setSkipTaskbar(false);
-      } catch (_) {}
-    }
-    await windowManager.show();
-    await windowManager.focus();
+    await raiseDesktopWindow(activationToken: activationToken);
     setDesktopWindowVisible(true);
   } catch (e, st) {
     debugPrint('raise window from notification failed: $e\n$st');

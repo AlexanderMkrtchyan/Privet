@@ -91,6 +91,9 @@ abstract final class RemoteInput {
 
   static Future<String?> getClipboardText() => impl.getClipboardText();
 
+  /// HTML (or empty) from the OS clipboard when a `text/html` target exists.
+  static Future<String?> getClipboardHtml() => impl.getClipboardHtml();
+
   /// PNG bytes from the OS clipboard image, or null if none / unsupported.
   static Future<Uint8List?> getClipboardImagePng() =>
       impl.getClipboardImagePng();

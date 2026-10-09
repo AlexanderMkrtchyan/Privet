@@ -19,11 +19,25 @@ import java.io.File
 
 class MainActivity : FlutterActivity() {
     private var pendingStorageResult: MethodChannel.Result? = null
+
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        // Before Flutter creates privet_messages: bump a FCM-default channel
+        // up to HIGH so unlocked phones get a heads-up, not only a shade entry.
+        MessageNotifier.ensureChannel(this)
         // A cold start from another app's share sheet delivers the payload in
         // onCreate; parse it before the engine builds so Flutter can poll.
         SharedIntentHandler.onIntent(this, intent)
         super.onCreate(savedInstanceState)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        startedActivities++
+    }
+
+    override fun onStop() {
+        startedActivities = (startedActivities - 1).coerceAtLeast(0)
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -397,5 +411,11 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val STORAGE_PERMISSION_REQUEST = 4721
+
+        @Volatile
+        private var startedActivities = 0
+
+        /** True while a Privet activity is visible (not merely process-alive). */
+        val isInForeground: Boolean get() = startedActivities > 0
     }
 }

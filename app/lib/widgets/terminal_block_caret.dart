@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:math' as math;
 
+import 'package:characters/characters.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
@@ -11,6 +13,10 @@ import '../theme.dart';
 /// While typing (and briefly after): locked to [PrivetTheme.signal] (user accent).
 /// After [idleDelay] with no edits: each lit flash advances through
 /// [PrivetTheme.accentOptions]. Ignores autocorrect/kolobok notify storms.
+///
+/// When [paintUnderGlyph] is true (block / terminal mode), the lit caret covers
+/// the grapheme at the insertion point and redraws it in black — same as a
+/// Linux terminal, so every accent stays readable.
 class TerminalBlockCaret extends StatefulWidget {
   const TerminalBlockCaret({
     super.key,
@@ -19,6 +25,7 @@ class TerminalBlockCaret extends StatefulWidget {
     required this.controller,
     required this.height,
     required this.width,
+    this.paintUnderGlyph = true,
   });
 
   final GlobalKey fieldKey;
@@ -26,6 +33,9 @@ class TerminalBlockCaret extends StatefulWidget {
   final TextEditingController controller;
   final double height;
   final double width;
+
+  /// When true, paint a black copy of the character under the lit block.
+  final bool paintUnderGlyph;
 
   /// Half of Ubuntu/GTK `cursor-blink-time` (1200ms).
   static const Duration blinkHalfPeriod = Duration(milliseconds: 600);
@@ -224,10 +234,12 @@ class _TerminalBlockCaretState extends State<TerminalBlockCaret> {
           fieldKey: widget.fieldKey,
           paintKey: _paintKey,
           selection: widget.controller.selection,
+          plainText: widget.controller.text,
           height: widget.height,
           width: widget.width,
           color: _color,
           visible: visible,
+          paintUnderGlyph: widget.paintUnderGlyph,
           scrollPixels: _boundOffset?.pixels ?? 0,
         ),
       ),
@@ -240,20 +252,24 @@ class _TerminalBlockCaretPainter extends CustomPainter {
     required this.fieldKey,
     required this.paintKey,
     required this.selection,
+    required this.plainText,
     required this.height,
     required this.width,
     required this.color,
     required this.visible,
+    required this.paintUnderGlyph,
     required this.scrollPixels,
   });
 
   final GlobalKey fieldKey;
   final GlobalKey paintKey;
   final TextSelection selection;
+  final String plainText;
   final double height;
   final double width;
   final Color color;
   final bool visible;
+  final bool paintUnderGlyph;
   final double scrollPixels;
 
   @override
@@ -278,17 +294,60 @@ class _TerminalBlockCaretPainter extends CustomPainter {
     final anchor = editable
         .getLocalRectForCaret(selection.extent)
         .shift(origin);
-    final rect = Rect.fromLTWH(
-      anchor.left,
-      anchor.top + (anchor.height - height) / 2,
-      width,
-      height,
-    );
+    final top = anchor.top + (anchor.height - height) / 2;
+
+    final offset = selection.extentOffset;
+    final grapheme = paintUnderGlyph
+        ? graphemeAtCaret(plainText, offset)
+        : null;
+
+    Rect rect;
+    TextBox? glyphBox;
+    if (grapheme != null) {
+      final boxes = editable.getBoxesForSelection(
+        TextSelection(
+          baseOffset: offset,
+          extentOffset: offset + grapheme.length,
+        ),
+      );
+      if (boxes.isNotEmpty) {
+        glyphBox = boxes.first;
+        final box = glyphBox.toRect().shift(origin);
+        rect = Rect.fromLTWH(
+          box.left,
+          top,
+          math.max(box.width, width),
+          height,
+        );
+      } else {
+        rect = Rect.fromLTWH(anchor.left, top, width, height);
+      }
+    } else {
+      rect = Rect.fromLTWH(anchor.left, top, width, height);
+    }
     if (!rect.overlaps(clip)) return;
 
     canvas.save();
     canvas.clipRect(clip);
     canvas.drawRect(rect, Paint()..color = color);
+
+    // Terminal-style: black glyph on the lit block so every accent reads.
+    if (grapheme != null && glyphBox != null) {
+      final box = glyphBox.toRect().shift(origin);
+      final style = (editable.text?.style ?? const TextStyle()).copyWith(
+        color: const Color(0xFF000000),
+      );
+      final painter = TextPainter(
+        text: TextSpan(text: grapheme, style: style),
+        textDirection: editable.textDirection,
+        textScaler: editable.textScaler,
+        locale: editable.locale,
+        strutStyle: editable.strutStyle,
+        textHeightBehavior: editable.textHeightBehavior,
+      )..layout();
+      final dy = box.top + (box.height - painter.height) / 2;
+      painter.paint(canvas, Offset(box.left, dy));
+    }
     canvas.restore();
   }
 
@@ -296,11 +355,29 @@ class _TerminalBlockCaretPainter extends CustomPainter {
   bool shouldRepaint(covariant _TerminalBlockCaretPainter oldDelegate) {
     return oldDelegate.visible != visible ||
         oldDelegate.selection != selection ||
+        oldDelegate.plainText != plainText ||
         oldDelegate.height != height ||
         oldDelegate.width != width ||
         oldDelegate.color != color ||
+        oldDelegate.paintUnderGlyph != paintUnderGlyph ||
         oldDelegate.scrollPixels != scrollPixels;
   }
+}
+
+/// Grapheme covered by a terminal block caret at [offset], or null at EOF /
+/// mid-cluster / newline (empty cell).
+String? graphemeAtCaret(String text, int offset) {
+  if (offset < 0 || offset >= text.length) return null;
+  var index = 0;
+  for (final grapheme in text.characters) {
+    if (index == offset) {
+      if (grapheme == '\n' || grapheme == '\r') return null;
+      return grapheme;
+    }
+    index += grapheme.length;
+    if (index > offset) return null;
+  }
+  return null;
 }
 
 /// [RenderEditable] under a composer [TextField] key.

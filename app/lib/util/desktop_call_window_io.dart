@@ -1,7 +1,8 @@
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:window_manager/window_manager.dart';
+
+import 'desktop_window_present_io.dart';
 
 bool get isDesktopCallWindowSupported =>
     !kIsWeb && (Platform.isLinux || Platform.isWindows);
@@ -11,15 +12,7 @@ bool get isDesktopCallWindowSupported =>
 Future<void> flashDesktopWindowForIncomingCall() async {
   if (!isDesktopCallWindowSupported) return;
   try {
-    if (!await windowManager.isVisible()) {
-      if (Platform.isWindows) {
-        await windowManager.setSkipTaskbar(false);
-      }
-    }
-    await windowManager.setAlwaysOnTop(true);
-    await windowManager.show();
-    await windowManager.focus();
-    await windowManager.setAlwaysOnTop(false);
+    await raiseDesktopWindow();
   } catch (e, st) {
     debugPrint('DesktopCallWindow: flash failed: $e\n$st');
   }

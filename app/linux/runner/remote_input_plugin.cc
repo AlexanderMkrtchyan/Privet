@@ -16,6 +16,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace {
 
@@ -646,16 +647,29 @@ FlMethodResponse* OnMethod(FlMethodCall* method_call) {
     return FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
   }
 
-  if (g_backend == Backend::Unavailable) ProbeBackend();
-  if (g_backend == Backend::Unavailable) {
-    return FL_METHOD_RESPONSE(
-        fl_method_error_response_new("unsupported", g_detail.c_str(), nullptr));
-  }
+  // Clipboard uses GTK selection APIs and must not open a RemoteDesktop
+  // portal session. Paste used to hit this gate first, so Ctrl+V on an image
+  // showed the remote-desktop prompt and blocked until it was granted or
+  // timed out — and a denial aborted the paste entirely.
+  const bool clipboard_method =
+      strcmp(name, "getClipboardText") == 0 ||
+      strcmp(name, "getClipboardHtml") == 0 ||
+      strcmp(name, "getClipboardImagePng") == 0 ||
+      strcmp(name, "setClipboardText") == 0 ||
+      strcmp(name, "setClipboardImage") == 0;
 
-  if (g_backend == Backend::Portal && !g_portal_ready) {
-    if (!StartPortalSession()) {
-      return FL_METHOD_RESPONSE(
-          fl_method_error_response_new("portal", g_detail.c_str(), nullptr));
+  if (!clipboard_method) {
+    if (g_backend == Backend::Unavailable) ProbeBackend();
+    if (g_backend == Backend::Unavailable) {
+      return FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "unsupported", g_detail.c_str(), nullptr));
+    }
+
+    if (g_backend == Backend::Portal && !g_portal_ready) {
+      if (!StartPortalSession()) {
+        return FL_METHOD_RESPONSE(
+            fl_method_error_response_new("portal", g_detail.c_str(), nullptr));
+      }
     }
   }
 
@@ -755,6 +769,55 @@ FlMethodResponse* OnMethod(FlMethodCall* method_call) {
         clip ? gtk_clipboard_wait_for_text(clip) : nullptr;
     g_autoptr(FlValue) result =
         fl_value_new_string(text != nullptr ? text : "");
+    return FL_METHOD_RESPONSE(fl_method_success_response_new(result));
+  }
+
+  if (strcmp(name, "getClipboardHtml") == 0) {
+    GtkClipboard* clip = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+    if (clip == nullptr) {
+      return FL_METHOD_RESPONSE(
+          fl_method_success_response_new(fl_value_new_string("")));
+    }
+    GtkSelectionData* sel =
+        gtk_clipboard_wait_for_contents(clip, gdk_atom_intern("text/html", FALSE));
+    if (sel == nullptr) {
+      sel = gtk_clipboard_wait_for_contents(
+          clip, gdk_atom_intern("TEXT/HTML", FALSE));
+    }
+    if (sel == nullptr) {
+      return FL_METHOD_RESPONSE(
+          fl_method_success_response_new(fl_value_new_string("")));
+    }
+    const guchar* data = gtk_selection_data_get_data(sel);
+    gint len = gtk_selection_data_get_length(sel);
+    std::string html;
+    if (data != nullptr && len > 0) {
+      // Chromium usually places UTF-8; some apps use UTF-16 with a BOM.
+      if (len >= 2 && data[0] == 0xFF && data[1] == 0xFE) {
+        const gunichar2* u16 =
+            reinterpret_cast<const gunichar2*>(data + 2);
+        const glong u16_len = (len - 2) / 2;
+        g_autofree gchar* utf8 =
+            g_utf16_to_utf8(u16, u16_len, nullptr, nullptr, nullptr);
+        if (utf8 != nullptr) html.assign(utf8);
+      } else if (len >= 2 && data[0] == 0xFE && data[1] == 0xFF) {
+        // UTF-16BE BOM — swap to LE then decode.
+        std::vector<gunichar2> swapped(static_cast<size_t>((len - 2) / 2));
+        for (size_t i = 0; i < swapped.size(); i++) {
+          swapped[i] = static_cast<gunichar2>(
+              (data[2 + i * 2] << 8) | data[3 + i * 2]);
+        }
+        g_autofree gchar* utf8 = g_utf16_to_utf8(
+            swapped.data(), static_cast<glong>(swapped.size()), nullptr,
+            nullptr, nullptr);
+        if (utf8 != nullptr) html.assign(utf8);
+      } else {
+        html.assign(reinterpret_cast<const char*>(data),
+                    static_cast<size_t>(len));
+      }
+    }
+    gtk_selection_data_free(sel);
+    g_autoptr(FlValue) result = fl_value_new_string(html.c_str());
     return FL_METHOD_RESPONSE(fl_method_success_response_new(result));
   }
 

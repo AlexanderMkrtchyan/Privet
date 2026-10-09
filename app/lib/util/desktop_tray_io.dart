@@ -9,6 +9,7 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'desktop_single_instance_io.dart' show shutdown;
+import 'desktop_window_present_io.dart';
 import 'web_notifications_io.dart'
     show ensureDesktopFocusHooks, setDesktopWindowVisible;
 
@@ -26,7 +27,8 @@ Future<void> initDesktopTray() async {
   await _DesktopTrayHost.instance.ensureTray();
 }
 
-Future<void> showDesktopWindow() => _DesktopTrayHost.instance.showWindow();
+Future<void> showDesktopWindow({String? activationToken}) =>
+    _DesktopTrayHost.instance.showWindow(activationToken: activationToken);
 
 Future<void> hideDesktopToTray() => _DesktopTrayHost.instance.hideToTray();
 
@@ -222,18 +224,10 @@ class _DesktopTrayHost with WindowListener, TrayListener {
     return file.path;
   }
 
-  Future<void> showWindow() async {
+  Future<void> showWindow({String? activationToken}) async {
     if (_quitting) return;
     await ensureTray();
-    if (Platform.isWindows) {
-      try {
-        await windowManager.setSkipTaskbar(false);
-      } catch (e, st) {
-        debugPrint('DesktopTray: setSkipTaskbar(false) failed: $e\n$st');
-      }
-    }
-    await windowManager.show();
-    await windowManager.focus();
+    await raiseDesktopWindow(activationToken: activationToken);
     setDesktopWindowVisible(true);
   }
 

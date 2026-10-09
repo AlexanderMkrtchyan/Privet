@@ -120,6 +120,16 @@ Future<String?> getClipboardText() async {
   }
 }
 
+Future<String?> getClipboardHtml() async {
+  try {
+    final html = await _channel.invokeMethod<String>('getClipboardHtml');
+    if (html == null || html.isEmpty) return null;
+    return html;
+  } catch (_) {
+    return null;
+  }
+}
+
 Future<Uint8List?> getClipboardImagePng() async {
   try {
     final raw = await _channel.invokeMethod<dynamic>('getClipboardImagePng');

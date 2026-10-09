@@ -493,6 +493,12 @@ class ConversationTasks {
   List<TaskItem> get activeItems =>
       rootItems.where((i) => !i.done).toList();
 
+  /// Active roots whose checkboxes are all checked and that are waiting to be
+  /// confirmed done. They stay off the working list until someone marks them
+  /// done (or reopens them).
+  List<TaskItem> get awaitingReviewItems =>
+      activeItems.where(taskAwaitingReview).toList();
+
   /// Undone subtasks only (for remaining-work counts).
   List<TaskItem> activeSubtasksOf(String parentId) => items
       .where((i) => i.parentId == parentId && !i.isComplete)
@@ -548,6 +554,17 @@ class ConversationTasks {
   }
 
   bool get isComplete => total == 0;
+
+  /// True when an active root is fully checked and waiting for confirmation.
+  /// A task with subtasks moves here once every checkbox is checked. A task
+  /// with no subtasks moves here once its own status is review.
+  bool taskAwaitingReview(TaskItem item) {
+    if (item.done || item.isSubtask) return false;
+    final kids = subtasksOf(item.id);
+    if (kids.isNotEmpty) return kids.every((s) => s.isComplete);
+    return item.status == 'review';
+  }
+
   double get progress {
     if (total == 0) return 1.0;
     return doneCount / total;

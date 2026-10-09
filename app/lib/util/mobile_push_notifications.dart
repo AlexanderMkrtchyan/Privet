@@ -152,7 +152,21 @@ Future<void> bringMobileAppToFront() async {
 Future<void> cancelMobileNotification(String tag) async {
   final plugin = _plugin;
   if (plugin == null || tag.isEmpty) return;
-  await plugin.cancel(tag.hashCode & 0x7fffffff);
+  await plugin.cancel(androidNotificationId(tag), tag: tag);
+}
+
+/// Android notification id shared with [MessageNotifier] (`String.hashCode`).
+/// Dart's [String.hashCode] is a different algorithm, so a native heads-up and
+/// a Flutter one for the same chat would otherwise stack.
+int androidNotificationId(String tag) {
+  var hash = 0;
+  for (final unit in tag.codeUnits) {
+    hash = (hash * 31 + unit) & 0xFFFFFFFF;
+  }
+  if (hash & 0x80000000 != 0) {
+    hash -= 0x100000000;
+  }
+  return hash & 0x7fffffff;
 }
 
 Future<void> showMobileNotificationFromRemoteMessage(
@@ -220,10 +234,10 @@ Future<void> showMobileNotification({
   }
 
   final id = tag != null && tag.isNotEmpty
-      ? tag.hashCode
-      : DateTime.now().millisecondsSinceEpoch;
+      ? androidNotificationId(tag)
+      : DateTime.now().millisecondsSinceEpoch & 0x7fffffff;
   await plugin.show(
-    id & 0x7fffffff,
+    id,
     title,
     body.isEmpty ? ' ' : body,
     NotificationDetails(
@@ -238,7 +252,9 @@ Future<void> showMobileNotification({
         fullScreenIntent: isCall,
         visibility: NotificationVisibility.public,
         autoCancel: !isCall,
+        onlyAlertOnce: !isCall,
         tag: tag,
+        ticker: isCall ? null : title,
         // Full-color logo shown in the shade / heads-up / lock screen.
         largeIcon: const DrawableResourceAndroidBitmap('ic_privet_logo'),
         timeoutAfter: isCall ? 60000 : null,
