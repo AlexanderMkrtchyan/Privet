@@ -44,7 +44,9 @@ Future<bool> ensurePrimary({void Function(String? activationToken)? onRaise}) as
       );
     } on SocketException {
       if (await _pingWindows()) return false;
-      return false;
+      // The port is not a live Privet. Refusing to start here is what makes
+      // the icon do nothing after a graphics crash. Open the window anyway.
+      return true;
     }
   } else {
     final path = await _socketPath();
@@ -105,6 +107,7 @@ Future<bool> _pingWindows() async {
     final socket = await Socket.connect(
       InternetAddress.loopbackIPv4,
       _kWindowsPort,
+      timeout: const Duration(milliseconds: 400),
     );
     socket.write(_raiseMessage());
     await socket.flush();

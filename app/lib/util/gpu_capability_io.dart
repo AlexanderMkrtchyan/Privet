@@ -13,14 +13,20 @@ Future<bool> hasCapableGpu() async {
 }
 
 Future<bool> _probe() async {
-  // Windows / Apple / Android: Impeller or the platform compositor owns the
-  // GPU path. Never auto-strip motion there — LIBGL_* and /dev/dri probes are
-  // Linux-only signals and must not flip "Low RAM & CPU" on a Windows box
-  // (that freezes caret blink, typing dots, and big emoji together).
+  // Apple / Android: the platform compositor owns the GPU path. LIBGL_* and
+  // /dev/dri probes are Linux-only and must not flip "Low RAM & CPU" there.
+  // Windows stays on the full path unless the runner already switched this
+  // process to WARP (PRIVET_SOFTWARE_GL / --privet-software-gl) because
+  // Direct3D 11.0 is missing.
   if (Platform.isWindows ||
       Platform.isMacOS ||
       Platform.isIOS ||
       Platform.isAndroid) {
+    if (Platform.isWindows &&
+        (Platform.environment['PRIVET_SOFTWARE_GL'] == '1' ||
+            Platform.executableArguments.contains('--privet-software-gl'))) {
+      return false;
+    }
     return true;
   }
 

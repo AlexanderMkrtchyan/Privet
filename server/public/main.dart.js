@@ -44775,9 +44775,9 @@ return A.j($async$bw4,r)},
 bww(){var s=window.navigator.userAgent.toLowerCase()
 return B.b.p(s,"firefox")&&!B.b.p(s,"seamonkey")},
 bwn(a,b){var s,r,q=B.b.O(b)
-q=q.length!==0?q:"0.1.37"
+q=q.length!==0?q:"0.1.38"
 s=B.b.O(a)
-s=s.length!==0?s:"22"
+s=s.length!==0?s:"23"
 r=q.length===0
 if(r&&s.length===0)return""
 if(s.length===0)return q
