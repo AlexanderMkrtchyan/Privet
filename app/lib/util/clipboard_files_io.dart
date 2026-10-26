@@ -12,7 +12,15 @@ import 'remote_input.dart';
 
 const _imageTypeGroup = XTypeGroup(
   label: 'Images',
-  extensions: ['bmp', 'gif', 'jpeg', 'jpg', 'png', 'webp'],
+  extensions: ['bmp', 'dib', 'gif', 'jpeg', 'jpg', 'png', 'webp'],
+  mimeTypes: [
+    'image/bmp',
+    'image/x-ms-bmp',
+    'image/gif',
+    'image/jpeg',
+    'image/png',
+    'image/webp',
+  ],
 );
 
 void Function(PickedBytes file)? _onImage;
@@ -25,9 +33,21 @@ Future<PickedBytes?> pickFileNative() async {
   return files.isEmpty ? null : files.first;
 }
 
+/// GTK opens the process working directory. The Linux launcher cds into
+/// ~/Apps/privet, so without this the attach dialog always starts there.
+String? _pickerStartDirectory() {
+  if (!Platform.isLinux) return null;
+  final home = Platform.environment['HOME'];
+  if (home == null || home.isEmpty) return null;
+  return home;
+}
+
 Future<PickedBytes?> pickImageNative() async {
   if (Platform.isLinux) {
-    final file = await openFile(acceptedTypeGroups: const [_imageTypeGroup]);
+    final file = await openFile(
+      acceptedTypeGroups: const [_imageTypeGroup],
+      initialDirectory: _pickerStartDirectory(),
+    );
     if (file == null) return null;
     return pickedBytesFromRaw(
       bytes: null,
@@ -46,7 +66,7 @@ Future<PickedBytes?> pickImageNative() async {
     bytes: file.bytes,
     path: file.path,
     filename: file.name,
-    mimeType: file.extension == 'png' ? 'image/png' : 'image/jpeg',
+    mimeType: mimeForFilename(file.name),
     fileSize: file.size,
   );
 }
@@ -107,7 +127,7 @@ Future<PickedBytes?> pickedBytesFromRaw({
 Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) async {
   FileTooLargeException? tooLarge;
   if (Platform.isLinux) {
-    final files = await openFiles();
+    final files = await openFiles(initialDirectory: _pickerStartDirectory());
     final out = <PickedBytes>[];
     for (final file in files) {
       if (out.length >= maxFiles) break;
@@ -220,49 +240,13 @@ Future<bool> _osClipboardHasText() async {
 /// Wraps raw image bytes with the correct MIME + filename from the magic
 /// bytes, so pasted images survive regardless of the source format.
 PickedBytes _pickedFromBytes(Uint8List bytes) {
-  final mime = _sniffImageMime(bytes);
-  final ext = switch (mime) {
-    'image/jpeg' => 'jpg',
-    'image/gif' => 'gif',
-    'image/webp' => 'webp',
-    _ => 'png',
-  };
+  final mime = sniffImageMime(bytes);
+  final ext = imageExtensionForMime(mime);
   return PickedBytes(
     bytes: bytes,
     filename: 'paste-$ext-${DateTime.now().millisecondsSinceEpoch}.$ext',
     mimeType: mime,
   );
-}
-
-String _sniffImageMime(Uint8List bytes) {
-  if (bytes.length >= 8 &&
-      bytes[0] == 0x89 &&
-      bytes[1] == 0x50 &&
-      bytes[2] == 0x4E &&
-      bytes[3] == 0x47) {
-    return 'image/png';
-  }
-  if (bytes.length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8) {
-    return 'image/jpeg';
-  }
-  if (bytes.length >= 3 &&
-      bytes[0] == 0x47 &&
-      bytes[1] == 0x49 &&
-      bytes[2] == 0x46) {
-    return 'image/gif';
-  }
-  if (bytes.length >= 12 &&
-      bytes[0] == 0x52 &&
-      bytes[1] == 0x49 &&
-      bytes[2] == 0x46 &&
-      bytes[3] == 0x46 &&
-      bytes[8] == 0x57 &&
-      bytes[9] == 0x45 &&
-      bytes[10] == 0x42 &&
-      bytes[11] == 0x50) {
-    return 'image/webp';
-  }
-  return 'image/png';
 }
 
 Future<void> _tryPasteImage() async {

@@ -31,6 +31,21 @@ void main() {
     expect(picked.mimeType, 'video/mp4');
   });
 
+  test('bmp path is treated as an image with preview bytes', () async {
+    final file = File('${tmp.path}/pic.bmp');
+    final bmp = Uint8List.fromList([0x42, 0x4D, 0x00, 0x00]);
+    await file.writeAsBytes(bmp);
+    final picked = await pickedBytesFromRaw(
+      bytes: null,
+      path: file.path,
+      filename: 'pic.bmp',
+    );
+    expect(picked, isNotNull);
+    expect(picked!.mimeType, 'image/bmp');
+    expect(picked.hasPreviewBytes, isTrue);
+    expect(picked.bytes, bmp);
+  });
+
   test('small image is loaded for the composer thumbnail', () async {
     final file = File('${tmp.path}/pic.png');
     final png = Uint8List.fromList([
@@ -56,7 +71,7 @@ void main() {
     );
     expect(
       FileTooLargeException().toString(),
-      'File too large (max 512MB)',
+      'File too large (max 1 GB)',
     );
   });
 }

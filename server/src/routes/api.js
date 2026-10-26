@@ -243,14 +243,54 @@ function emitTaskChangeMessage({ actorId, conversationId, task, action, from, to
 }
 
 const MEDIA_KINDS = new Set(['image', 'video', 'audio', 'voice', 'file', 'album']);
-const MAX_UPLOAD_BYTES = 512 * 1024 * 1024; // 512MB
+const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024; // 1GB
+const UPLOAD_ID_RE = /^[A-Za-z0-9_-]{8,80}$/;
 
-function kindFromMime(mime, fallback = 'file') {
-  if (!mime) return fallback;
-  if (mime.startsWith('image/')) return 'image';
-  if (mime.startsWith('video/')) return 'video';
-  if (mime.startsWith('audio/')) return fallback === 'voice' ? 'voice' : 'audio';
-  return 'file';
+function uploadPartsRoot() {
+  return path.join(path.dirname(uploadsDir), 'upload-parts');
+}
+
+function readUploadChunk(request) {
+  const id = String(request.headers['x-privet-upload'] || '');
+  if (!id) return null;
+  if (!UPLOAD_ID_RE.test(id)) {
+    const err = new Error('bad upload id');
+    err.statusCode = 400;
+    throw err;
+  }
+  const index = Number(request.headers['x-privet-index']);
+  const count = Number(request.headers['x-privet-count']);
+  const size = Number(request.headers['x-privet-size']);
+  if (!Number.isInteger(index) || index < 0 || index > 64) {
+    const err = new Error('bad chunk index');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!Number.isInteger(count) || count < 1 || count > 64 || index >= count) {
+    const err = new Error('bad chunk count');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!Number.isFinite(size) || size < 0 || size > MAX_UPLOAD_BYTES) {
+    const err = new Error('bad upload size');
+    err.statusCode = 400;
+    throw err;
+  }
+  return { id, index, count, size };
+}
+
+function kindFromMime(mime, fallback = 'file', fileName = '') {
+  const type = String(mime || '').toLowerCase();
+  if (type.startsWith('image/')) return 'image';
+  if (type.startsWith('video/')) return 'video';
+  if (type.startsWith('audio/')) return fallback === 'voice' ? 'voice' : 'audio';
+  const name = String(fileName || '').toLowerCase();
+  if (/\.(png|jpe?g|gif|webp|bmp|dib|heic)$/.test(name)) return 'image';
+  if (/\.(mp4|webm|mov|m4v|mkv)$/.test(name)) return 'video';
+  if (/\.(mp3|wav|ogg|m4a|aac)$/.test(name)) {
+    return fallback === 'voice' ? 'voice' : 'audio';
+  }
+  return fallback;
 }
 
 export async function registerRoutes(app) {
@@ -1450,6 +1490,114 @@ export async function registerRoutes(app) {
 
     const mime = file.mimetype || 'application/octet-stream';
     const original = path.basename(file.filename || 'file').slice(0, 180);
+    const asVoice = String(request.query.as || '') === 'voice';
+
+    let chunk = null;
+    try {
+      chunk = readUploadChunk(request);
+    } catch (err) {
+      return reply.code(err.statusCode || 400).send({ error: 'Bad upload' });
+    }
+
+    if (chunk) {
+      const dir = path.join(uploadPartsRoot(), chunk.id);
+      fs.mkdirSync(dir, { recursive: true });
+      const partPath = path.join(dir, String(chunk.index));
+      try {
+        await pipeline(file.file, createWriteStream(partPath));
+      } catch (err) {
+        try {
+          fs.unlinkSync(partPath);
+        } catch {
+          /* ignore */
+        }
+        if (err.code === 'FST_REQ_FILE_TOO_LARGE') {
+          return reply.code(413).send({ error: 'File too large (max 1 GB)' });
+        }
+        if (err.code === 'ENOSPC') {
+          request.log.error({ err }, 'upload failed: disk full');
+          return reply.code(507).send({ error: 'Server storage is full' });
+        }
+        throw err;
+      }
+      if (file.file.truncated) {
+        try {
+          fs.unlinkSync(partPath);
+        } catch {
+          /* ignore */
+        }
+        return reply.code(413).send({ error: 'File too large (max 1 GB)' });
+      }
+      if (chunk.index < chunk.count - 1) {
+        return { ok: true, received: chunk.index };
+      }
+      for (let i = 0; i < chunk.count; i += 1) {
+        if (!fs.existsSync(path.join(dir, String(i)))) {
+          return reply.code(400).send({ error: 'Upload incomplete' });
+        }
+      }
+      const ext = path.extname(original).slice(0, 16);
+      const stored = `${uuid()}${ext}`;
+      const dest = path.join(uploadsDir, stored);
+      const out = createWriteStream(dest);
+      try {
+        for (let i = 0; i < chunk.count; i += 1) {
+          await new Promise((resolve, reject) => {
+            const input = fs.createReadStream(path.join(dir, String(i)));
+            const onErr = (err) => {
+              input.destroy();
+              reject(err);
+            };
+            input.once('error', onErr);
+            out.once('error', onErr);
+            input.once('end', () => {
+              out.removeListener('error', onErr);
+              resolve();
+            });
+            input.pipe(out, { end: false });
+          });
+        }
+        await new Promise((resolve, reject) => {
+          out.end((err) => (err ? reject(err) : resolve()));
+        });
+      } catch (err) {
+        try {
+          fs.unlinkSync(dest);
+        } catch {
+          /* ignore */
+        }
+        if (err.code === 'ENOSPC') {
+          request.log.error({ err }, 'upload failed: disk full');
+          return reply.code(507).send({ error: 'Server storage is full' });
+        }
+        throw err;
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
+      const stat = fs.statSync(dest);
+      if (stat.size !== chunk.size || stat.size > MAX_UPLOAD_BYTES) {
+        try {
+          fs.unlinkSync(dest);
+        } catch {
+          /* ignore */
+        }
+        return reply.code(400).send({ error: 'Upload size mismatch' });
+      }
+      if (kindFromMime(mime, 'file', original) === 'video') {
+        setImmediate(() => {
+          remuxFaststart(dest).catch((err) => {
+            request.log.warn({ err }, 'faststart remux failed');
+          });
+        });
+      }
+      return {
+        mediaUrl: `/media/${stored}`,
+        mimeType: mime,
+        fileName: original,
+        fileSize: stat.size,
+        kind: kindFromMime(mime, asVoice ? 'voice' : 'file', original),
+      };
+    }
+
     const ext = path.extname(original).slice(0, 16);
     const stored = `${uuid()}${ext}`;
     const dest = path.join(uploadsDir, stored);
@@ -1463,7 +1611,7 @@ export async function registerRoutes(app) {
         /* ignore */
       }
       if (err.code === 'FST_REQ_FILE_TOO_LARGE') {
-        return reply.code(413).send({ error: 'File too large (max 512MB)' });
+        return reply.code(413).send({ error: 'File too large (max 1 GB)' });
       }
       if (err.code === 'ENOSPC') {
         request.log.error({ err }, 'upload failed: disk full');
@@ -1478,10 +1626,10 @@ export async function registerRoutes(app) {
       } catch {
         /* ignore */
       }
-      return reply.code(413).send({ error: 'File too large (max 512MB)' });
+      return reply.code(413).send({ error: 'File too large (max 1 GB)' });
     }
 
-    if (kindFromMime(mime, 'file') === 'video') {
+    if (kindFromMime(mime, 'file', original) === 'video') {
       // Optional playback help. Never block the upload ACK — ffmpeg hanging
       // here made even small videos look like they never uploaded.
       setImmediate(() => {
@@ -1492,8 +1640,7 @@ export async function registerRoutes(app) {
     }
 
     const stat = fs.statSync(dest);
-    const asVoice = String(request.query.as || '') === 'voice';
-    const kind = kindFromMime(mime, asVoice ? 'voice' : 'file');
+    const kind = kindFromMime(mime, asVoice ? 'voice' : 'file', original);
     const mediaUrl = `/media/${stored}`;
 
     return {

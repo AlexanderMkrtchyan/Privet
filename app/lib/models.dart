@@ -1,4 +1,5 @@
 import 'util/call_history.dart';
+import 'util/media_kind.dart';
 import 'util/rich_text_markup.dart';
 import 'util/server_time.dart';
 
@@ -349,15 +350,11 @@ class TaskItem {
     ];
   }
 
-  bool get isImage {
-    if (mimeType != null && mimeType!.startsWith('image/')) return true;
-    final name = (fileName ?? mediaUrl ?? '').toLowerCase();
-    return name.endsWith('.png') ||
-        name.endsWith('.jpg') ||
-        name.endsWith('.jpeg') ||
-        name.endsWith('.gif') ||
-        name.endsWith('.webp');
-  }
+  bool get isImage => looksLikeImage(
+        mimeType: mimeType,
+        filename: fileName,
+        url: mediaUrl,
+      );
 
   factory TaskItem.fromJson(Map<String, dynamic> json) {
     final attachmentsRaw = (json['attachments'] as List?) ?? const [];

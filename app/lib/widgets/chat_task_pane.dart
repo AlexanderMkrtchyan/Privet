@@ -1617,7 +1617,12 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
       final up = await uploadPicked(widget.state.api, draft);
       out.add(MediaAttachment(
         mediaUrl: up.mediaUrl,
-        kind: draft.mimeType.startsWith('image/') ? 'image' : 'file',
+        kind: looksLikeImage(
+          mimeType: draft.mimeType,
+          filename: draft.filename,
+        )
+            ? 'image'
+            : 'file',
         mimeType: up.mimeType,
         fileName: up.fileName,
       ));
@@ -1692,7 +1697,12 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
         final up = await uploadPicked(widget.state.api, draft);
         next.add(MediaAttachment(
           mediaUrl: up.mediaUrl,
-          kind: draft.mimeType.startsWith('image/') ? 'image' : 'file',
+          kind: looksLikeImage(
+            mimeType: draft.mimeType,
+            filename: draft.filename,
+          )
+              ? 'image'
+              : 'file',
           mimeType: up.mimeType,
           fileName: up.fileName,
         ));
@@ -2878,7 +2888,10 @@ class _ChatTaskPaneState extends State<ChatTaskPane> with SingleTickerProviderSt
                                     children: [
                                       ClipRRect(
                                         borderRadius: BorderRadius.circular(10),
-                                        child: draft.mimeType.startsWith('image/') &&
+                                        child: looksLikeImage(
+                                                  mimeType: draft.mimeType,
+                                                  filename: draft.filename,
+                                                ) &&
                                                 draft.hasPreviewBytes
                                             ? Image.memory(draft.bytes, width: 72, height: 72, fit: BoxFit.cover)
                                             : Container(
@@ -4390,13 +4403,11 @@ class _TaskRowState extends State<_TaskRow> {
   }
 
   bool _isImageAtt(MediaAttachment a) {
-    if (a.mimeType != null && a.mimeType!.startsWith('image/')) return true;
-    final name = (a.fileName ?? a.mediaUrl).toLowerCase();
-    return name.endsWith('.png') ||
-        name.endsWith('.jpg') ||
-        name.endsWith('.jpeg') ||
-        name.endsWith('.gif') ||
-        name.endsWith('.webp');
+    return looksLikeImage(
+      mimeType: a.mimeType,
+      filename: a.fileName,
+      url: a.mediaUrl,
+    );
   }
 
   /// Opens the shared image lightbox over [from] (defaults to this task's
@@ -5139,13 +5150,11 @@ class _SubtaskRowState extends State<_SubtaskRow> {
   }
 
   bool _isImageAtt(MediaAttachment a) {
-    if (a.mimeType != null && a.mimeType!.startsWith('image/')) return true;
-    final name = (a.fileName ?? a.mediaUrl).toLowerCase();
-    return name.endsWith('.png') ||
-        name.endsWith('.jpg') ||
-        name.endsWith('.jpeg') ||
-        name.endsWith('.gif') ||
-        name.endsWith('.webp');
+    return looksLikeImage(
+      mimeType: a.mimeType,
+      filename: a.fileName,
+      url: a.mediaUrl,
+    );
   }
 
   void _openEditDialog() {

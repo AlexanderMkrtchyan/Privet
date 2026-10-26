@@ -49,7 +49,7 @@ function kindFromMime(mimeType, fileName) {
   if (mime.startsWith('video/')) return 'video';
   if (mime.startsWith('audio/')) return 'audio';
   const name = String(fileName || '').toLowerCase();
-  if (/\.(png|jpe?g|gif|webp|bmp|heic)$/.test(name)) return 'image';
+  if (/\.(png|jpe?g|gif|webp|bmp|dib|heic)$/.test(name)) return 'image';
   if (/\.(mp4|webm|mov|mkv)$/.test(name)) return 'video';
   if (/\.(mp3|wav|ogg|m4a|aac)$/.test(name)) return 'audio';
   return 'file';

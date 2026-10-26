@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -812,8 +813,98 @@ class ApiClient {
     void Function(double progress)? onProgress,
   }) async {
     if (length > kMaxUploadBytes) {
-      throw ApiException(413, 'File too large (max 512MB)');
+      throw ApiException(413, 'File too large (max 1 GB)');
     }
+    if (length > kUploadChunkBytes) {
+      return _uploadChunked(
+        stream: stream,
+        length: length,
+        filename: filename,
+        mimeType: mimeType,
+        asVoice: asVoice,
+        onProgress: onProgress,
+      );
+    }
+    return _uploadSingle(
+      stream: stream,
+      length: length,
+      filename: filename,
+      mimeType: mimeType,
+      asVoice: asVoice,
+      onProgress: onProgress,
+    );
+  }
+
+  /// One request per slice so a 1 GB file can pass Cloudflare's ~100 MB cap.
+  Future<MediaUpload> _uploadChunked({
+    required Stream<List<int>> stream,
+    required int length,
+    required String filename,
+    required String mimeType,
+    required bool asVoice,
+    void Function(double progress)? onProgress,
+  }) async {
+    final chunkCount = (length / kUploadChunkBytes).ceil();
+    final uploadId =
+        '${DateTime.now().microsecondsSinceEpoch.toRadixString(16)}${math.Random().nextInt(1 << 32).toRadixString(16)}';
+    final pending = BytesBuilder(copy: false);
+    var index = 0;
+    MediaUpload? done;
+
+    Future<void> sendChunk(Uint8List bytes) async {
+      final last = index == chunkCount - 1;
+      final result = await _uploadSingle(
+        stream: Stream<List<int>>.value(bytes),
+        length: bytes.length,
+        filename: filename,
+        mimeType: mimeType,
+        asVoice: asVoice,
+        headers: {
+          'x-privet-upload': uploadId,
+          'x-privet-index': '$index',
+          'x-privet-count': '$chunkCount',
+          'x-privet-size': '$length',
+        },
+        parseMedia: last,
+      );
+      onProgress?.call(((index + 1) / chunkCount * 0.97).clamp(0.0, 0.97));
+      index++;
+      if (last) done = result;
+    }
+
+    await for (final piece in stream) {
+      pending.add(piece);
+      while (pending.length >= kUploadChunkBytes) {
+        final all = pending.takeBytes();
+        final chunk = Uint8List(kUploadChunkBytes);
+        chunk.setRange(0, kUploadChunkBytes, all);
+        await sendChunk(chunk);
+        if (all.length > kUploadChunkBytes) {
+          pending.add(Uint8List.sublistView(all, kUploadChunkBytes));
+        }
+      }
+    }
+    if (index < chunkCount) {
+      await sendChunk(pending.takeBytes());
+    }
+    final uploaded = done;
+    if (uploaded == null) {
+      throw ApiException(500, 'Upload failed');
+    }
+    onProgress?.call(1);
+    return uploaded;
+  }
+
+  Future<MediaUpload> _uploadSingle({
+    required Stream<List<int>> stream,
+    required int length,
+    required String filename,
+    required String mimeType,
+    required bool asVoice,
+    void Function(double progress)? onProgress,
+    Map<String, String> headers = const {},
+    bool parseMedia = true,
+  }) async {
     final uri = _u('/uploads').replace(
       queryParameters: asVoice ? {'as': 'voice'} : null,
     );
@@ -821,6 +912,7 @@ class ApiClient {
     if (token != null) {
       req.headers['Authorization'] = 'Bearer $token';
     }
+    req.headers.addAll(headers);
     MediaType contentType;
     try {
       contentType = MediaType.parse(
@@ -838,11 +930,20 @@ class ApiClient {
         contentType: contentType,
       ),
     );
-    onProgress?.call(0);
+    if (headers.isEmpty) onProgress?.call(0);
     final streamed = await req.send();
     final res = await http.Response.fromStream(streamed);
     final data = _decode(res);
-    onProgress?.call(1);
+    if (headers.isEmpty) onProgress?.call(1);
+    if (!parseMedia) {
+      return MediaUpload(
+        mediaUrl: '',
+        mimeType: '',
+        fileName: '',
+        fileSize: 0,
+        kind: 'file',
+      );
+    }
     return MediaUpload.fromJson(data);
   }
 
@@ -928,7 +1029,7 @@ class ApiClient {
     final tooLarge = res.statusCode == 413 ||
         snippet.contains('413') ||
         snippet.contains('Request Entity Too Large');
-    if (tooLarge) return 'File too large (max 512MB)';
+    if (tooLarge) return 'File too large (max 1 GB)';
     if (res.statusCode >= 400) return 'Upload failed (${res.statusCode})';
     return 'Server returned an invalid response';
   }

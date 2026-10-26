@@ -1,10 +1,9 @@
-import 'dart:typed_data';
-
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:image_picker/image_picker.dart';
 
 import 'clipboard_files.dart';
+import 'media_kind.dart';
 
 /// Whether the composer should offer the "Take a picture" button. Native
 /// desktop (Windows/Linux/macOS) has no camera intent, so it is hidden there;
@@ -36,13 +35,8 @@ Future<PickedBytes?> takePictureFromCamera() async {
   final bytes = await file.readAsBytes();
   if (bytes.isEmpty) return null;
 
-  final mime = _sniffImageMime(bytes);
-  final ext = switch (mime) {
-    'image/jpeg' => 'jpg',
-    'image/gif' => 'gif',
-    'image/webp' => 'webp',
-    _ => 'png',
-  };
+  final mime = sniffImageMime(bytes, fallback: 'image/jpeg');
+  final ext = imageExtensionForMime(mime);
   final now = DateTime.now();
   String two(int v) => v.toString().padLeft(2, '0');
   return PickedBytes(
@@ -53,33 +47,3 @@ Future<PickedBytes?> takePictureFromCamera() async {
   );
 }
 
-String _sniffImageMime(Uint8List bytes) {
-  if (bytes.length >= 8 &&
-      bytes[0] == 0x89 &&
-      bytes[1] == 0x50 &&
-      bytes[2] == 0x4E &&
-      bytes[3] == 0x47) {
-    return 'image/png';
-  }
-  if (bytes.length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8) {
-    return 'image/jpeg';
-  }
-  if (bytes.length >= 3 &&
-      bytes[0] == 0x47 &&
-      bytes[1] == 0x49 &&
-      bytes[2] == 0x46) {
-    return 'image/gif';
-  }
-  if (bytes.length >= 12 &&
-      bytes[0] == 0x52 &&
-      bytes[1] == 0x49 &&
-      bytes[2] == 0x46 &&
-      bytes[3] == 0x46 &&
-      bytes[8] == 0x57 &&
-      bytes[9] == 0x45 &&
-      bytes[10] == 0x42 &&
-      bytes[11] == 0x50) {
-    return 'image/webp';
-  }
-  return 'image/jpeg';
-}

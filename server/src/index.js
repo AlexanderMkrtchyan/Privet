@@ -27,7 +27,7 @@ const app = Fastify({
   logger: true,
   // Multipart chat uploads (videos) are larger than Fastify's 1MiB default.
   // JSON stays capped by the parser below.
-  bodyLimit: 512 * 1024 * 1024,
+  bodyLimit: 1024 * 1024 * 1024,
 });
 const port = Number(process.env.PORT || 7777);
 const host = process.env.HOST || '0.0.0.0';

@@ -6716,7 +6716,10 @@ class _ConversationPaneState extends State<ConversationPane>
               separatorBuilder: (_, _) => const SizedBox(width: 8),
               itemBuilder: (context, index) {
                 final draft = drafts[index];
-                final isImage = draft.mimeType.startsWith('image/');
+                final isImage = looksLikeImage(
+                  mimeType: draft.mimeType,
+                  filename: draft.filename,
+                );
                 return Stack(
                   clipBehavior: Clip.none,
                   children: [
@@ -7624,7 +7627,7 @@ class _ConversationPaneState extends State<ConversationPane>
 
   void _applyPickedFile(PickedBytes picked) {
     final mime = picked.mimeType.isEmpty
-        ? _mimeFor(picked.filename)
+        ? mimeForFilename(picked.filename)
         : picked.mimeType;
     setState(() {
       _draftVoice = null;
@@ -7701,23 +7704,6 @@ class _ConversationPaneState extends State<ConversationPane>
       if (!mounted) return;
       widget.state.setError('Could not take a picture: $e');
     }
-  }
-
-  String _mimeFor(String name) {
-    final lower = name.toLowerCase();
-    if (lower.endsWith('.png')) return 'image/png';
-    if (lower.endsWith('.gif')) return 'image/gif';
-    if (lower.endsWith('.webp')) return 'image/webp';
-    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
-    if (lower.endsWith('.mp4')) return 'video/mp4';
-    if (lower.endsWith('.webm')) return 'video/webm';
-    if (lower.endsWith('.mov')) return 'video/quicktime';
-    if (lower.endsWith('.mp3')) return 'audio/mpeg';
-    if (lower.endsWith('.wav')) return 'audio/wav';
-    if (lower.endsWith('.m4a')) return 'audio/mp4';
-    if (lower.endsWith('.ogg')) return 'audio/ogg';
-    if (lower.endsWith('.pdf')) return 'application/pdf';
-    return 'application/octet-stream';
   }
 
   void _voiceToast(String message) {

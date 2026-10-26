@@ -102,7 +102,9 @@ Future<void> _handleAttachChange(html.FileUploadInputElement input) async {
         PickedBytes(
           bytes: bytes,
           filename: file.name.isEmpty ? 'attachment.bin' : file.name,
-          mimeType: file.type.isEmpty ? 'application/octet-stream' : file.type,
+          mimeType: file.type.isEmpty
+              ? mimeForFilename(file.name)
+              : file.type,
         ),
       );
     }
@@ -184,8 +186,9 @@ Future<List<PickedBytes>> pickMultipleFilesNative({int maxFiles = 10}) {
           PickedBytes(
             bytes: bytes,
             filename: file.name.isEmpty ? 'attachment.bin' : file.name,
-            mimeType:
-                file.type.isEmpty ? 'application/octet-stream' : file.type,
+            mimeType: file.type.isEmpty
+                ? mimeForFilename(file.name)
+                : file.type,
           ),
         );
       }
@@ -217,6 +220,7 @@ Future<PickedBytes?> _fromBlob(html.Blob blob, String? mimeHint) async {
     'image/jpeg' => 'jpg',
     'image/gif' => 'gif',
     'image/webp' => 'webp',
+    'image/bmp' || 'image/x-ms-bmp' || 'image/x-bmp' => 'bmp',
     'video/mp4' => 'mp4',
     'video/webm' => 'webm',
     'audio/webm' => 'webm',
@@ -232,17 +236,7 @@ Future<PickedBytes?> _fromBlob(html.Blob blob, String? mimeHint) async {
   return PickedBytes(bytes: bytes, filename: name, mimeType: type);
 }
 
-String _mimeFromName(String name) {
-  final lower = name.toLowerCase();
-  if (lower.endsWith('.png')) return 'image/png';
-  if (lower.endsWith('.gif')) return 'image/gif';
-  if (lower.endsWith('.webp')) return 'image/webp';
-  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
-  if (lower.endsWith('.mp4')) return 'video/mp4';
-  if (lower.endsWith('.webm')) return 'video/webm';
-  if (lower.endsWith('.pdf')) return 'application/pdf';
-  return 'application/octet-stream';
-}
+String _mimeFromName(String name) => mimeForFilename(name);
 
 /// Returns:
 /// - `handled` true when an attachable file was taken from the paste event

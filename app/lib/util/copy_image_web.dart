@@ -8,17 +8,14 @@ import 'dart:typed_data';
 import 'package:web/web.dart' as web;
 
 import 'media_cache.dart';
+import 'media_kind.dart';
 
 String _mimeFor(String? filename, String url) {
   final name = (filename != null && filename.isNotEmpty)
       ? filename
       : url.split('?').first;
-  final lower = name.toLowerCase();
-  if (lower.endsWith('.png')) return 'image/png';
-  if (lower.endsWith('.gif')) return 'image/gif';
-  if (lower.endsWith('.webp')) return 'image/webp';
-  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
-  return 'image/png';
+  final mime = mimeForFilename(name);
+  return mime.startsWith('image/') ? mime : 'image/png';
 }
 
 /// Blobs already fetched for copy, keyed by URL. Images are warmed as soon as

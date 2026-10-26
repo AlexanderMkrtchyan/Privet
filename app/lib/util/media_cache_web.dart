@@ -8,6 +8,8 @@ import 'dart:typed_data';
 
 import 'package:web/web.dart' as web;
 
+import 'media_kind.dart';
+
 /// Max media entries kept in IndexedDB, oldest evicted first (LRU).
 const int kMediaCacheMaxEntries = 20;
 
@@ -381,15 +383,7 @@ Future<Uint8List?> _blobBytes(web.Blob blob) async {
 web.Blob _blobFromBytes(String url, Uint8List bytes) =>
     web.Blob([bytes.toJS].toJS, web.BlobPropertyBag(type: _mimeFor(url)));
 
-String _mimeFor(String url) {
-  final lower = url.split('?').first.toLowerCase();
-  if (lower.endsWith('.png')) return 'image/png';
-  if (lower.endsWith('.gif')) return 'image/gif';
-  if (lower.endsWith('.webp')) return 'image/webp';
-  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
-  if (lower.endsWith('.mp4')) return 'video/mp4';
-  return 'application/octet-stream';
-}
+String _mimeFor(String url) => mimeForFilename(url.split('?').first);
 
 void _remember(String url, Uint8List bytes) {
   final prev = _mem[url];

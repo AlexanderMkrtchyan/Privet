@@ -630,7 +630,7 @@ install_icon_theme "$INSTALL_DIR/privet.png"
 cat >"$INSTALL_DIR/privet-launch.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$INSTALL_DIR"
+cd "\${HOME:-$INSTALL_DIR}"
 # Always drop Conda/Mesa-swrast EGL overrides — they force llvmpipe.
 unset __EGL_VENDOR_LIBRARY_DIRS
 unset LIBGL_ALWAYS_SOFTWARE

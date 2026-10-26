@@ -5376,7 +5376,9 @@ class PrivetState extends ChangeNotifier {
       ...item.mediaItems,
       MediaAttachment(
         mediaUrl: mediaUrl,
-        kind: (mimeType ?? '').startsWith('image/') ? 'image' : 'file',
+        kind: looksLikeImage(mimeType: mimeType, filename: fileName)
+            ? 'image'
+            : 'file',
         mimeType: mimeType,
         fileName: fileName,
       ),
