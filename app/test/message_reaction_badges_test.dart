@@ -73,12 +73,12 @@ void main() {
     );
     final second = tester.getRect(find.byKey(const Key('followup')));
 
-    expect(reaction.bottom, greaterThan(firstChrome.top),
-        reason: 'badge must overlap the top of its bubble');
-    expect(reaction.top, lessThan(firstChrome.top + 8),
-        reason: 'badge must sit on the top edge, not drop into the body');
+    expect(reaction.bottom, greaterThan(firstChrome.bottom - 8),
+        reason: 'badge must overlap the bottom of its bubble');
+    expect(reaction.top, greaterThan(firstChrome.top + 8),
+        reason: 'badge must sit on the bottom edge, not the top');
     expect((reaction.left - firstChrome.left).abs(), lessThan(16),
-        reason: 'incoming and outgoing badges sit on the top-left');
+        reason: 'incoming and outgoing badges sit on the bottom-left');
     expect(reaction.right, lessThan(firstChrome.right - 16),
         reason: 'badge must stay off the timestamp on the right');
     expect(reaction.bottom, lessThan(second.top),
@@ -121,6 +121,37 @@ void main() {
     final reaction = tester.getRect(find.byKey(const ValueKey('reaction-👍')));
     final chrome = tester.getRect(find.byType(AccentChromeFrame));
     expect((reaction.left - chrome.left).abs(), lessThan(16),
-        reason: 'outgoing reactions also sit on the top-left');
+        reason: 'outgoing reactions also sit on the bottom-left');
+  });
+
+  testWidgets('short bubble grows so the badge does not cover the time',
+      (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MessageBubble(
+            message: _msg(
+              id: 'm1',
+              body: 'Ok',
+              reactions: [
+                MessageReaction(
+                  emoji: '👍',
+                  count: 1,
+                  userIds: const ['u2'],
+                ),
+              ],
+            ),
+            mine: true,
+            mediaBase: '',
+            selfId: 'u1',
+          ),
+        ),
+      ),
+    );
+
+    final reaction = tester.getRect(find.byKey(const ValueKey('reaction-👍')));
+    final time = tester.getRect(find.byKey(const ValueKey('message-time')));
+    expect(reaction.right, lessThanOrEqualTo(time.left + 1),
+        reason: 'reserved footer space keeps the badge off the timestamp');
   });
 }

@@ -58,6 +58,8 @@ import '../widgets/accent_chrome.dart';
 import '../widgets/avatar.dart';
 import '../widgets/chat_media_folder.dart';
 import '../widgets/chat_task_pane.dart';
+import '../widgets/chat_wallpaper_layer.dart';
+import '../widgets/chat_wallpaper_picker.dart';
 import '../widgets/compact_emoji_picker.dart';
 import '../widgets/composer_autocomplete_popup.dart';
 import '../widgets/composer_spell_layer.dart';
@@ -2488,6 +2490,35 @@ class InboxPane extends StatelessWidget {
                           onPick: (option) {
                             state.setAccentOption(option);
                             setSheet(() {});
+                          },
+                        ),
+                        const SizedBox(height: 20),
+                        ChatWallpaperPicker(
+                          selectedId: state.chatWallpaperId,
+                          customBytes: state.chatWallpaperCustomBytes,
+                          onSelect: (id) {
+                            unawaited(state.setChatWallpaper(id));
+                            setSheet(() {});
+                          },
+                          onUpload: () async {
+                            final picked = await pickImageNative();
+                            if (picked == null) return;
+                            var bytes = picked.bytes;
+                            if (bytes.isEmpty &&
+                                picked.path != null &&
+                                picked.path!.isNotEmpty) {
+                              final reread = await pickedBytesFromRaw(
+                                bytes: null,
+                                path: picked.path,
+                                filename: picked.filename,
+                                mimeType: picked.mimeType,
+                                fileSize: picked.fileSize,
+                              );
+                              bytes = reread?.bytes ?? bytes;
+                            }
+                            if (bytes.isEmpty) return;
+                            await state.setCustomChatWallpaper(bytes);
+                            if (ctx.mounted) setSheet(() {});
                           },
                         ),
                         const SizedBox(height: 20),
@@ -5618,6 +5649,10 @@ class _ConversationPaneState extends State<ConversationPane>
               Expanded(
                 child: Stack(
                   children: [
+                    ChatWallpaperLayer(
+                      wallpaperId: state.chatWallpaperId,
+                      customBytes: state.chatWallpaperCustomBytes,
+                    ),
                     Listener(
                       behavior: HitTestBehavior.translucent,
                       onPointerUp: (_) {

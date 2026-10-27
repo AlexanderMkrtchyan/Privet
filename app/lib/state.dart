@@ -22,6 +22,8 @@ import 'util/display_rate.dart';
 import 'util/emoticon_expand.dart';
 import 'util/english_trainer.dart';
 import 'util/custom_shortcodes.dart';
+import 'util/chat_wallpaper.dart';
+import 'util/chat_wallpaper_store.dart';
 import 'util/gpu_capability.dart';
 import 'util/greeting_style.dart';
 import 'util/greeting_pools.dart';
@@ -2518,6 +2520,12 @@ class PrivetState extends ChangeNotifier {
   /// Accent option id (device-local). Distinguishes Yellow vs Tape (same hue).
   String accentId = 'lime';
 
+  /// Chat background id (device-local). `none`, `doodle:*`, `custom`.
+  String chatWallpaperId = ChatWallpaperCatalog.noneId;
+
+  /// Uploaded wallpaper bytes, when [chatWallpaperId] is `custom`.
+  Uint8List? chatWallpaperCustomBytes;
+
   /// Chat message body text size in logical px (device-local, default 15).
   /// Message bubbles render body text at this size; Ctrl+scroll over the chat
   /// zooms it in/out and the Profile sheet has a manual slider.
@@ -2924,6 +2932,18 @@ class PrivetState extends ChangeNotifier {
     );
     setCustomShortcodes(activeCustomShortcodePairs(customShortcodes));
     themeMode = _themeModeFromStorage(prefs.getString('privet_theme_mode'));
+    chatWallpaperId = ChatWallpaperCatalog.byId(
+      prefs.getString('privet_chat_wallpaper'),
+    ).id;
+    if (chatWallpaperId == ChatWallpaperCatalog.customId) {
+      chatWallpaperCustomBytes = await loadCustomChatWallpaper();
+      if (chatWallpaperCustomBytes == null ||
+          chatWallpaperCustomBytes!.isEmpty) {
+        chatWallpaperId = ChatWallpaperCatalog.noneId;
+      }
+    } else {
+      chatWallpaperCustomBytes = await loadCustomChatWallpaper();
+    }
     final accentValue = prefs.getInt('privet_accent');
     if (accentValue != null) accent = Color(accentValue);
     final storedAccentId = prefs.getString('privet_accent_id');
@@ -3439,6 +3459,33 @@ class PrivetState extends ChangeNotifier {
     notifySession();
     final prefs = await _prefs();
     await prefs.setString('privet_theme_mode', value.name);
+  }
+
+  Future<void> setChatWallpaper(String id) async {
+    final next = ChatWallpaperCatalog.byId(id);
+    if (next.kind == ChatWallpaperKind.custom &&
+        (chatWallpaperCustomBytes == null ||
+            chatWallpaperCustomBytes!.isEmpty)) {
+      return;
+    }
+    chatWallpaperId = next.id;
+    _bump(sessionTick);
+    _bump(chatTick);
+    super.notifyListeners();
+    final prefs = await _prefs();
+    await prefs.setString('privet_chat_wallpaper', chatWallpaperId);
+  }
+
+  Future<void> setCustomChatWallpaper(Uint8List bytes) async {
+    if (bytes.isEmpty) return;
+    chatWallpaperCustomBytes = bytes;
+    chatWallpaperId = ChatWallpaperCatalog.customId;
+    _bump(sessionTick);
+    _bump(chatTick);
+    super.notifyListeners();
+    final prefs = await _prefs();
+    await prefs.setString('privet_chat_wallpaper', chatWallpaperId);
+    await saveCustomChatWallpaper(bytes);
   }
 
   Future<void> setAccent(Color value) async {

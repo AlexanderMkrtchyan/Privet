@@ -348,6 +348,8 @@ class MessageBubble extends StatelessWidget {
 
     // Teams-style: own messages on the right, others on the left.
     final maxBubble = MediaQuery.sizeOf(context).width * 0.68;
+    final hasReactions = message.reactions.isNotEmpty;
+    final reactionReserve = _reactionBadgeReserve(message.reactions);
     final accent = message.hasAccentWrap;
     // Stickers / emoji-only bodies sit on the chat background with no bubble
     // chrome — a filled box around a Kolobok smiley reads as a "frame".
@@ -512,6 +514,8 @@ class MessageBubble extends StatelessWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      if (reactionReserve > 0)
+                        SizedBox(width: reactionReserve),
                       if (message.editedAt != null)
                         const Padding(
                           padding: EdgeInsets.only(right: 6),
@@ -523,6 +527,7 @@ class MessageBubble extends StatelessWidget {
                         ),
                       Text(
                         _messageTimeFormat.format(message.createdAt.toLocal()),
+                        key: const ValueKey('message-time'),
                         style: TextStyle(
                           color: PrivetTheme.mist.withValues(alpha: 0.8),
                           fontSize: 10,
@@ -578,7 +583,6 @@ class MessageBubble extends StatelessWidget {
         ? _SwipeReplyHandle(child: bubble)
         : bubble;
 
-    final hasReactions = message.reactions.isNotEmpty;
     return _SwipeToReply(
       mine: mine,
       enabled: onReply != null &&
@@ -588,10 +592,9 @@ class MessageBubble extends StatelessWidget {
       child: Align(
         alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
         child: Padding(
-          // Extra room for the badges that hang off the top of the bubble.
+          // Extra room for the badges that hang off the bottom of the bubble.
           padding: EdgeInsets.only(
-            top: hasReactions ? 14 : 0,
-            bottom: 10,
+            bottom: hasReactions ? 20 : 10,
           ),
           child: Stack(
             clipBehavior: Clip.none,
@@ -599,9 +602,10 @@ class MessageBubble extends StatelessWidget {
               swipeableBubble,
               if (hasReactions)
                 Positioned(
-                  // Top-left on both sides — the timestamp lives bottom-right,
-                  // so this corner never covers the time.
-                  top: -10,
+                  // Bottom-left on both sides. The footer row reserves the
+                  // same width so a short bubble grows instead of covering
+                  // the timestamp.
+                  bottom: -8,
                   left: 6,
                   child: _MessageReactionBadges(
                     reactions: message.reactions,
@@ -2406,6 +2410,21 @@ class _DownloadChip extends StatelessWidget {
   }
 }
 
+const _reactionBadgeSize = 24.0;
+
+/// Width reserved in the timestamp row so a short bubble grows instead of
+/// letting the hanging badge cover the time.
+double _reactionBadgeReserve(List<MessageReaction> reactions) {
+  if (reactions.isEmpty) return 0;
+  var width = 0.0;
+  for (var i = 0; i < reactions.length; i++) {
+    if (i > 0) width += 4;
+    width += _reactionBadgeSize;
+    if (reactions[i].count > 1) width += 14;
+  }
+  return width + 4;
+}
+
 /// Compact reaction pills pinned to a bubble corner so they stay visually
 /// attached to that message when another one follows.
 class _MessageReactionBadges extends StatelessWidget {
@@ -2437,7 +2456,7 @@ class _MessageReactionBadges extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                PrivetEmoji(r.emoji, size: 32, animate: true),
+                PrivetEmoji(r.emoji, size: _reactionBadgeSize, animate: true),
                 if (r.count > 1) ...[
                   const SizedBox(width: 3),
                   Text(

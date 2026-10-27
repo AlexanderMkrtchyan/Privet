@@ -36,6 +36,10 @@ server/public/main.*.js
 dist/
 packaging/out/
 
+# Python
+**/__pycache__/
+*.pyc
+
 # OS / editor
 *.swp
 *.swo
