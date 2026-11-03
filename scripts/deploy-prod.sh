@@ -161,21 +161,17 @@ rsync -az --delete \
 
 # Always ship install + the current release + version.json.
 # Do not sync the whole downloads archive: each old APK is ~500MB and the
-# production disk is 20GB.
+# production disk is 20GB. Upload one copy of each artifact, then hardlink
+# the versioned filename on the server (identical SHA256SUMS entries).
 rsync -az "$ROOT/server/public/install/" "${REMOTE_HOST}:${REMOTE_DIR}/public/install/"
 DL="$ROOT/server/public/downloads"
 ssh -o BatchMode=yes "$REMOTE_HOST" "mkdir -p '${REMOTE_DIR}/public/downloads'"
 CURRENT_DOWNLOADS=(
   "$DL/privet-android.apk"
-  "$DL/privet-android-${VERSION}.apk"
   "$DL/privet-linux-amd64.deb"
-  "$DL/privet_${VERSION}_amd64.deb"
   "$DL/privet-linux-x64.tar.gz"
   "$DL/Privet-Setup.exe"
 )
-if [[ -f "$DL/Privet-Setup-${VERSION}.exe" ]]; then
-  CURRENT_DOWNLOADS+=("$DL/Privet-Setup-${VERSION}.exe")
-fi
 if [[ -f "$DL/SHA256SUMS.txt" ]]; then
   CURRENT_DOWNLOADS+=("$DL/SHA256SUMS.txt")
 fi
@@ -183,6 +179,22 @@ rsync -az "${CURRENT_DOWNLOADS[@]}" "${REMOTE_HOST}:${REMOTE_DIR}/public/downloa
 if [[ -f "$ROOT/server/public/version.json" ]]; then
   rsync -az "$ROOT/server/public/version.json" "${REMOTE_HOST}:${REMOTE_DIR}/public/version.json"
 fi
+
+ssh -o BatchMode=yes "$REMOTE_HOST" bash -s <<REMOTE
+set -euo pipefail
+cd "${REMOTE_DIR}/public/downloads"
+for f in privet-android-*.apk privet_*.deb Privet-Setup-*.exe; do
+  [[ -e "\$f" ]] || continue
+  case "\$f" in
+    privet-android-${VERSION}.apk|privet_${VERSION}_amd64.deb|Privet-Setup-${VERSION}.exe) continue ;;
+  esac
+  rm -f "\$f"
+done
+[[ -f privet-android.apk ]] && ln -f privet-android.apk "privet-android-${VERSION}.apk"
+[[ -f privet-linux-amd64.deb ]] && ln -f privet-linux-amd64.deb "privet_${VERSION}_amd64.deb"
+[[ -f Privet-Setup.exe ]] && ln -f Privet-Setup.exe "Privet-Setup-${VERSION}.exe"
+df -h /
+REMOTE
 
 ssh -o BatchMode=yes "$REMOTE_HOST" bash -s <<REMOTE
 set -euo pipefail

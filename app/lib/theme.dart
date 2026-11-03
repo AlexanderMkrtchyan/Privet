@@ -144,6 +144,12 @@ class PrivetTheme {
   /// frames never stay painted in the previous accent until a mouse move.
   static final ValueNotifier<int> revision = ValueNotifier<int>(0);
 
+  /// Synchronous palette epoch — incremented inside [apply] before children
+  /// build. Message TextSpan caches key off this so theme-adapted markup colors
+  /// (see [readableMarkupColor]) invalidate in the same frame as the switch.
+  /// [revision] still notifies listeners asynchronously (safe outside build).
+  static int paintGeneration = 0;
+
   /// Display / username face for the active accent (Syne → Cousine for hacker).
   static TextStyle titleStyle({
     double? fontSize,
@@ -242,6 +248,7 @@ class PrivetTheme {
     _cachedAccent = accentKey;
     _cachedStyle = style;
     _cachedLowResource = null;
+    paintGeneration++;
     // Keep web painted I-beam / move cursors on the live accent.
     syncPrivetAccentCursors(_active.signal);
     // Never notify [revision] synchronously — [apply] runs from MaterialApp

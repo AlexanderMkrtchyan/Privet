@@ -11,7 +11,9 @@ import '../models.dart';
 import '../state.dart';
 import '../theme.dart';
 import '../util/clipboard_files.dart';
+import '../util/media_download.dart';
 import '../util/media_kind.dart';
+import '../util/media_saved_toast.dart';
 import '../util/media_upload.dart';
 import '../util/storage_access.dart';
 import '../util/image_context_menu.dart';
@@ -4440,6 +4442,21 @@ class _TaskRowState extends State<_TaskRow> {
     );
   }
 
+  /// Images open in the lightbox; other files download (same as chat tiles).
+  void _openAttachment(MediaAttachment att) {
+    if (_isImageAtt(att)) {
+      _openPreview(att);
+      return;
+    }
+    unawaited(
+      _downloadTaskAttachment(
+        context,
+        url: _abs(att.mediaUrl),
+        filename: _taskAttachmentName(att),
+      ),
+    );
+  }
+
   Future<void> _submitSubtask() async {
     final text = _subCtrl.text.trim();
     if (text.isEmpty || widget.onAddSubtask == null) return;
@@ -4746,38 +4763,50 @@ class _TaskRowState extends State<_TaskRow> {
                       itemBuilder: (context, i) {
                         final att = media[i];
                         final url = _abs(att.mediaUrl);
+                        final isImage = _isImageAtt(att);
+                        final name = _taskAttachmentName(att);
+                        final thumb = Tooltip(
+                          message: name,
+                          child: MouseRegion(
+                            cursor: SystemMouseCursors.click,
+                            child: GestureDetector(
+                              onTap: () => _openAttachment(att),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: isImage
+                                    ? CachedMediaImage(
+                                        url: url,
+                                        width: 52,
+                                        height: 52,
+                                        fit: BoxFit.cover,
+                                        cacheWidth:
+                                            ImageDecodeCaps.cacheWidth(
+                                          52,
+                                          dpr: MediaQuery
+                                              .devicePixelRatioOf(context),
+                                        ),
+                                        errorBuilder: (_, __, ___) =>
+                                            _fileThumb(att.fileName),
+                                      )
+                                    : _fileThumb(att.fileName),
+                              ),
+                            ),
+                          ),
+                        );
                         return Stack(
                           clipBehavior: Clip.none,
                           children: [
-                            _TaskImageCopyMenu(
-                              url: url,
-                              filename: att.fileName ?? 'image',
-                              child: MouseRegion(
-                                cursor: SystemMouseCursors.click,
-                                child: GestureDetector(
-                                  onTap: () => _openPreview(att),
-                                  child: ClipRRect(
-                                    borderRadius: BorderRadius.circular(8),
-                                    child: _isImageAtt(att)
-                                        ? CachedMediaImage(
-                                            url: url,
-                                            width: 52,
-                                            height: 52,
-                                            fit: BoxFit.cover,
-                                            cacheWidth:
-                                                ImageDecodeCaps.cacheWidth(
-                                              52,
-                                              dpr: MediaQuery
-                                                  .devicePixelRatioOf(context),
-                                            ),
-                                            errorBuilder: (_, __, ___) =>
-                                                _fileThumb(att.fileName),
-                                          )
-                                        : _fileThumb(att.fileName),
-                                  ),
-                                ),
-                              ),
-                            ),
+                            // Image-only right-click menu (Copy image).
+                            // Files get left-click download instead — the image
+                            // menu's "Copy image" path fails on non-images.
+                            if (isImage)
+                              _TaskImageCopyMenu(
+                                url: url,
+                                filename: name,
+                                child: thumb,
+                              )
+                            else
+                              thumb,
                             if (!isHistory &&
                                 widget.onRemoveAttachment != null)
                               Positioned(
@@ -5157,6 +5186,20 @@ class _SubtaskRowState extends State<_SubtaskRow> {
     );
   }
 
+  void _openAttachment(MediaAttachment att) {
+    if (_isImageAtt(att)) {
+      widget.onPreview?.call(att);
+      return;
+    }
+    unawaited(
+      _downloadTaskAttachment(
+        context,
+        url: _abs(att.mediaUrl),
+        filename: _taskAttachmentName(att),
+      ),
+    );
+  }
+
   void _openEditDialog() {
     _promptEditTaskText(
       context,
@@ -5282,38 +5325,43 @@ class _SubtaskRowState extends State<_SubtaskRow> {
                   itemBuilder: (context, i) {
                     final att = media[i];
                     final url = _abs(att.mediaUrl);
-                    final clickable = _isImageAtt(att) && widget.onPreview != null;
+                    final isImage = _isImageAtt(att);
+                    final name = _taskAttachmentName(att);
+                    final canPreview = isImage && widget.onPreview != null;
+                    final thumb = Tooltip(
+                      message: name,
+                      child: MouseRegion(
+                        cursor: SystemMouseCursors.click,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => _openAttachment(att),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: isImage
+                                ? CachedMediaImage(
+                                    url: url,
+                                    width: 44,
+                                    height: 44,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (_, __, ___) =>
+                                        _fileThumb(att.fileName),
+                                  )
+                                : _fileThumb(att.fileName),
+                          ),
+                        ),
+                      ),
+                    );
                     return Stack(
                       clipBehavior: Clip.none,
                       children: [
-                        _TaskImageCopyMenu(
-                          url: url,
-                          filename: att.fileName ?? 'image',
-                          child: MouseRegion(
-                            cursor: clickable
-                                ? SystemMouseCursors.click
-                                : MouseCursor.defer,
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTap: clickable
-                                  ? () => widget.onPreview!(att)
-                                  : null,
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(6),
-                                child: _isImageAtt(att)
-                                    ? CachedMediaImage(
-                                        url: url,
-                                        width: 44,
-                                        height: 44,
-                                        fit: BoxFit.cover,
-                                        errorBuilder: (_, __, ___) =>
-                                            _fileThumb(att.fileName),
-                                      )
-                                    : _fileThumb(att.fileName),
-                              ),
-                            ),
-                          ),
-                        ),
+                        if (canPreview)
+                          _TaskImageCopyMenu(
+                            url: url,
+                            filename: name,
+                            child: thumb,
+                          )
+                        else
+                          thumb,
                         if (widget.editable && widget.onRemoveAttachment != null)
                           Positioned(
                             top: -5,
@@ -6371,6 +6419,33 @@ class _ReminderDialogState extends State<_ReminderDialog> {
         counterStyle: TextStyle(color: PrivetTheme.mist.withValues(alpha: 0.4), fontSize: 10),
         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       );
+}
+
+String _taskAttachmentName(MediaAttachment att) {
+  final name = att.fileName?.trim();
+  if (name != null && name.isNotEmpty) return name;
+  return switch (att.kind) {
+    'image' => 'image.jpg',
+    'video' => 'video.mp4',
+    'audio' || 'voice' => 'audio.webm',
+    _ => 'attachment',
+  };
+}
+
+Future<void> _downloadTaskAttachment(
+  BuildContext context, {
+  required String url,
+  required String filename,
+}) async {
+  if (url.isEmpty) return;
+  await downloadMediaWithToast(
+    context,
+    url: url,
+    filename: filename,
+    isVideo: looksLikeVideo(filename: filename, url: url),
+    download: ({required url, filename, onProgress}) =>
+        downloadMedia(url, filename: filename, onProgress: onProgress),
+  );
 }
 
 /// Right-click on a task image (thumbnail or the enlarged preview) opens the

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import '../theme.dart';
+
 /// Lightweight inline-text formatting used by Privet messages.
 ///
 /// Messages store formatting as small tags inside the plain body string, so it
@@ -61,6 +63,48 @@ String highlightColorLabel(Color color) {
   final hex =
       (key & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase();
   return '#$hex';
+}
+
+/// Minimum contrast vs bubble surfaces for painted `[bg]` text.
+/// Large-text WCAG AA is 3:1; we stay slightly above so Signal green etc.
+/// still read on light panels without looking muddy.
+const double _kMarkupMinContrast = 3.2;
+
+double _markupContrastRatio(Color a, Color b) {
+  final l1 = a.computeLuminance();
+  final l2 = b.computeLuminance();
+  final light = l1 > l2 ? l1 : l2;
+  final dark = l1 > l2 ? l2 : l1;
+  return (light + 0.05) / (dark + 0.05);
+}
+
+bool _markupReadableOnSurfaces(Color color) {
+  // Common places colored text appears: peer bubble, own bubble, chat/task bg.
+  return _markupContrastRatio(color, PrivetTheme.panelElevated) >=
+          _kMarkupMinContrast &&
+      _markupContrastRatio(color, PrivetTheme.mine) >= _kMarkupMinContrast &&
+      _markupContrastRatio(color, PrivetTheme.ink) >= _kMarkupMinContrast;
+}
+
+/// Adapts a stored paint color for the active theme without rewriting markup.
+/// Bright greens / white stay vivid on dark; on light they are darkened (same
+/// hue) until they clear [_kMarkupMinContrast]. Near-black on dark is lightened.
+Color readableMarkupColor(Color color) {
+  if (_markupReadableOnSurfaces(color)) return color;
+
+  var hsl = HSLColor.fromColor(color);
+  // Light surfaces → darken text; dark surfaces → lighten text.
+  final darken = PrivetTheme.ink.computeLuminance() > 0.5;
+  for (var i = 0; i < 48; i++) {
+    final next =
+        (hsl.lightness + (darken ? -0.025 : 0.025)).clamp(0.0, 1.0);
+    if (next == hsl.lightness) break;
+    hsl = hsl.withLightness(next);
+    final candidate = hsl.toColor();
+    if (_markupReadableOnSurfaces(candidate)) return candidate;
+  }
+  // Guaranteed readable fallback (theme body text).
+  return PrivetTheme.paper;
 }
 
 /// Font families offered by the message font picker, in display order.
@@ -188,8 +232,8 @@ class TextFormat {
     if (italic) s = s.copyWith(fontStyle: FontStyle.italic);
     if (background != null) {
       // Stored as [bg=#…] in markup; rendered as character color (not a
-      // highlighter fill behind the glyphs).
-      s = s.copyWith(color: background);
+      // highlighter fill behind the glyphs). Near black/white adapt to theme.
+      s = s.copyWith(color: readableMarkupColor(background!));
     }
     final family = fontFamily;
     if (family != null && family.isNotEmpty) {

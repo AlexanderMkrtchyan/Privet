@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:privet/theme.dart';
 import 'package:privet/util/rich_text_markup.dart';
 
 void main() {
@@ -380,6 +381,65 @@ void main() {
 
     test('empty message stays empty', () {
       expect(applyDefaultMessageFont('', 'gothic'), '');
+    });
+  });
+
+  group('readableMarkupColor', () {
+    const white = Color(0xFFFFFFFF);
+    const black = Color(0xFF16181B);
+    const signal = Color(0xFFB6F24A);
+
+    double contrast(Color a, Color b) {
+      final l1 = a.computeLuminance();
+      final l2 = b.computeLuminance();
+      final light = l1 > l2 ? l1 : l2;
+      final dark = l1 > l2 ? l2 : l1;
+      return (light + 0.05) / (dark + 0.05);
+    }
+
+    test('light theme darkens white and signal for contrast', () {
+      PrivetTheme.apply(
+        brightness: Brightness.light,
+        accent: PrivetTheme.defaultAccent,
+      );
+      final adaptedWhite = readableMarkupColor(white);
+      final adaptedSignal = readableMarkupColor(signal);
+      expect(adaptedWhite.computeLuminance(), lessThan(0.2));
+      expect(adaptedSignal.computeLuminance(), lessThan(signal.computeLuminance()));
+      expect(
+        contrast(adaptedSignal, PrivetTheme.panelElevated),
+        greaterThanOrEqualTo(3.2),
+      );
+      // Hue stays in the green/yellow-green family (not remapped to gray paper).
+      expect(HSLColor.fromColor(adaptedSignal).hue, closeTo(75, 40));
+    });
+
+    test('dark theme keeps signal, lightens black', () {
+      PrivetTheme.apply(
+        brightness: Brightness.dark,
+        accent: PrivetTheme.defaultAccent,
+      );
+      expect(readableMarkupColor(signal), signal);
+      final adaptedBlack = readableMarkupColor(black);
+      expect(
+        adaptedBlack.computeLuminance(),
+        greaterThan(black.computeLuminance()),
+      );
+      expect(
+        contrast(adaptedBlack, PrivetTheme.panelElevated),
+        greaterThanOrEqualTo(3.2),
+      );
+    });
+
+    test('toTextStyle uses the adapted color', () {
+      PrivetTheme.apply(
+        brightness: Brightness.light,
+        accent: PrivetTheme.defaultAccent,
+      );
+      final style = const TextFormat(background: white).toTextStyle(
+        const TextStyle(color: Colors.red),
+      );
+      expect(style.color!.computeLuminance(), lessThan(0.2));
     });
   });
 }

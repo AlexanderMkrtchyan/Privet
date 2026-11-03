@@ -252,6 +252,8 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
   String _cachedSpanFont = '';
   String _cachedHighlight = '';
   int? _cachedHighlightOccurrence;
+  /// [PrivetTheme.paintGeneration] when [_cachedSpan] was built.
+  int _cachedThemePaint = -1;
 
   /// Kolobok decode generation the cached span was built against. Image frames
   /// land asynchronously, so a span built while they were missing must be
@@ -279,6 +281,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
   String _webPainterFont = '';
   int _webPainterKolobokGeneration = -1;
   int _webPainterNotoGeneration = -1;
+  int _webPainterThemePaint = -1;
   final _WebSelRepaint _webSelRepaint = _WebSelRepaint();
 
   // Web pointer-driven select (Listener — does not fight ListView pan arena).
@@ -564,6 +567,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     bool hovering = false,
   }) {
     // Hover recolors — don't use the recognizer cache for hover frames.
+    // Theme paint generation must match: [bg] colors are adapted per palette.
     if (!hovering &&
         _cachedSpanText == text &&
         _cachedSpanScale == widget.fontScale &&
@@ -573,6 +577,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
         _cachedHighlightOccurrence == widget.highlightOccurrence &&
         _cachedSpan != null &&
         _cachedWithRecognizers == withRecognizers &&
+        _cachedThemePaint == PrivetTheme.paintGeneration &&
         _cachedKolobokGeneration == KolobokImageCache.instance.generation &&
         _cachedNotoGeneration == NotoColorEmojiCache.instance.generation) {
       return _cachedSpan!;
@@ -669,6 +674,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
       _cachedHighlight = widget.highlightQuery.trim();
       _cachedHighlightOccurrence = widget.highlightOccurrence;
       _cachedWithRecognizers = withRecognizers;
+      _cachedThemePaint = PrivetTheme.paintGeneration;
       _cachedKolobokGeneration = KolobokImageCache.instance.generation;
       _cachedNotoGeneration = NotoColorEmojiCache.instance.generation;
       _cachedSpan = span;
@@ -839,6 +845,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
         _webPainterBaseFontSize == _baseFontSizeKey &&
         _webPainterFont == widget.defaultFont &&
         !_cachedWithRecognizers &&
+        _webPainterThemePaint == PrivetTheme.paintGeneration &&
         _webPainterKolobokGeneration == KolobokImageCache.instance.generation &&
         _webPainterNotoGeneration == NotoColorEmojiCache.instance.generation &&
         _webPainterHover == hovering) {
@@ -850,6 +857,7 @@ class _SelectableMarkupTextState extends State<SelectableMarkupText> {
     _webPainterScale = widget.fontScale;
     _webPainterBaseFontSize = _baseFontSizeKey;
     _webPainterFont = widget.defaultFont;
+    _webPainterThemePaint = PrivetTheme.paintGeneration;
     _webPainterKolobokGeneration = KolobokImageCache.instance.generation;
     _webPainterNotoGeneration = NotoColorEmojiCache.instance.generation;
     _webPainter = TextPainter(

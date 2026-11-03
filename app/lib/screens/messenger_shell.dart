@@ -5303,6 +5303,19 @@ class _ConversationPaneState extends State<ConversationPane>
     unawaited(_jumpToSearchMatch(next));
   }
 
+  /// Hits are newest-first. Linux ↑ = toward newer (−1), ↓ = older (+1).
+  /// Windows was inverted vs that, so flip only there.
+  int get _searchArrowUpDelta =>
+      (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) ? 1 : -1;
+
+  int get _searchArrowDownDelta => -_searchArrowUpDelta;
+
+  bool _canSearchStep(int delta) {
+    if (_searchHits.isEmpty) return false;
+    final next = _searchMatchIndex + delta;
+    return next >= 0 && next < _searchHits.length;
+  }
+
   _ChatSearchHit? get _currentSearchHit =>
       _searchHits.isEmpty ? null : _searchHits[_searchMatchIndex];
 
@@ -5489,19 +5502,20 @@ class _ConversationPaneState extends State<ConversationPane>
                                 _searchHitLabel(),
                                 IconButton(
                                   tooltip: 'Previous match',
-                                  onPressed: _searchMatchIndex <= 0
-                                      ? null
-                                      : () => _searchStep(-1),
+                                  onPressed: _canSearchStep(_searchArrowUpDelta)
+                                      ? () => _searchStep(_searchArrowUpDelta)
+                                      : null,
                                   icon: const Icon(
                                     Icons.keyboard_arrow_up_rounded,
                                   ),
                                 ),
                                 IconButton(
                                   tooltip: 'Next match',
-                                  onPressed: _searchMatchIndex >=
-                                          _searchHits.length - 1
-                                      ? null
-                                      : () => _searchStep(1),
+                                  onPressed:
+                                      _canSearchStep(_searchArrowDownDelta)
+                                      ? () =>
+                                            _searchStep(_searchArrowDownDelta)
+                                      : null,
                                   icon: const Icon(
                                     Icons.keyboard_arrow_down_rounded,
                                   ),
@@ -5585,17 +5599,16 @@ class _ConversationPaneState extends State<ConversationPane>
                             _searchHitLabel(),
                             IconButton(
                               tooltip: 'Previous match',
-                              onPressed: _searchMatchIndex <= 0
-                                  ? null
-                                  : () => _searchStep(-1),
+                              onPressed: _canSearchStep(_searchArrowUpDelta)
+                                  ? () => _searchStep(_searchArrowUpDelta)
+                                  : null,
                               icon: const Icon(Icons.keyboard_arrow_up_rounded),
                             ),
                             IconButton(
                               tooltip: 'Next match',
-                              onPressed: _searchMatchIndex >=
-                                      _searchHits.length - 1
-                                  ? null
-                                  : () => _searchStep(1),
+                              onPressed: _canSearchStep(_searchArrowDownDelta)
+                                  ? () => _searchStep(_searchArrowDownDelta)
+                                  : null,
                               icon: const Icon(
                                 Icons.keyboard_arrow_down_rounded,
                               ),
