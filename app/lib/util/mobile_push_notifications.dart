@@ -106,6 +106,7 @@ String encodeCallNotificationPayload(Map<String, dynamic> data) {
       'callerDisplayName': v('callerDisplayName'),
     if (v('callerHandle').isNotEmpty) 'callerHandle': v('callerHandle'),
     if (v('callerAvatarHue').isNotEmpty) 'callerAvatarHue': v('callerAvatarHue'),
+    if (v('createdAt').isNotEmpty) 'createdAt': v('createdAt'),
   });
 }
 

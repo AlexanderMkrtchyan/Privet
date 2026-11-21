@@ -58,6 +58,8 @@ std::string g_detail;
 GDBusProxy* g_portal_proxy = nullptr;
 std::string g_session_path;
 bool g_portal_ready = false;
+bool g_portal_starting = false;
+bool g_portal_start_failed = false;
 
 std::unordered_set<guint> g_down_keys;
 
@@ -308,18 +310,21 @@ void OnPortalResponse(GDBusConnection* /*connection*/, const gchar* /*sender*/,
   wait->results = results;
 }
 
-bool WaitForPortalRequest(const std::string& request_path, PortalWait* wait,
-                          int timeout_iters) {
+/// Unique bus name → portal request path segment (`:1.42` → `_1_42`).
+std::string PortalSenderName() {
   GDBusConnection* bus = g_dbus_proxy_get_connection(g_portal_proxy);
-  guint sub = g_dbus_connection_signal_subscribe(
-      bus, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
-      "Response", request_path.c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
-      OnPortalResponse, wait, nullptr);
-  for (int i = 0; i < timeout_iters && !wait->done; ++i) {
-    g_main_context_iteration(nullptr, TRUE);
+  const char* unique = g_dbus_connection_get_unique_name(bus);
+  std::string s = unique ? unique : "";
+  if (!s.empty() && s[0] == ':') s.erase(0, 1);
+  for (char& c : s) {
+    if (c == '.') c = '_';
   }
-  g_dbus_connection_signal_unsubscribe(bus, sub);
-  return wait->done && wait->code == 0 && wait->results != nullptr;
+  return s;
+}
+
+std::string PortalRequestPath(const std::string& handle_token) {
+  return std::string("/org/freedesktop/portal/desktop/request/") +
+         PortalSenderName() + "/" + handle_token;
 }
 
 bool PortalCall(const char* method, GVariant* params) {
@@ -334,6 +339,45 @@ bool PortalCall(const char* method, GVariant* params) {
   }
   if (ret) g_variant_unref(ret);
   return true;
+}
+
+/// Call a portal method that returns a Request object path `(o)`.
+/// Subscribes to Response *before* the call (handle_token) to avoid races.
+bool PortalCallRequest(const char* method, GVariant* params,
+                       const std::string& handle_token, PortalWait* wait,
+                       int timeout_seconds) {
+  wait->done = false;
+  wait->code = 2;
+  wait->results = nullptr;
+
+  const std::string request_path = PortalRequestPath(handle_token);
+  GDBusConnection* bus = g_dbus_proxy_get_connection(g_portal_proxy);
+  guint sub = g_dbus_connection_signal_subscribe(
+      bus, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
+      "Response", request_path.c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+      OnPortalResponse, wait, nullptr);
+
+  GError* error = nullptr;
+  GVariant* ret = g_dbus_proxy_call_sync(g_portal_proxy, method, params,
+                                         G_DBUS_CALL_FLAGS_NONE, -1, nullptr,
+                                         &error);
+  if (error) {
+    g_detail = std::string(method) + " failed: " + error->message;
+    g_error_free(error);
+    g_dbus_connection_signal_unsubscribe(bus, sub);
+    return false;
+  }
+  if (ret) g_variant_unref(ret);
+
+  const gint64 deadline = g_get_monotonic_time() +
+                          static_cast<gint64>(timeout_seconds) * G_TIME_SPAN_SECOND;
+  while (!wait->done && g_get_monotonic_time() < deadline) {
+    if (!g_main_context_iteration(nullptr, FALSE)) {
+      g_usleep(20 * 1000);
+    }
+  }
+  g_dbus_connection_signal_unsubscribe(bus, sub);
+  return wait->done && wait->code == 0;
 }
 
 bool PortalNotifyAbs(double x, double y) {
@@ -413,8 +457,28 @@ void PortalReleaseAll() {
 
 bool StartPortalSession() {
   if (g_portal_ready) return true;
+  if (g_portal_starting) {
+    g_detail = "RemoteDesktop permission prompt is already open.";
+    return false;
+  }
   if (!EnsurePortalProxy()) return false;
 
+  g_portal_starting = true;
+  g_portal_start_failed = false;
+  constexpr int kPortalTimeoutSec = 120;
+
+  auto fail = [](const char* msg) -> bool {
+    g_detail = msg;
+    g_portal_ready = false;
+    g_portal_start_failed = true;
+    g_portal_starting = false;
+    g_session_path.clear();
+    AgentLog("H5", "remote_input_plugin.cc:StartPortalSession", "portal start failed",
+             std::string("\"detail\":\"") + msg + "\"");
+    return false;
+  };
+
+  // 1) CreateSession
   GVariantBuilder opt;
   g_variant_builder_init(&opt, G_VARIANT_TYPE_VARDICT);
   std::string handle = MakeToken("privet_h_");
@@ -424,40 +488,29 @@ bool StartPortalSession() {
   g_variant_builder_add(&opt, "{sv}", "session_handle_token",
                         g_variant_new_string(session_token.c_str()));
 
-  GError* error = nullptr;
-  GVariant* ret = g_dbus_proxy_call_sync(
-      g_portal_proxy, "CreateSession", g_variant_new("(a{sv})", &opt),
-      G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
-  if (error) {
-    g_detail =
-        std::string("RemoteDesktop CreateSession failed: ") + error->message;
-    g_error_free(error);
-    return false;
-  }
-  const char* request_path = nullptr;
-  g_variant_get(ret, "(o)", &request_path);
-  std::string req = request_path ? request_path : "";
-  g_variant_unref(ret);
-
-  PortalWait wait;
-  if (!WaitForPortalRequest(req, &wait, 150)) {
-    g_detail =
+  PortalWait create_wait;
+  if (!PortalCallRequest("CreateSession", g_variant_new("(a{sv})", &opt), handle,
+                         &create_wait, kPortalTimeoutSec)) {
+    if (create_wait.results) g_variant_unref(create_wait.results);
+    return fail(
         "Wayland RemoteDesktop portal was denied or timed out. "
-        "Grant remote-desktop permission when prompted.";
-    if (wait.results) g_variant_unref(wait.results);
-    return false;
+        "Grant remote-desktop permission when prompted.");
   }
 
   const char* session_handle = nullptr;
-  g_variant_lookup(wait.results, "session_handle", "&s", &session_handle);
+  if (create_wait.results) {
+    g_variant_lookup(create_wait.results, "session_handle", "&s",
+                     &session_handle);
+  }
   if (!session_handle) {
-    g_detail = "Portal response missing session_handle.";
-    g_variant_unref(wait.results);
-    return false;
+    if (create_wait.results) g_variant_unref(create_wait.results);
+    return fail("Portal response missing session_handle.");
   }
   g_session_path = session_handle;
-  g_variant_unref(wait.results);
+  g_variant_unref(create_wait.results);
 
+  // 2) SelectDevices — MUST wait before Start (old code fired-and-forgot,
+  // which left the Allow dialog racing every subsequent input event).
   GVariantBuilder sel;
   g_variant_builder_init(&sel, G_VARIANT_TYPE_VARDICT);
   std::string sel_handle = MakeToken("privet_h_");
@@ -465,43 +518,42 @@ bool StartPortalSession() {
                         g_variant_new_string(sel_handle.c_str()));
   g_variant_builder_add(&sel, "{sv}", "types",
                         g_variant_new_uint32(1u | 2u));  // POINTER|KEYBOARD
-  if (!PortalCall("SelectDevices", g_variant_new("(oa{sv})",
-                                                 g_session_path.c_str(), &sel))) {
-    return false;
-  }
 
+  PortalWait select_wait;
+  if (!PortalCallRequest(
+          "SelectDevices",
+          g_variant_new("(oa{sv})", g_session_path.c_str(), &sel), sel_handle,
+          &select_wait, kPortalTimeoutSec)) {
+    if (select_wait.results) g_variant_unref(select_wait.results);
+    return fail(
+        "RemoteDesktop device selection was denied or timed out. "
+        "Allow keyboard and mouse control when prompted.");
+  }
+  if (select_wait.results) g_variant_unref(select_wait.results);
+
+  // 3) Start — this is the interactive Allow dialog on GNOME/KDE.
   GVariantBuilder start_opt;
   g_variant_builder_init(&start_opt, G_VARIANT_TYPE_VARDICT);
   std::string start_handle = MakeToken("privet_h_");
   g_variant_builder_add(&start_opt, "{sv}", "handle_token",
                         g_variant_new_string(start_handle.c_str()));
-  error = nullptr;
-  ret = g_dbus_proxy_call_sync(
-      g_portal_proxy, "Start",
-      g_variant_new("(osa{sv})", g_session_path.c_str(), "", &start_opt),
-      G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
-  if (error) {
-    g_detail = error->message;
-    g_error_free(error);
-    return false;
-  }
-  const char* start_req = nullptr;
-  g_variant_get(ret, "(o)", &start_req);
-  std::string start_req_path = start_req ? start_req : "";
-  g_variant_unref(ret);
 
   PortalWait start_wait;
-  if (!start_req_path.empty()) {
-    WaitForPortalRequest(start_req_path, &start_wait, 150);
+  if (!PortalCallRequest(
+          "Start",
+          g_variant_new("(osa{sv})", g_session_path.c_str(), "", &start_opt),
+          start_handle, &start_wait, kPortalTimeoutSec)) {
     if (start_wait.results) g_variant_unref(start_wait.results);
-    if (!start_wait.done || start_wait.code != 0) {
-      g_detail = "RemoteDesktop Start was denied or timed out.";
-      return false;
-    }
+    return fail("RemoteDesktop Start was denied or timed out.");
   }
+  if (start_wait.results) g_variant_unref(start_wait.results);
 
   g_portal_ready = true;
+  g_portal_start_failed = false;
+  g_portal_starting = false;
   g_detail.clear();
+  AgentLog("H5", "remote_input_plugin.cc:StartPortalSession", "portal ready",
+           "\"backend\":\"portal\"");
   return true;
 }
 
@@ -639,6 +691,8 @@ FlMethodResponse* OnMethod(FlMethodCall* method_call) {
           "unsupported", g_detail.c_str(), nullptr));
     }
     if (g_backend == Backend::Portal && !g_portal_ready) {
+      // Explicit grant path — allow one fresh prompt after a prior denial.
+      g_portal_start_failed = false;
       if (!StartPortalSession()) {
         return FL_METHOD_RESPONSE(
             fl_method_error_response_new("portal", g_detail.c_str(), nullptr));
@@ -665,11 +719,17 @@ FlMethodResponse* OnMethod(FlMethodCall* method_call) {
           "unsupported", g_detail.c_str(), nullptr));
     }
 
+    // Never open the RemoteDesktop Allow dialog from pointer/key hot paths.
+    // That re-prompted on every remote mouse move when the session was not
+    // ready yet and made the host unusable. Session setup is ensureReady only.
     if (g_backend == Backend::Portal && !g_portal_ready) {
-      if (!StartPortalSession()) {
-        return FL_METHOD_RESPONSE(
-            fl_method_error_response_new("portal", g_detail.c_str(), nullptr));
+      if (g_detail.empty()) {
+        g_detail =
+            "RemoteDesktop portal session is not ready. "
+            "Allow control again so Privet can request permission once.";
       }
+      return FL_METHOD_RESPONSE(
+          fl_method_error_response_new("portal", g_detail.c_str(), nullptr));
     }
   }
 

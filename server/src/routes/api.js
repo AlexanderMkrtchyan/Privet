@@ -7,6 +7,8 @@ import multipart from '@fastify/multipart';
 import bcrypt from 'bcryptjs';
 import { publicUser, uploadsDir, db } from '../db.js';
 import { remuxFaststart } from '../media/faststart.js';
+import { registerHabitationActivityRoutes } from './habitation_activity.js';
+import { registerHabitationStateRoutes } from './habitation_state.js';
 import {
   allowQuickJoin,
   createUser,
@@ -297,6 +299,9 @@ export async function registerRoutes(app) {
   await app.register(multipart, {
     limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 },
   });
+
+  await registerHabitationActivityRoutes(app);
+  await registerHabitationStateRoutes(app);
 
   app.get('/health', async () => ({ ok: true, name: 'privet' }));
 

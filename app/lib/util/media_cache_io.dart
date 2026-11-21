@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'android_downloads.dart';
 import 'video_cache.dart';
 
 /// Max media entries kept on disk, oldest evicted first (LRU).
@@ -185,8 +186,36 @@ Future<String?> downloadMediaFromCache(
   return _streamToDownloads(url, filename: filename, onProgress: onProgress);
 }
 
+/// Desktop platforms write straight into the OS Downloads folder. Android has
+/// no such writable path inside the sandbox (`getDownloadsDirectory` returns
+/// app-specific storage), so downloads are staged in the cache and handed to
+/// MediaStore — see [savePathToAndroidDownloads].
 Future<Directory> _downloadsDir() async =>
     await getDownloadsDirectory() ?? await getApplicationSupportDirectory();
+
+/// Where a download is written before it is published. On Android this is a
+/// temporary file that MediaStore copies into the public Downloads collection.
+Future<Directory> _stagingDir() async {
+  if (!usesAndroidDownloads) return _downloadsDir();
+  final tmp = await getTemporaryDirectory();
+  final dir = Directory(p.join(tmp.path, 'privet_downloads'));
+  await dir.create(recursive: true);
+  return dir;
+}
+
+Future<String?> _publishAndroid(String sourcePath, String name) async {
+  try {
+    return await savePathToAndroidDownloads(
+      sourcePath: sourcePath,
+      filename: name,
+    );
+  } finally {
+    // The staged copy is never the file the user keeps; drop it either way.
+    try {
+      await File(sourcePath).delete();
+    } catch (_) {}
+  }
+}
 
 Future<String?> _writeDownloads(
   Uint8List bytes, {
@@ -194,8 +223,14 @@ Future<String?> _writeDownloads(
   required String url,
 }) async {
   try {
-    final dir = await _downloadsDir();
     final name = _safeDownloadName(filename ?? _nameFromUrl(url));
+    if (usesAndroidDownloads) {
+      final dir = await _stagingDir();
+      final temp = File(p.join(dir.path, name));
+      await temp.writeAsBytes(bytes, flush: true);
+      return _publishAndroid(temp.path, name);
+    }
+    final dir = await _downloadsDir();
     final file = File(p.join(dir.path, name));
     await file.writeAsBytes(bytes, flush: true);
     return file.path;
@@ -210,8 +245,12 @@ Future<String?> _copyToDownloads(
   required String url,
 }) async {
   try {
-    final dir = await _downloadsDir();
     final name = _safeDownloadName(filename ?? _nameFromUrl(url));
+    if (usesAndroidDownloads) {
+      // Hand the cached video to MediaStore directly — no extra temp copy.
+      return savePathToAndroidDownloads(sourcePath: sourcePath, filename: name);
+    }
+    final dir = await _downloadsDir();
     final dest = File(p.join(dir.path, name));
     await File(sourcePath).copy(dest.path);
     return dest.path;
@@ -225,7 +264,8 @@ Future<String?> _streamToDownloads(
   String? filename,
   void Function(double progress)? onProgress,
 }) async {
-  final dir = await _downloadsDir();
+  final android = usesAndroidDownloads;
+  final dir = await _stagingDir();
   final name = _safeDownloadName(filename ?? _nameFromUrl(url));
   final dest = File(p.join(dir.path, name));
   final part = File('${dest.path}.part');
@@ -246,7 +286,10 @@ Future<String?> _streamToDownloads(
         received += chunk.length;
         sink.add(chunk);
         if (total != null && total > 0) {
-          onProgress?.call((received / total).clamp(0.0, 1.0));
+          // Leave the last percent for the MediaStore copy so the toast does
+          // not read 100% while the file is still being published.
+          final scale = android ? 0.99 : 1.0;
+          onProgress?.call(((received / total) * scale).clamp(0.0, 1.0));
         }
       }
       await sink.close();
@@ -271,6 +314,11 @@ Future<String?> _streamToDownloads(
       } catch (_) {}
     }
     await part.rename(dest.path);
+    if (android) {
+      final saved = await _publishAndroid(dest.path, name);
+      if (saved != null) onProgress?.call(1);
+      return saved;
+    }
     onProgress?.call(1);
     return dest.path;
   } catch (_) {
@@ -440,8 +488,8 @@ class _CacheEntry {
   Map<String, dynamic> toJson() => {'url': url, 'file': file, 'size': size};
 
   static _CacheEntry fromJson(Map<String, dynamic> json) => _CacheEntry(
-        json['url'] as String,
-        json['file'] as String,
-        (json['size'] as num).toInt(),
-      );
+    json['url'] as String,
+    json['file'] as String,
+    (json['size'] as num).toInt(),
+  );
 }

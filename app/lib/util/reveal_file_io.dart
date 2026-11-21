@@ -4,8 +4,14 @@ import 'package:dbus/dbus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
+import 'android_downloads.dart';
+
 /// Opens the OS file manager with [path] selected.
 Future<bool> revealInFileManager(String path) async {
+  // Android's public Download/ path is not directly readable by the app
+  // (scoped storage), so let the native side open the MediaStore entry — or at
+  // least the system Downloads screen.
+  if (Platform.isAndroid) return revealAndroidDownload(path);
   final file = File(path);
   if (!await file.exists()) return false;
   if (Platform.isLinux) {
@@ -34,14 +40,10 @@ Future<bool> _showItemsDbus(String path) async {
       path: DBusObjectPath('/org/freedesktop/FileManager1'),
     );
     final uri = Uri.file(path).toString();
-    await object.callMethod(
-      'org.freedesktop.FileManager1',
-      'ShowItems',
-      [
-        DBusArray.string([uri]),
-        const DBusString(''),
-      ],
-    );
+    await object.callMethod('org.freedesktop.FileManager1', 'ShowItems', [
+      DBusArray.string([uri]),
+      const DBusString(''),
+    ]);
     return true;
   } catch (e) {
     debugPrint('revealInFileManager: D-Bus ShowItems failed: $e');

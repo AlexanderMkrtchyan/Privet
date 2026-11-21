@@ -599,7 +599,10 @@ find "$PKG_DIR/usr/lib/privet" -type f -name '*.so*' -exec chmod 755 {} +
 find "$PKG_DIR/usr/lib/privet" -type d -exec chmod 755 {} +
 
 fakeroot dpkg-deb --build "$PKG_DIR" "$DEB_OUT"
-cp -f "$DEB_OUT" "$DEB_STABLE"
+# Same path, or hard-linked aliases of one another — skip the copy.
+if [[ "$DEB_OUT" != "$DEB_STABLE" ]] && ! [[ "$DEB_OUT" -ef "$DEB_STABLE" ]]; then
+  cp -f "$DEB_OUT" "$DEB_STABLE"
+fi
 rm -rf "$DEB_ROOT"
 echo "Wrote $DEB_OUT ($(du -h "$DEB_OUT" | cut -f1))"
 echo "Wrote $DEB_STABLE"

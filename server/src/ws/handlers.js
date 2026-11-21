@@ -26,6 +26,7 @@ import {
   onlineUserIds,
   sendToSocket,
   sendToUser,
+  sendToUserExcept,
   sendToUserPreferred,
   touchSocket,
 } from './hub.js';
@@ -34,7 +35,12 @@ import {
   fetchLinkPreview,
 } from '../media/linkPreview.js';
 import { noteConversationMessage, shouldAcceptMarkRead } from '../readGate.js';
-import { pushCallToUser, pushMessageToUser, pushToUser } from '../push/fcm.js';
+import {
+  pushCallCancelToUser,
+  pushCallToUser,
+  pushMessageToUser,
+  pushToUser,
+} from '../push/fcm.js';
 import {
   buildControlSignalOutbound,
   canGrantControl,
@@ -228,9 +234,14 @@ function endCallForBoth(call, reason) {
   clearControl(call);
   calls.delete(call.id);
   const ended = { type: 'call.ended', callId: call.id, reason };
-  sendToUserPreferred(call.fromUserId, call.fromSocket, ended);
-  sendToUserPreferred(call.toUserId, call.toSocket, ended);
+  // Fan-out to every device — preferred-only left other phones ringing
+  // after hangup/reject when one socket was already bound mid-call.
+  sendToUser(call.fromUserId, ended);
+  sendToUser(call.toUserId, ended);
   persistCallHistory(call, reason);
+  // Drop native full-screen / heads-up rings on offline mobiles too.
+  void pushCallCancelToUser(call.toUserId, call.id);
+  void pushCallCancelToUser(call.fromUserId, call.id);
 }
 
 export function registerWebsocket(app) {
@@ -635,6 +646,8 @@ export function registerWebsocket(app) {
               callerDisplayName: from.displayName || '',
               callerHandle: from.handle || '',
               callerAvatarHue: String(from.avatarHue ?? ''),
+              // Age-check on the device so a delayed FCM never re-rings hours later.
+              createdAt: String(call.createdAt),
             },
           });
           sendToSocket(socket, { type: 'call.ringing', call: payload });
@@ -656,6 +669,13 @@ export function registerWebsocket(app) {
           };
           sendToUserPreferred(call.fromUserId, call.fromSocket, accepted);
           sendToSocket(socket, accepted);
+          // Other callee devices (phone while PC answered) must stop ringing.
+          sendToUserExcept(call.toUserId, socket, {
+            type: 'call.ended',
+            callId: call.id,
+            reason: 'answered_elsewhere',
+          });
+          void pushCallCancelToUser(call.toUserId, call.id);
           return;
         }
 

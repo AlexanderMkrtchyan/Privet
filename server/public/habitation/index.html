@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Habitation Activity — Linux и Windows</title>
+  <style>
+    :root {
+      --bg: #0e1217;
+      --card: #171d25;
+      --ink: #eef3f8;
+      --muted: #93a1b1;
+      --accent: #5ec2ff;
+      --line: rgba(255,255,255,.08);
+      --good: #7dcea0;
+      --warn: #f0c674;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(900px 420px at 0% 0%, #1b3a52 0%, transparent 55%),
+        radial-gradient(700px 380px at 100% 10%, #3a2048 0%, transparent 50%),
+        var(--bg);
+      line-height: 1.55;
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 36px 18px 80px; }
+    h1 { font-size: 30px; letter-spacing: -.02em; margin: 0 0 8px; }
+    .lead { color: var(--muted); font-size: 16px; margin: 0 0 22px; }
+    .toc { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 28px; }
+    .toc a {
+      display: inline-block; padding: 10px 14px; border-radius: 999px;
+      border: 1px solid var(--line); color: var(--ink); text-decoration: none; font-weight: 600; font-size: 14px;
+    }
+    .toc a:hover { border-color: var(--accent); color: var(--accent); }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px 18px 8px;
+      margin-bottom: 16px;
+    }
+    h2 { margin: 0 0 10px; font-size: 15px; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
+    h3 { margin: 18px 0 8px; font-size: 17px; }
+    ol { margin: 0 0 14px; padding-left: 1.2em; }
+    ul { margin: 0 0 14px; padding-left: 1.2em; }
+    li { margin: 0 0 10px; }
+    code, .cmd {
+      font-family: ui-monospace, Consolas, monospace;
+      background: rgba(0,0,0,.35);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 2px 7px;
+      font-size: 13px;
+    }
+    .cmdblock {
+      display: block;
+      margin: 8px 0 12px;
+      padding: 12px 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    a.btn {
+      display: inline-block;
+      margin: 4px 8px 14px 0;
+      padding: 12px 16px;
+      border-radius: 12px;
+      background: var(--accent);
+      color: #041018;
+      text-decoration: none;
+      font-weight: 700;
+    }
+    a.btn.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); font-weight: 600; }
+    .note { color: var(--muted); font-size: 13px; }
+    .ok { color: var(--good); }
+    .warn { color: var(--warn); }
+    .callout {
+      border-left: 3px solid var(--accent);
+      padding: 10px 12px;
+      margin: 0 0 14px;
+      background: rgba(94,194,255,.06);
+      border-radius: 0 12px 12px 0;
+    }
+    .divider { height: 1px; background: var(--line); margin: 34px 0; }
+    .os-title { font-size: 24px; margin: 0 0 6px; letter-spacing: -.02em; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Habitation Activity</h1>
+  <p class="lead">Трекер активного окна на Linux и Windows. Логи шифруются у тебя, на сервер уходит только ciphertext. На телефоне Habitation показывает отчёт.</p>
+
+  <div class="toc">
+    <a href="#linux">Linux</a>
+    <a href="#windows">Windows</a>
+    <a href="#keys">Ключи</a>
+    <a href="#venv">Нужен ли venv?</a>
+  </div>
+
+  <div class="card" id="venv">
+    <h2>Короткий ответ про Python environment</h2>
+    <p><b class="ok">Активировать venv руками не нужно.</b></p>
+    <ul>
+      <li><code>setup_linux.sh</code> / <code>setup_windows.bat</code> сами создают папку <code>.venv</code> и ставят зависимости.</li>
+      <li>Агент в фоне запускается как <code>.venv/bin/python …</code> (Linux) или <code>.venv\Scripts\python.exe …</code> (Windows) — без <code>source activate</code>.</li>
+      <li>Отчёт тоже: либо <code>./refresh-report.sh</code>, либо полный путь к python внутри <code>.venv</code>.</li>
+      <li><code>source .venv/bin/activate</code> можно, если хочешь писать коротко <code>python viewer/report.py</code> — это удобство, не обязанность.</li>
+    </ul>
+  </div>
+
+  <div class="card" id="keys">
+    <h2>Одинаковые ключи на всех устройствах</h2>
+    <p>В конфиге и в Habitation (Ещё → Компьютер) должны совпадать:</p>
+    <ul>
+      <li><code>sync_token</code> — доступ к серверу</li>
+      <li><code>passphrase</code> — ключ шифрования (сервер его <b>не</b> знает)</li>
+      <li><code>api_base</code> — обычно <code>https://messenger.banderdog.com</code></li>
+    </ul>
+    <p class="note warn">Не публикуй passphrase. Потерял — старые отчёты не расшифруешь.</p>
+  </div>
+
+  <div class="divider"></div>
+
+  <h2 class="os-title" id="linux">Linux</h2>
+  <p class="lead" style="margin-top:0">Ubuntu / GNOME. Один раз настроил — агент сам стартует после входа в систему.</p>
+
+  <div class="card">
+    <h2>Скачать</h2>
+    <a class="btn" href="/habitation/habitation-activity-linux.zip">Скачать ZIP для Linux</a>
+    <a class="btn secondary" href="/habitation/INSTALL-LINUX-RU.txt">Инструкция текстом</a>
+    <p class="note">Распакуй, например, в <code>~/habitation-activity</code>. Если репозиторий Habitation уже есть — можно сразу работать из папки <code>habitation/activity</code>.</p>
+  </div>
+
+  <div class="card">
+    <h2>Шаг 1 — что должно быть в системе</h2>
+    <ol>
+      <li><code>python3</code> и <code>python3-venv</code></li>
+      <li>пакеты для чтения активного окна на GNOME Wayland (обычно уже стоят):</li>
+    </ol>
+    <code class="cmdblock cmd">sudo apt update
+sudo apt install -y python3 python3-venv python3-gi gir1.2-atspi-2.0 python3-dbus</code>
+    <p class="note">На GNOME один раз включи accessibility (агент без этого часто не видит окно):</p>
+    <code class="cmdblock cmd">gsettings set org.gnome.desktop.interface toolkit-accessibility true</code>
+  </div>
+
+  <div class="card">
+    <h2>Шаг 2 — открыть терминал и перейти в папку</h2>
+    <code class="cmdblock cmd">cd ~/habitation-activity
+# или, если у тебя репозиторий Habitation:
+# cd ~/habitation/activity</code>
+  </div>
+
+  <div class="card">
+    <h2>Шаг 3 — установка (venv сам создастся)</h2>
+    <code class="cmdblock cmd">chmod +x setup_linux.sh refresh-report.sh
+./setup_linux.sh</code>
+    <div class="callout">
+      <b>Первый запуск</b> создаёт конфиг и выходит:<br>
+      <code>~/.config/habitation/activity.json</code><br>
+      Открой его и впиши <code>sync_token</code> + <code>passphrase</code> (те же, что на телефоне/Windows). Сохрани.
+    </div>
+    <p>Потом ещё раз:</p>
+    <code class="cmdblock cmd">./setup_linux.sh</code>
+    <p>Скрипт:</p>
+    <ul>
+      <li>создаст <code>.venv</code> (с system-site-packages — чтобы видел окна через AT-SPI)</li>
+      <li>поставит <code>cryptography</code> / <code>matplotlib</code></li>
+      <li>включит user-service <code>habitation-activity.service</code></li>
+      <li>запустит агент в фоне</li>
+    </ul>
+    <p class="note"><b>Activate не нужен</b> — в unit-файле уже прописан полный путь <code>…/activity/.venv/bin/python</code>.</p>
+  </div>
+
+  <div class="card">
+    <h2>Шаг 4 — проверить, что агент жив</h2>
+    <code class="cmdblock cmd">systemctl --user status habitation-activity.service</code>
+    <p>Должно быть <code>active (running)</code>. Логи:</p>
+    <code class="cmdblock cmd">journalctl --user -u habitation-activity.service -f</code>
+    <p class="note">Строки вида <code>uploaded 1 chunk(s)</code> раз в ~2–3 минуты — всё ок.</p>
+  </div>
+
+  <div class="card">
+    <h2>Шаг 5 — красивый отчёт</h2>
+    <p>Самый простой способ (venv уже внутри скрипта):</p>
+    <code class="cmdblock cmd">./refresh-report.sh
+# или за N дней:
+./refresh-report.sh 14</code>
+    <p>Эквивалент без activate:</p>
+    <code class="cmdblock cmd">.venv/bin/python viewer/report.py --config ~/.config/habitation/activity.json --days 1</code>
+    <p>Откроется браузер с графиками. Файл лежит здесь:</p>
+    <code class="cmdblock cmd">~/.local/share/habitation-activity/report.html</code>
+    <p class="note warn">Этот HTML статичный. Прошло два часа — снова запусти <code>./refresh-report.sh</code>, не смотри вчерашнюю вкладку.</p>
+  </div>
+
+  <div class="card">
+    <h2>Если хочешь всё-таки activate</h2>
+    <code class="cmdblock cmd">cd ~/habitation-activity   # или ~/habitation/activity
+source .venv/bin/activate
+python viewer/report.py --days 1
+deactivate   # когда закончил</code>
+    <p class="note">На работу фонового агента это не влияет. Агент уже крутится через systemd.</p>
+  </div>
+
+  <div class="card">
+    <h2>Полезные команды Linux</h2>
+    <code class="cmdblock cmd"># перезапуск агента
+systemctl --user restart habitation-activity.service
+
+# остановить
+systemctl --user stop habitation-activity.service
+
+# принудительно залить буфер сейчас
+.venv/bin/python agent/run.py --config ~/.config/habitation/activity.json --upload</code>
+  </div>
+
+  <div class="divider"></div>
+
+  <h2 class="os-title" id="windows">Windows</h2>
+  <p class="lead" style="margin-top:0">Пошагово, без «понимания командной строки». Скопировал → вставил → Enter.</p>
+
+  <div class="card">
+    <h2>Скачать</h2>
+    <a class="btn" href="/habitation/habitation-activity-windows.zip">Скачать ZIP для Windows</a>
+    <a class="btn secondary" href="/habitation/INSTALL-RU.txt">Инструкция текстом</a>
+    <p class="note">Распакуй ZIP в папку <code>%USERPROFILE%\habitation-activity</code>.</p>
+  </div>
+
+  <div class="card">
+    <h2>Шаг 1 — Python</h2>
+    <ol>
+      <li>Скачай Python: <a href="https://www.python.org/downloads/windows/" style="color:var(--accent)">python.org/downloads/windows</a></li>
+      <li>На установщике поставь галочку <b>Add python.exe to PATH</b>.</li>
+      <li>Жми Install Now.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>Шаг 2 — открыть чёрное окно</h2>
+    <ol>
+      <li>Клавиша <b>Windows</b> → набери <code>cmd</code> → Enter.</li>
+      <li>Вставь команду перехода в папку и Enter:</li>
+    </ol>
+    <code class="cmdblock cmd">cd %USERPROFILE%\habitation-activity</code>
+  </div>
+
+  <div class="card">
+    <h2>Шаг 3 — установка</h2>
+    <code class="cmdblock cmd">setup_windows.bat</code>
+    <p>Если откроется Блокнот с настройками — впиши <b>тот же</b> <code>sync_token</code> и <code>passphrase</code>, что на Linux и в Habitation. Сохрани (Ctrl+S), закрой блокнот и снова запусти <code>setup_windows.bat</code>.</p>
+    <p class="note"><b>Activate не нужен.</b> Батники сами зовут <code>.venv\Scripts\python.exe</code>.</p>
+  </div>
+
+  <div class="card">
+    <h2>Шаг 4 — отчёт</h2>
+    <code class="cmdblock cmd">report.bat</code>
+    <p class="note">Откроются графики в браузере. Данные расшифровываются только у тебя.</p>
+  </div>
+
+  <div class="card">
+    <h2>Что делает агент</h2>
+    <ul>
+      <li>Смотрит активное окно и idle (отошёл ли ты).</li>
+      <li>Раз в ~2–3 минуты шифрует кусок лога и заливает на messenger.banderdog.com.</li>
+      <li>Сервер <span class="ok">не читает</span> содержимое — только ciphertext.</li>
+      <li>Телефон Habitation (Ещё → Компьютер → Sync) подтягивает отчёт.</li>
+    </ul>
+  </div>
+
+  <p class="note warn">Не публикуй passphrase. Без него отчёты не восстановить.</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,68 @@
+Habitation Activity для Linux
+=============================
+
+Нужно ли активировать Python environment?
+-----------------------------------------
+НЕТ. Активировать venv руками не обязательно.
+
+setup_linux.sh сам создаёт папку .venv и ставит пакеты.
+Фоновый агент запускается через systemd как:
+  …/activity/.venv/bin/python …/agent/run.py
+
+Отчёт:
+  ./refresh-report.sh
+или
+  .venv/bin/python viewer/report.py --days 1
+
+source .venv/bin/activate — только если хочешь писать коротко
+«python …». На агент это не влияет.
+
+
+Шаг 1. Пакеты
+-------------
+sudo apt update
+sudo apt install -y python3 python3-venv python3-gi gir1.2-atspi-2.0 python3-dbus
+
+gsettings set org.gnome.desktop.interface toolkit-accessibility true
+
+
+Шаг 2. Папка
+------------
+Распакуй ZIP в ~/habitation-activity
+или используй ~/habitation/activity из репозитория.
+
+cd ~/habitation-activity
+
+
+Шаг 3. Установка
+----------------
+chmod +x setup_linux.sh refresh-report.sh
+./setup_linux.sh
+
+Первый раз создаст ~/.config/habitation/activity.json и выйдет.
+Впиши sync_token и passphrase (те же, что на телефоне/Windows).
+Снова:
+
+./setup_linux.sh
+
+
+Шаг 4. Проверка
+---------------
+systemctl --user status habitation-activity.service
+journalctl --user -u habitation-activity.service -f
+
+
+Шаг 5. Отчёт
+------------
+./refresh-report.sh
+# или за 14 дней:
+./refresh-report.sh 14
+
+Файл: ~/.local/share/habitation-activity/report.html
+HTML статичный — чтобы обновить, снова запусти refresh-report.sh.
+
+
+Полезно
+-------
+systemctl --user restart habitation-activity.service
+.venv/bin/python agent/run.py --config ~/.config/habitation/activity.json --upload

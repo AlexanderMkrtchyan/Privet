@@ -260,6 +260,21 @@ export async function pushCallToUser(userId, { title, body, data = {} } = {}) {
   });
 }
 
+/**
+ * Silent data-only cancel so other devices drop the native ring / pending
+ * stash when the call was answered or ended elsewhere. Short TTL — if the
+ * phone is offline the invite TTL already expired anyway.
+ */
+export async function pushCallCancelToUser(userId, callId) {
+  if (!callId) return { sent: 0, skipped: 'no_call_id' };
+  return pushToUser(userId, {
+    title: 'Call ended',
+    body: '',
+    data: { type: 'call.cancel', callId: String(callId) },
+    isCall: true,
+  });
+}
+
 /** Chat toast for killed/background mobile clients. */
 export async function pushMessageToUser(userId, { title, body, data = {} } = {}) {
   return pushToUser(userId, {

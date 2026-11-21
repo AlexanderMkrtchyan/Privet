@@ -343,6 +343,35 @@ export function migrate() {
       AND m.forwarded_from_id != ''
   `,
   ).run();
+
+  // Habitation OS activity: encrypted blobs only (server cannot read segments).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS habitation_activity_chunks (
+      id TEXT PRIMARY KEY,
+      device_id TEXT NOT NULL,
+      os TEXT NOT NULL,
+      day TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      ciphertext TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(device_id, day, seq)
+    );
+    CREATE INDEX IF NOT EXISTS idx_habitation_activity_day
+      ON habitation_activity_chunks(day, created_at);
+    CREATE INDEX IF NOT EXISTS idx_habitation_activity_device_day
+      ON habitation_activity_chunks(device_id, day);
+  `);
+
+  // Habitation app state snapshot (habits/day/…): one encrypted blob per account.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS habitation_state (
+      id TEXT PRIMARY KEY,
+      ciphertext TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      device_id TEXT NOT NULL DEFAULT '',
+      rev INTEGER NOT NULL DEFAULT 0
+    );
+  `);
 }
 
 export function publicUser(row) {

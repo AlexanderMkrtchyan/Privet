@@ -29,14 +29,13 @@ class MediaDownloadStatus {
     String? error,
     bool? isVideo,
     String? filename,
-  }) =>
-      MediaDownloadStatus(
-        progress: progress ?? this.progress,
-        savedPath: savedPath ?? this.savedPath,
-        error: error ?? this.error,
-        isVideo: isVideo ?? this.isVideo,
-        filename: filename ?? this.filename,
-      );
+  }) => MediaDownloadStatus(
+    progress: progress ?? this.progress,
+    savedPath: savedPath ?? this.savedPath,
+    error: error ?? this.error,
+    isVideo: isVideo ?? this.isVideo,
+    filename: filename ?? this.filename,
+  );
 }
 
 /// Shows a bottom toast that stays until the user closes it or opens the
@@ -49,19 +48,19 @@ void showMediaDownloadToast(
   final messenger =
       messengerKey?.currentState ?? ScaffoldMessenger.maybeOf(context);
   if (messenger == null) return;
-    messenger
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          duration: const Duration(days: 365),
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          padding: EdgeInsets.zero,
-          width: PrivetTheme.isCompact(context) ? null : 420,
-          content: _MediaDownloadToastBody(status: status),
-        ),
-      );
+  messenger
+    ..hideCurrentSnackBar()
+    ..showSnackBar(
+      SnackBar(
+        duration: const Duration(days: 365),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        padding: EdgeInsets.zero,
+        width: PrivetTheme.isCompact(context) ? null : 420,
+        content: _MediaDownloadToastBody(status: status),
+      ),
+    );
 }
 
 class _MediaDownloadToastBody extends StatelessWidget {
@@ -78,18 +77,22 @@ class _MediaDownloadToastBody extends StatelessWidget {
         final name = (s.filename?.trim().isNotEmpty == true)
             ? s.filename!.trim()
             : (saved != null && saved.isNotEmpty ? p.basename(saved) : '');
+        final downloading =
+            (saved == null || saved.isEmpty) && (s.error?.isEmpty ?? true);
         final String label;
         if (s.error != null && s.error!.isNotEmpty) {
           label = s.error!;
-        } else if (saved != null && saved.isNotEmpty) {
-          label = 'Saved $name';
-        } else if (s.isVideo) {
+        } else if (!downloading) {
+          // Legacy Android (API < 29) can fall back to app storage when the
+          // storage permission is denied — don't claim it went to Downloads.
+          label = saved!.contains('/Android/data/')
+              ? 'Saved to app storage: $name'
+              : 'Saved to Downloads: $name';
+        } else {
           final pct = s.progress == null
               ? ''
               : ' ${formatTransferPercent(s.progress!)}';
-          label = 'Downloading video…$pct';
-        } else {
-          label = 'Downloading…';
+          label = 'Downloading${name.isEmpty ? '' : ' $name'}…$pct';
         }
         final showView = saved != null && saved.isNotEmpty && s.error == null;
         return Material(
@@ -104,15 +107,38 @@ class _MediaDownloadToastBody extends StatelessWidget {
             child: Row(
               children: [
                 Expanded(
-                  child: Text(
-                    label,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: PrivetTheme.paper,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                    ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        label,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: PrivetTheme.paper,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      if (downloading) ...[
+                        const SizedBox(height: 6),
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(2),
+                            child: LinearProgressIndicator(
+                              value: s.progress,
+                              minHeight: 3,
+                              backgroundColor: PrivetTheme.line,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                PrivetTheme.signal,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
                 if (showView) ...[
@@ -171,31 +197,24 @@ Future<void> downloadMediaWithToast(
     required String url,
     String? filename,
     void Function(double progress)? onProgress,
-  }) download,
+  })
+  download,
   bool isVideo = false,
   GlobalKey<ScaffoldMessengerState>? messengerKey,
 }) async {
   final status = ValueNotifier(
-    MediaDownloadStatus(
-      isVideo: isVideo,
-      filename: filename,
-      progress: isVideo ? 0 : null,
-    ),
+    MediaDownloadStatus(isVideo: isVideo, filename: filename),
   );
-  showMediaDownloadToast(
-    context,
-    status: status,
-    messengerKey: messengerKey,
-  );
+  showMediaDownloadToast(context, status: status, messengerKey: messengerKey);
   try {
     final saved = await download(
       url: url,
       filename: filename,
-      onProgress: isVideo
-          ? (value) {
-              status.value = status.value.copyWith(progress: value);
-            }
-          : null,
+      // Progress for every download, not just video: files can take a while
+      // on mobile and the toast must show the file is actually moving.
+      onProgress: (value) {
+        status.value = status.value.copyWith(progress: value);
+      },
     );
     if (saved == null) {
       status.value = status.value.copyWith(
@@ -209,8 +228,6 @@ Future<void> downloadMediaWithToast(
       filename: filename,
     );
   } catch (e) {
-    status.value = status.value.copyWith(
-      error: 'Could not download $filename',
-    );
+    status.value = status.value.copyWith(error: 'Could not download $filename');
   }
 }

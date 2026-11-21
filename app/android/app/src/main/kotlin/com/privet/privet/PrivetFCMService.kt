@@ -31,6 +31,8 @@ class PrivetFCMService : FirebaseMessagingService() {
         private const val PREFS_NAME = "FlutterSharedPreferences"
         private const val PREFIX = "flutter.native_call_handled_"
         private const val FG_NOTIF_ID = 26401
+        /** Matches server ring timeout (60s) with a small grace window. */
+        private const val STALE_CALL_MS = 90_000L
 
         fun ensureCallChannel(context: Context) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -64,6 +66,18 @@ class PrivetFCMService : FirebaseMessagingService() {
         if (data.isEmpty()) return
 
         val type = data["type"] ?: ""
+        val callId = data["callId"] ?: ""
+
+        // Answered / hung up on another device — drop the native ring and any
+        // pending Flutter stash so a cold start hours later cannot re-ring.
+        if (type == "call.cancel" || type == "call.ended") {
+            if (callId.isNotEmpty()) {
+                IncomingCallNotifier.cancel(this, callId)
+                clearPendingIncomingCall(callId)
+            }
+            return
+        }
+
         if (type != "call.incoming") {
             // Notification-payload chat pushes call this only when FCM thinks
             // the app is foreground — which, screen on, includes "using
@@ -72,8 +86,16 @@ class PrivetFCMService : FirebaseMessagingService() {
             return
         }
 
-        val callId = data["callId"] ?: ""
         if (callId.isEmpty()) return
+
+        // Server ring window is 60s. Reject delayed/queued FCM that arrives
+        // long after the caller already hung up or someone else answered.
+        val createdAt = data["createdAt"]?.toLongOrNull() ?: 0L
+        if (createdAt > 0L &&
+            System.currentTimeMillis() - createdAt > STALE_CALL_MS
+        ) {
+            return
+        }
 
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (prefs.getBoolean("$PREFIX$callId", false)) return
@@ -92,12 +114,27 @@ class PrivetFCMService : FirebaseMessagingService() {
             "callerDisplayName" to (data["callerDisplayName"] ?: data["title"] ?: ""),
             "callerHandle" to (data["callerHandle"] ?: ""),
             "callerAvatarHue" to (data["callerAvatarHue"] ?: "160"),
+            "createdAt" to (data["createdAt"] ?: ""),
         )
 
         IncomingCallNotifier.show(this, callData)
         prefs.edit().putBoolean("$PREFIX$callId", true).apply()
 
         stopCallForeground()
+    }
+
+    private fun clearPendingIncomingCall(callId: String) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val editor = prefs.edit()
+            .remove("$PREFIX$callId")
+            .remove("flutter.pending_incoming_call")
+            .remove("flutter.pending_incoming_call_at")
+        // Also clear a pending accept/decline if it matches this call.
+        val pending = prefs.getString("flutter.pending_call_action", null)
+        if (pending != null && pending.contains(callId)) {
+            editor.remove("flutter.pending_call_action")
+        }
+        editor.apply()
     }
 
     override fun onNewToken(token: String) {

@@ -157,6 +157,7 @@ object CallPayload {
     const val KEY_CALLER_DISPLAY_NAME = "callerDisplayName"
     const val KEY_CALLER_HANDLE = "callerHandle"
     const val KEY_CALLER_AVATAR_HUE = "callerAvatarHue"
+    const val KEY_CREATED_AT = "createdAt"
 
     val keys = listOf(
         KEY_CALL_ID,
@@ -166,6 +167,7 @@ object CallPayload {
         KEY_CALLER_DISPLAY_NAME,
         KEY_CALLER_HANDLE,
         KEY_CALLER_AVATAR_HUE,
+        KEY_CREATED_AT,
     )
 
     fun putExtra(intent: Intent, data: Map<String, Any?>) {

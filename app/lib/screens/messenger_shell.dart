@@ -3253,6 +3253,7 @@ class _ConversationPaneState extends State<ConversationPane>
   final _scroll = ScrollController();
   final _recorder = AudioRecorder();
   final _searchController = TextEditingController();
+  final _searchFocus = FocusNode();
   final _messageKeys = <String, GlobalKey>{};
   final _composerHasContent = ValueNotifier<bool>(false);
   final _draftDebounce = Debouncer(const Duration(milliseconds: 400));
@@ -3279,6 +3280,14 @@ class _ConversationPaneState extends State<ConversationPane>
   List<_ChatSearchHit> _searchHits = [];
   int _searchMatchIndex = 0;
   Timer? _searchDebounce;
+
+  /// Query that produced [_searchHits]. Highlighting uses this (not the live
+  /// field text) so a pending debounce can never paint the new query with the
+  /// old hit occurrence indexes.
+  String _searchHitsQuery = '';
+
+  /// Guards overlapping jump animations — a newer jump cancels the old one.
+  int _scrollToSeq = 0;
 
   /// Message highlighted temporarily after tapping a reply quote.
   String? _focusedReplyId;
@@ -3410,6 +3419,17 @@ class _ConversationPaneState extends State<ConversationPane>
     }
     if (event is! KeyDownEvent) return false;
 
+    final keys = HardwareKeyboard.instance;
+    // Ctrl/Cmd+F — open the in-chat search and put the caret straight into the
+    // field so the user can type the query immediately.
+    if ((keys.isControlPressed || keys.isMetaPressed) &&
+        event.logicalKey == LogicalKeyboardKey.keyF) {
+      if (ModalRoute.of(context)?.isCurrent != true) return false;
+      if (widget.state.activeConversationId == null) return false;
+      _activateSearch(selectAll: true);
+      return true;
+    }
+
     if (event.logicalKey == LogicalKeyboardKey.escape) {
       if (!_showTasks && _mediaFolder == null) return false;
       // Let dialogs / sheets / popup menus / lightboxes take Escape first.
@@ -3418,7 +3438,6 @@ class _ConversationPaneState extends State<ConversationPane>
       return true;
     }
 
-    final keys = HardwareKeyboard.instance;
     // Ctrl/Cmd+End → newest message (same as the down-arrow button).
     if ((keys.isControlPressed || keys.isMetaPressed) &&
         event.logicalKey == LogicalKeyboardKey.end) {
@@ -4287,12 +4306,27 @@ class _ConversationPaneState extends State<ConversationPane>
   }
 
   void _toggleSearch() {
-    setState(() {
-      _searchOpen = !_searchOpen;
-      if (!_searchOpen) {
-        _searchHits = [];
-        _searchMatchIndex = 0;
-        _searchController.clear();
+    if (_searchOpen) {
+      _closeSearch();
+      return;
+    }
+    _activateSearch();
+  }
+
+  /// Opens the in-chat search panel and focuses its field (Ctrl/Cmd+F).
+  void _activateSearch({bool selectAll = false}) {
+    if (widget.state.activeConversationId == null) return;
+    if (!_searchOpen) {
+      setState(() => _searchOpen = true);
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_searchOpen) return;
+      _searchFocus.requestFocus();
+      if (selectAll && _searchController.text.isNotEmpty) {
+        _searchController.selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: _searchController.text.length,
+        );
       }
     });
   }
@@ -5035,6 +5069,7 @@ class _ConversationPaneState extends State<ConversationPane>
       _searchBusy = false;
       _searchHits = [];
       _searchMatchIndex = 0;
+      _searchHitsQuery = '';
       _focusReplyTimer?.cancel();
       _focusedReplyId = null;
       _searchController.clear();
@@ -5101,6 +5136,7 @@ class _ConversationPaneState extends State<ConversationPane>
     _composerFocus.dispose();
     _scroll.dispose();
     _searchController.dispose();
+    _searchFocus.dispose();
     _composerHasContent.dispose();
     _stopRecordingUi(clearLevels: true);
     _recorder.dispose();
@@ -5154,6 +5190,7 @@ class _ConversationPaneState extends State<ConversationPane>
       _searchBusy = false;
       _searchHits = [];
       _searchMatchIndex = 0;
+      _searchHitsQuery = '';
       _searchController.clear();
     });
   }
@@ -5174,6 +5211,7 @@ class _ConversationPaneState extends State<ConversationPane>
       setState(() {
         _searchHits = [];
         _searchMatchIndex = 0;
+        _searchHitsQuery = '';
         _searchBusy = false;
       });
       return;
@@ -5187,6 +5225,7 @@ class _ConversationPaneState extends State<ConversationPane>
       setState(() {
         _searchHits = hits;
         _searchMatchIndex = 0;
+        _searchHitsQuery = hits.isEmpty ? '' : query;
         _searchBusy = false;
       });
       if (hits.isNotEmpty) {
@@ -5211,75 +5250,121 @@ class _ConversationPaneState extends State<ConversationPane>
   }
 
   /// Scrolls the reversed message list so [messageId] is visible and built.
-  /// Used by search jumps and by tapping a reply quote. Reverse ListView only
-  /// builds visible rows — GlobalKeys for off-screen matches have null
-  /// context, so it jumps near the index first, then ensures visibility.
+  /// Used by search jumps and by tapping a reply quote.
+  ///
+  /// A reverse [ListView.builder] only mounts visible rows and its
+  /// [ScrollPosition.maxScrollExtent] is an estimate for unbuilt rows, so a
+  /// single fraction jump is unreliable. This walks toward the target using the
+  /// real positions of currently-mounted neighbours (which tells us both the
+  /// direction and the local row height), re-checking every frame until the
+  /// target mounts. A newer jump cancels this one via [_scrollToSeq].
   Future<void> _scrollToMessageId(String messageId) async {
     final chatId = widget.state.activeConversationId;
     if (chatId == null) return;
+    final seq = ++_scrollToSeq;
 
-    await widget.state.ensureMessageLoaded(chatId, messageId);
-    if (!mounted || widget.state.activeConversationId != chatId) return;
+    bool loaded;
+    try {
+      loaded = await widget.state.ensureMessageLoaded(chatId, messageId);
+    } catch (_) {
+      return;
+    }
+    if (!mounted || seq != _scrollToSeq) return;
+    if (widget.state.activeConversationId != chatId) return;
+    if (!loaded) return;
 
-    for (var attempt = 0; attempt < 24; attempt++) {
+    for (var attempt = 0; attempt < 80; attempt++) {
       await WidgetsBinding.instance.endOfFrame;
-      if (!mounted || !_scroll.hasClients) return;
+      if (!mounted || seq != _scrollToSeq) return;
+      if (!_scroll.hasClients) return;
 
       final messages =
           widget.state.messagesByChat[chatId] ?? const <ChatMessage>[];
       final dataIndex = messages.indexWhere((m) => m.id == messageId);
       if (dataIndex < 0) return;
 
-      // reverse: true → builder index 0 is newest (messages.last)
-      final builderIndex = messages.length - 1 - dataIndex;
       final keyCtx = _messageKeys[messageId]?.currentContext;
       if (keyCtx != null && keyCtx.mounted) {
-        final renderObject = keyCtx.findRenderObject();
-        if (renderObject != null) {
-          await _scroll.position.ensureVisible(
-            renderObject,
-            alignment: 0.4,
-            duration: attempt == 0
-                ? Duration.zero
-                : privetAnim(const Duration(milliseconds: 220)),
-            curve: Curves.easeOutCubic,
-          );
-        }
-        // Variable-height bubbles: one settle pass.
-        await WidgetsBinding.instance.endOfFrame;
-        if (!mounted) return;
-        final settled = _messageKeys[messageId]?.currentContext;
-        final settledRo = settled?.findRenderObject();
-        if (settledRo != null && settled != null && settled.mounted) {
-          await _scroll.position.ensureVisible(
-            settledRo,
-            alignment: 0.4,
-            duration: privetAnim(const Duration(milliseconds: 120)),
-            curve: Curves.easeOutCubic,
-          );
-        }
-        if (mounted) setState(() {});
+        await _revealMessageContext(messageId);
         return;
       }
 
-      final max = _scroll.position.maxScrollExtent;
-      final denom = messages.length <= 1
-          ? 1.0
-          : (messages.length - 1).toDouble();
-      // Prefer average extent once the list has laid out some content.
-      final avg = max > 0 && messages.isNotEmpty
-          ? (max / denom).clamp(48.0, 220.0)
-          : 96.0;
-      final estimated = (builderIndex * avg).clamp(0.0, max);
-      final current = _scroll.position.pixels;
-      if ((estimated - current).abs() > 12) {
-        _scroll.jumpTo(estimated);
-      } else {
-        // Near estimate but item still not built — step toward older/newer.
-        final direction = builderIndex > (messages.length / 2) ? 1.0 : -1.0;
-        final step = 180.0 * (1 + attempt ~/ 3) * direction;
-        _scroll.jumpTo((current + step).clamp(0.0, max));
+      final pos = _scroll.position;
+      // Find the mounted message whose cache index is closest to the target.
+      final indexById = <String, int>{};
+      for (var i = 0; i < messages.length; i++) {
+        indexById[messages[i].id] = i;
       }
+      int? nearestIndex;
+      for (final entry in _messageKeys.entries) {
+        final ctx = entry.value.currentContext;
+        if (ctx == null || !ctx.mounted) continue;
+        final idx = indexById[entry.key];
+        if (idx == null) continue;
+        if (nearestIndex == null ||
+            (idx - dataIndex).abs() < (nearestIndex - dataIndex).abs()) {
+          nearestIndex = idx;
+        }
+      }
+
+      final double target;
+      if (nearestIndex != null && nearestIndex != dataIndex) {
+        // messages are oldest→newest; reverse list puts newer at smaller
+        // scroll offsets. delta > 0 → the target is newer, scroll down.
+        final perRow = _estimatedRowExtent(pos, messages.length);
+        final delta = dataIndex - nearestIndex;
+        final distance = (delta.abs() * perRow).clamp(
+          perRow,
+          math.max(perRow, pos.viewportDimension * 8),
+        );
+        target = delta > 0 ? pos.pixels - distance : pos.pixels + distance;
+      } else {
+        // Nothing mounted (first frame): fall back to a fraction jump.
+        final denom = messages.length <= 1
+            ? 1.0
+            : (messages.length - 1).toDouble();
+        final builderIndex = messages.length - 1 - dataIndex;
+        target = pos.maxScrollExtent * builderIndex / denom;
+      }
+      final clamped = target.clamp(0.0, pos.maxScrollExtent);
+      if ((clamped - pos.pixels).abs() < 1) {
+        // Already at the estimated offset but the row still hasn't mounted —
+        // give the list a frame to build instead of spinning on the same pixel.
+        await WidgetsBinding.instance.endOfFrame;
+        if (!mounted || seq != _scrollToSeq) return;
+        continue;
+      }
+      pos.jumpTo(clamped);
+    }
+  }
+
+  /// Average row height, preferring the list's own layout estimate.
+  double _estimatedRowExtent(ScrollPosition pos, int count) {
+    if (count <= 1) return 96;
+    final max = pos.maxScrollExtent;
+    final avg = max > 0 ? max / (count - 1) : 0.0;
+    if (!avg.isFinite || avg <= 0) return 96;
+    return avg.clamp(32.0, 320.0);
+  }
+
+  /// Fine-scrolls an already-mounted message row into a comfortable position.
+  /// Two passes because bubbles grow after media/decode settles.
+  Future<void> _revealMessageContext(String messageId) async {
+    for (var pass = 0; pass < 2; pass++) {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || !_scroll.hasClients) return;
+      final ctx = _messageKeys[messageId]?.currentContext;
+      if (ctx == null || !ctx.mounted) return;
+      final renderObject = ctx.findRenderObject();
+      if (renderObject == null) return;
+      await _scroll.position.ensureVisible(
+        renderObject,
+        alignment: 0.4,
+        duration: pass == 0
+            ? Duration.zero
+            : privetAnim(const Duration(milliseconds: 180)),
+        curve: Curves.easeOutCubic,
+      );
     }
   }
 
@@ -5303,12 +5388,12 @@ class _ConversationPaneState extends State<ConversationPane>
     unawaited(_jumpToSearchMatch(next));
   }
 
-  /// Hits are newest-first. Linux ↑ = toward newer (−1), ↓ = older (+1).
-  /// Windows was inverted vs that, so flip only there.
-  int get _searchArrowUpDelta =>
-      (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) ? 1 : -1;
+  /// Hits are newest-first. ↑ walks up to older matches, ↓ walks down to newer
+  /// ones — matching how the chat itself moves on screen (newest at the
+  /// bottom). This used to be inverted on Linux/Android/web.
+  int get _searchArrowUpDelta => 1;
 
-  int get _searchArrowDownDelta => -_searchArrowUpDelta;
+  int get _searchArrowDownDelta => -1;
 
   bool _canSearchStep(int delta) {
     if (_searchHits.isEmpty) return false;
@@ -5447,7 +5532,7 @@ class _ConversationPaneState extends State<ConversationPane>
                         children: [
                           TextField(
                             controller: _searchController,
-                            autofocus: true,
+                            focusNode: _searchFocus,
                             style: GoogleFonts.ibmPlexSans(fontSize: 14),
                             decoration: InputDecoration(
                               isDense: true,
@@ -5543,7 +5628,7 @@ class _ConversationPaneState extends State<ConversationPane>
                           Expanded(
                             child: TextField(
                               controller: _searchController,
-                              autofocus: true,
+                              focusNode: _searchFocus,
                               style: GoogleFonts.ibmPlexSans(fontSize: 14),
                               decoration: InputDecoration(
                                 isDense: true,
@@ -5749,7 +5834,7 @@ class _ConversationPaneState extends State<ConversationPane>
                             highlighted: highlighted,
                             searchQuery: searchHit != null &&
                                     searchHit.messageId == m.id
-                                ? _searchController.text.trim()
+                                ? _searchHitsQuery
                                 : '',
                             searchOccurrence: searchHit != null &&
                                     searchHit.messageId == m.id

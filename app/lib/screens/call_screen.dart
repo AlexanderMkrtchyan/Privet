@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -7,6 +8,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../models.dart';
 import '../state.dart';
 import '../theme.dart';
+import '../util/mini_call_layout.dart';
 import '../util/remote_input.dart';
 import '../util/webrtc_safe.dart';
 import '../util/web_select_cursor.dart';
@@ -142,13 +144,8 @@ class _DraggableMiniCallBarState extends State<_DraggableMiniCallBar> {
   Offset? _localOffset;
   Size? _localSize;
 
-  Offset _defaultOffset(Size screen) {
-    final size = _localSize ?? widget.state.miniCallSize;
-    return Offset(
-      (screen.width - size.width - 16).clamp(8.0, screen.width - size.width),
-      (screen.height - size.height - 16).clamp(8.0, screen.height - size.height),
-    );
-  }
+  Offset _defaultOffset(Size screen) =>
+      miniCallDefaultOffset(screen, _localSize ?? widget.state.miniCallSize);
 
   @override
   void initState() {
@@ -161,14 +158,13 @@ class _DraggableMiniCallBarState extends State<_DraggableMiniCallBar> {
   Widget build(BuildContext context) {
     final screen = MediaQuery.sizeOf(context);
     final compact = PrivetTheme.isCompact(context);
-    final size = _localSize ?? widget.state.miniCallSize;
-    final offset = _localOffset ?? widget.state.miniCallOffset ?? _defaultOffset(screen);
 
     if (compact) {
-      return Positioned(
-        left: 0,
-        right: 0,
-        bottom: 0,
+      // CallOverlay itself is already a Positioned.fill child of the shell
+      // Stack. Returning a Positioned here would give the same RenderObject
+      // competing StackParentData and blank the whole screen on phones.
+      return Align(
+        alignment: Alignment.bottomCenter,
         child: SafeArea(
           top: false,
           child: _MiniCallBar(
@@ -176,11 +172,16 @@ class _DraggableMiniCallBarState extends State<_DraggableMiniCallBar> {
             session: widget.session,
             width: screen.width,
             height: 76,
+            compact: true,
             showResizeHandle: false,
           ),
         ),
       );
     }
+
+    final size = _localSize ?? widget.state.miniCallSize;
+    final offset =
+        _localOffset ?? widget.state.miniCallOffset ?? _defaultOffset(screen);
 
     return Stack(
       children: [
@@ -264,6 +265,7 @@ class _MiniCallBar extends StatelessWidget {
     required this.session,
     required this.width,
     required this.height,
+    this.compact = false,
     this.showResizeHandle = true,
     this.onDragStart,
     this.onDragUpdate,
@@ -277,6 +279,7 @@ class _MiniCallBar extends StatelessWidget {
   final CallSession session;
   final double width;
   final double height;
+  final bool compact;
   final bool showResizeHandle;
   final GestureDragStartCallback? onDragStart;
   final GestureDragUpdateCallback? onDragUpdate;
@@ -338,8 +341,22 @@ class _MiniCallBar extends StatelessWidget {
                         ? 'Video call'
                         : 'Audio call';
 
+    if (compact) {
+      return _buildCompactBar(
+        context: context,
+        label: label,
+        showVideo: showVideo,
+        showLocalPreview: showLocalPreview,
+        videoRenderer: videoRenderer,
+        videoIsScreen: videoIsScreen,
+        sharing: sharing,
+      );
+    }
+
     const railW = 220.0;
-    final videoH = (height - 24).clamp(72.0, height - 24);
+    // Never let the preview be taller than the rail: the compact/desktop bar
+    // can be shorter than 96px and clamp() throws when min > max.
+    final videoH = math.max(24.0, height - 24);
 
     final controls = Row(
       mainAxisSize: MainAxisSize.min,
@@ -489,7 +506,7 @@ class _MiniCallBar extends StatelessWidget {
                     width: double.infinity,
                     child: RTCVideoView(
                       videoRenderer,
-                      mirror: showLocalPreview,
+                      mirror: showLocalPreview && session.camMirrored,
                       objectFit: videoIsScreen
                           ? RTCVideoViewObjectFit.RTCVideoViewObjectFitContain
                           : RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
@@ -636,6 +653,177 @@ class _MiniCallBar extends StatelessWidget {
       ),
     );
   }
+
+  /// Phone layout: one row that never needs more height than the 76px bar.
+  /// The desktop split preview + fixed 220px rail does not fit there (and its
+  /// clamp/overflows used to throw, blanking the app when minimizing).
+  Widget _buildCompactBar({
+    required BuildContext context,
+    required String label,
+    required bool showVideo,
+    required bool showLocalPreview,
+    required RTCVideoRenderer videoRenderer,
+    required bool videoIsScreen,
+    required bool sharing,
+  }) {
+    final thumb = math.max(40.0, math.min(60.0, height - 16));
+
+    Widget tile;
+    if (showVideo) {
+      tile = ClipRRect(
+        borderRadius: BorderRadius.circular(9),
+        child: ColoredBox(
+          color: Colors.black,
+          child: SizedBox(
+            width: thumb,
+            height: thumb,
+            child: RTCVideoView(
+              videoRenderer,
+              mirror: showLocalPreview && session.camMirrored,
+              objectFit: videoIsScreen
+                  ? RTCVideoViewObjectFit.RTCVideoViewObjectFitContain
+                  : RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+            ),
+          ),
+        ),
+      );
+    } else if (sharing) {
+      tile = Container(
+        width: thumb,
+        height: thumb,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(9),
+          color: PrivetTheme.signal.withValues(alpha: 0.18),
+        ),
+        child: Icon(
+          Icons.screen_share_rounded,
+          size: thumb * 0.5,
+          color: PrivetTheme.signal,
+        ),
+      );
+    } else {
+      tile = PrivetAvatar(
+        name: session.peer.displayName,
+        hue: session.peer.avatarHue,
+        size: thumb * 0.8,
+      );
+    }
+
+    final info = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          session.peer.displayName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: GoogleFonts.syne(
+            fontSize: 13.5,
+            fontWeight: FontWeight.w700,
+            color: PrivetTheme.paper,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(color: PrivetTheme.mist, fontSize: 10.5),
+        ),
+      ],
+    );
+
+    const btn = 40.0;
+    final controls = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _MiniIconBtn(
+          icon: !session.hasMicTrack || !session.micOn
+              ? Icons.mic_off_rounded
+              : Icons.mic_rounded,
+          color: !session.hasMicTrack
+              ? PrivetTheme.panel
+              : session.micOn
+                  ? PrivetTheme.panel
+                  : PrivetTheme.danger,
+          size: btn,
+          tooltip: !session.hasMicTrack
+              ? 'Enable microphone'
+              : session.micOn
+                  ? 'Mute'
+                  : 'Unmute',
+          onTap: session.toggleMic,
+        ),
+        if (!session.isControlCall)
+          _MiniIconBtn(
+            icon: sharing
+                ? Icons.stop_screen_share_rounded
+                : Icons.screen_share_rounded,
+            color: sharing ? const Color(0xFFFFA726) : PrivetTheme.signal,
+            ink: !sharing,
+            size: btn,
+            enabled: sharing || session.canStartScreenShare,
+            tooltip: sharing
+                ? 'Stop sharing'
+                : session.canStartScreenShare
+                    ? 'Share screen'
+                    : 'Peer sharing',
+            onTap: () async {
+              if (sharing) {
+                await session.toggleScreenShare();
+                return;
+              }
+              final stream = await showScreenSharePicker(context);
+              if (stream != null) {
+                await session.startScreenShare(stream);
+              }
+            },
+          ),
+        _MiniIconBtn(
+          icon: Icons.open_in_full_rounded,
+          color: PrivetTheme.signal,
+          ink: true,
+          size: btn,
+          tooltip: 'Maximize',
+          onTap: () => state.setCallMinimized(false),
+        ),
+        _MiniIconBtn(
+          icon: Icons.call_end_rounded,
+          color: PrivetTheme.danger,
+          size: btn,
+          tooltip: 'Leave',
+          onTap: () => state.endCall(),
+        ),
+      ],
+    );
+
+    return Material(
+      elevation: 16,
+      shadowColor: Colors.black54,
+      color: const Color(0xFF1F1F1F),
+      borderRadius: BorderRadius.circular(14),
+      clipBehavior: Clip.antiAlias,
+      child: SizedBox(
+        width: width,
+        height: height,
+        child: InkWell(
+          onTap: () => state.setCallMinimized(false),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+            child: Row(
+              children: [
+                tile,
+                const SizedBox(width: 9),
+                Expanded(child: info),
+                const SizedBox(width: 4),
+                controls,
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _MiniIconBtn extends StatelessWidget {
@@ -645,6 +833,7 @@ class _MiniIconBtn extends StatelessWidget {
     required this.onTap,
     this.enabled = true,
     this.ink = false,
+    this.size = 46,
     this.tooltip,
   });
 
@@ -653,12 +842,13 @@ class _MiniIconBtn extends StatelessWidget {
   final VoidCallback onTap;
   final bool enabled;
   final bool ink;
+  final double size;
   final String? tooltip;
 
   @override
   Widget build(BuildContext context) {
     final btn = Padding(
-      padding: const EdgeInsets.only(left: 6),
+      padding: EdgeInsets.only(left: size <= 42 ? 4 : 6),
       child: Material(
         color: color,
         shape: const CircleBorder(),
@@ -669,11 +859,11 @@ class _MiniIconBtn extends StatelessWidget {
               ? SystemMouseCursors.click
               : SystemMouseCursors.basic,
           child: SizedBox(
-            width: 46,
-            height: 46,
+            width: size,
+            height: size,
             child: Icon(
               icon,
-              size: 22,
+              size: size * 0.48,
               color: (ink ? PrivetTheme.ink : PrivetTheme.paper)
                   .withValues(alpha: enabled ? 1 : 0.35),
             ),
@@ -1097,7 +1287,7 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
     } else {
       // stageIsLocalCam (or placeholder — renderer unused then).
       stageRenderer = session.localRenderer;
-      stageMirror = true;
+      stageMirror = session.camMirrored;
       stageContain = false;
     }
 
@@ -1178,7 +1368,7 @@ class _ActiveCallViewState extends State<_ActiveCallView> {
             cursor: SystemMouseCursors.move,
             child: _PipTile(
               renderer: session.localRenderer,
-              mirror: true,
+              mirror: session.camMirrored,
               label: 'You',
               width: pipW,
               height: pipH,
@@ -1798,6 +1988,14 @@ class _ControlDock extends StatelessWidget {
           enabled: !session.sharingScreen,
           onTap:
               session.hasCamTrack ? session.toggleCam : session.retryCamera,
+        ),
+      if (session.canFlipCamera)
+        _CallButton(
+          color: PrivetTheme.panelElevated,
+          icon: Icons.cameraswitch_rounded,
+          label: session.cameraSwitching ? 'Switching…' : 'Flip',
+          enabled: !session.cameraSwitching,
+          onTap: session.flipCamera,
         ),
       if (!isControl)
         _CallButton(

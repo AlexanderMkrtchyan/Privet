@@ -3,4 +3,9 @@
     <cache-path
         name="clipboard_images"
         path="clipboard_images/" />
+    <!-- Legacy Android (< 10) download fallback when the storage permission is
+         denied: files land in getExternalFilesDir(DIRECTORY_DOWNLOADS). -->
+    <external-files-path
+        name="downloads"
+        path="Download/" />
 </paths>

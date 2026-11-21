@@ -1,24 +1,36 @@
 package com.privet.privet
 
 import android.Manifest
+import android.app.DownloadManager
 import android.app.NotificationManager
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentResolver
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.Settings
+import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.io.IOException
 
 class MainActivity : FlutterActivity() {
     private var pendingStorageResult: MethodChannel.Result? = null
+    // Legacy (API < 29) public-Downloads write waiting for a permission answer.
+    private var pendingDownloadSave: (() -> Unit)? = null
+    private var pendingDownloadResult: MethodChannel.Result? = null
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         // Before Flutter creates privet_messages: bump a FCM-default channel
@@ -199,6 +211,33 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+        // Saving chat media: Android has no writable "Downloads" path in the
+        // app sandbox, so files must go through MediaStore (API 29+) or the
+        // public Downloads folder (legacy). Dart downloads to a temp file and
+        // hands the path here; the returned path is what the toast shows.
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "privet/downloads",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "saveFile" -> {
+                    val path = call.argument<String>("path")
+                    val name = call.argument<String>("filename") ?: "download"
+                    val mime = call.argument<String>("mimeType")
+                        ?: "application/octet-stream"
+                    if (path.isNullOrEmpty()) {
+                        result.success(null)
+                    } else {
+                        saveToDownloads(File(path), name, mime, result)
+                    }
+                }
+                "reveal" -> {
+                    val path = call.argument<String>("path")
+                    result.success(revealDownload(path))
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 
     override fun onRequestPermissionsResult(
@@ -213,6 +252,260 @@ class MainActivity : FlutterActivity() {
             )
             pendingStorageResult = null
         }
+        if (requestCode == DOWNLOAD_PERMISSION_REQUEST) {
+            val pending = pendingDownloadSave
+            pendingDownloadSave = null
+            pendingDownloadResult = null
+            // The closure re-checks the permission itself, so denial falls back
+            // to the app-specific folder instead of failing the download.
+            pending?.invoke()
+        }
+    }
+
+    /**
+     * Copies [src] into the phone's public Downloads folder.
+     *
+     * Android 10+ uses MediaStore.Downloads (no permission, indexed by the
+     * Files app / Downloads UI). API 24–28 writes the public directory
+     * directly, which needs WRITE_EXTERNAL_STORAGE; when the user denies it we
+     * fall back to the app-specific external folder instead of failing.
+     * Returns the saved absolute path, or null on failure.
+     */
+    private fun saveToDownloads(
+        src: File,
+        displayName: String,
+        mimeType: String,
+        result: MethodChannel.Result,
+    ) {
+        if (!src.exists() || src.length() == 0L) {
+            result.success(null)
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            val permission = Manifest.permission.WRITE_EXTERNAL_STORAGE
+            if (ContextCompat.checkSelfPermission(this, permission) ==
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                legacySave(src, displayName, mimeType, result, publicDir = true)
+            } else {
+                // A newer download supersedes the one still waiting for the
+                // permission dialog; fail it instead of leaving Dart hanging.
+                pendingDownloadResult?.success(null)
+                pendingDownloadResult = result
+                pendingDownloadSave = {
+                    val grantedNow = ContextCompat.checkSelfPermission(
+                        this,
+                        permission,
+                    ) == PackageManager.PERMISSION_GRANTED
+                    legacySave(
+                        src,
+                        displayName,
+                        mimeType,
+                        result,
+                        publicDir = grantedNow,
+                    )
+                }
+                requestPermissions(
+                    arrayOf(permission),
+                    DOWNLOAD_PERMISSION_REQUEST,
+                )
+            }
+            return
+        }
+        Thread {
+            var created: Uri? = null
+            try {
+                val resolver = contentResolver
+                val finalName = uniqueMediaStoreName(resolver, displayName)
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, finalName)
+                    put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                    put(
+                        MediaStore.Downloads.RELATIVE_PATH,
+                        Environment.DIRECTORY_DOWNLOADS,
+                    )
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val target = resolver.insert(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    values,
+                ) ?: throw IOException("MediaStore insert failed")
+                created = target
+                resolver.openOutputStream(target)?.use { out ->
+                    src.inputStream().use { input -> input.copyTo(out, 64 * 1024) }
+                } ?: throw IOException("MediaStore openOutputStream failed")
+                val done = ContentValues().apply {
+                    put(MediaStore.Downloads.IS_PENDING, 0)
+                }
+                resolver.update(target, done, null, null)
+                postResult(result, publicDownloadsPath(finalName))
+            } catch (_: Exception) {
+                created?.let { runCatching { contentResolver.delete(it, null, null) } }
+                postResult(result, null)
+            }
+        }.start()
+    }
+
+    /** API < 29: plain file write into Download/ (or the app dir on denial). */
+    private fun legacySave(
+        src: File,
+        displayName: String,
+        mimeType: String,
+        result: MethodChannel.Result,
+        publicDir: Boolean,
+    ) {
+        Thread {
+            try {
+                val dir = if (publicDir) {
+                    Environment.getExternalStoragePublicDirectory(
+                        Environment.DIRECTORY_DOWNLOADS,
+                    )
+                } else {
+                    getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
+                }
+                if (!dir.exists()) dir.mkdirs()
+                val target = File(dir, uniqueFileName(dir, displayName))
+                src.inputStream().use { input ->
+                    target.outputStream().use { output ->
+                        input.copyTo(output, 64 * 1024)
+                    }
+                }
+                if (publicDir) {
+                    MediaScannerConnection.scanFile(
+                        this,
+                        arrayOf(target.absolutePath),
+                        arrayOf(mimeType),
+                        null,
+                    )
+                }
+                postResult(result, target.absolutePath)
+            } catch (_: Exception) {
+                postResult(result, null)
+            }
+        }.start()
+    }
+
+    /** Opens the saved file with its viewer, else the system Downloads UI. */
+    private fun revealDownload(path: String?): Boolean {
+        if (!path.isNullOrEmpty() && path.contains("/Android/data/")) {
+            // Legacy fallback location (app-specific external storage): expose
+            // it through our FileProvider so the viewer can read it.
+            try {
+                val file = File(path)
+                if (file.exists()) {
+                    val uri = FileProvider.getUriForFile(
+                        this,
+                        "$packageName.fileprovider",
+                        file,
+                    )
+                    val ext = file.extension
+                    val mime = android.webkit.MimeTypeMap.getSingleton()
+                        .getMimeTypeFromExtension(ext) ?: "*/*"
+                    val view = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, mime)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    if (startActivityIfAvailable(view)) return true
+                }
+            } catch (_: Exception) {
+                // Fall through to the Downloads UI.
+            }
+        }
+        if (!path.isNullOrEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val name = File(path).name
+                contentResolver.query(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    arrayOf(
+                        MediaStore.Downloads._ID,
+                        MediaStore.Downloads.MIME_TYPE,
+                    ),
+                    "${MediaStore.Downloads.DISPLAY_NAME}=?",
+                    arrayOf(name),
+                    null,
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val id = cursor.getLong(0)
+                        val mime = cursor.getString(1) ?: "*/*"
+                        val uri = ContentUris.withAppendedId(
+                            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                            id,
+                        )
+                        val view = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, mime)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        if (startActivityIfAvailable(view)) return true
+                    }
+                }
+            } catch (_: Exception) {
+                // Fall through to the Downloads UI below.
+            }
+        }
+        return startActivityIfAvailable(
+            Intent(DownloadManager.ACTION_VIEW_DOWNLOADS),
+        )
+    }
+
+    private fun startActivityIfAvailable(intent: Intent): Boolean {
+        return try {
+            startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** MediaStore allows duplicate names — make "photo (1).jpg" instead. */
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun uniqueMediaStoreName(
+        resolver: ContentResolver,
+        name: String,
+    ): String {
+        val dot = name.lastIndexOf('.')
+        val base = if (dot > 0) name.substring(0, dot) else name
+        val ext = if (dot > 0) name.substring(dot) else ""
+        var candidate = name
+        var index = 1
+        while (index < 1000) {
+            val exists = resolver.query(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.Downloads._ID),
+                "${MediaStore.Downloads.DISPLAY_NAME}=? AND " +
+                    "${MediaStore.Downloads.RELATIVE_PATH} LIKE ?",
+                arrayOf(candidate, "${Environment.DIRECTORY_DOWNLOADS}%"),
+                null,
+            )?.use { it.moveToFirst() } ?: false
+            if (!exists) return candidate
+            candidate = "$base ($index)$ext"
+            index++
+        }
+        return candidate
+    }
+
+    private fun uniqueFileName(dir: File, name: String): String {
+        val dot = name.lastIndexOf('.')
+        val base = if (dot > 0) name.substring(0, dot) else name
+        val ext = if (dot > 0) name.substring(dot) else ""
+        var candidate = name
+        var index = 1
+        while (File(dir, candidate).exists() && index < 1000) {
+            candidate = "$base ($index)$ext"
+            index++
+        }
+        return candidate
+    }
+
+    private fun publicDownloadsPath(name: String): String {
+        @Suppress("DEPRECATION")
+        val dir = Environment.getExternalStoragePublicDirectory(
+            Environment.DIRECTORY_DOWNLOADS,
+        )
+        return File(dir, name).absolutePath
+    }
+
+    private fun postResult(result: MethodChannel.Result, value: Any?) {
+        runOnUiThread { result.success(value) }
     }
 
     private fun requestReadMedia(result: MethodChannel.Result) {
@@ -411,6 +704,7 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val STORAGE_PERMISSION_REQUEST = 4721
+        private const val DOWNLOAD_PERMISSION_REQUEST = 4722
 
         @Volatile
         private var startedActivities = 0

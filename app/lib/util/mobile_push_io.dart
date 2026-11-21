@@ -46,6 +46,7 @@ Future<String?> registerMobilePushToken() async {
 Future<void> attachMobilePushHandlers({
   required void Function(Map<String, String> data) onOpenPayload,
   void Function(String actionId, Map<String, String> data)? onAction,
+  void Function(Map<String, String> data)? onMessage,
 }) async {
   if (kIsWeb || !MobilePushConfig.isConfigured) return;
   try {
@@ -69,13 +70,22 @@ Future<void> attachMobilePushHandlers({
     }
 
     FirebaseMessaging.onMessage.listen((message) async {
-      final isCall = message.data['type'] == 'call.incoming';
+      final type = message.data['type'] ?? '';
+      if (type == 'call.cancel' || type == 'call.ended') {
+        // Answered/ended elsewhere — tear down any local ring.
+        onOpenPayload(_stringifyData(message.data));
+        return;
+      }
+      final isCall = type == 'call.incoming';
       if (isCall) {
         // Foreground calls are covered by the in-app Accept/Decline overlay
         // (set up from the WS ring or this very payload). Never stack a
         // full-screen intent over it.
         onOpenPayload(_stringifyData(message.data));
       } else {
+        // Let the app verify what it actually has: FCM is delivered even when
+        // the WS is a half-open corpse, so the push doubles as a sync hint.
+        onMessage?.call(_stringifyData(message.data));
         await showMobileNotificationFromRemoteMessage(message);
       }
     });

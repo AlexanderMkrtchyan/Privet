@@ -155,6 +155,20 @@ export function sendToUserPreferred(userId, preferred, payload) {
   return true;
 }
 
+/**
+ * Fan-out to every live socket for [userId] except [except].
+ * Used so other devices stop ringing when one device answers.
+ * @param {string} userId
+ * @param {import('ws').WebSocket|null|undefined} except
+ * @param {object} payload
+ */
+export function sendToUserExcept(userId, except, payload) {
+  for (const socket of liveSockets(userId)) {
+    if (except && socket === except) continue;
+    sendToSocket(socket, payload);
+  }
+}
+
 /** Dev/debug: open socket counts per user (no secrets). */
 export function socketStats() {
   /** @type {Record<string, { sockets: number, primary: boolean }>} */

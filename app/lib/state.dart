@@ -135,6 +135,7 @@ class CallSession extends ChangeNotifier {
   RTCPeerConnection? _pc;
   MediaStream? _local;
   MediaStream? _display;
+
   /// Video-only wrapper for local screen preview (not the capture stream).
   MediaStream? _localPreview;
   String? _displaySourceId;
@@ -174,6 +175,25 @@ class CallSession extends ChangeNotifier {
   bool get _polite => !isCaller;
   bool micOn = true;
   bool camOn = true;
+
+  /// Front camera in use — self-view is mirrored. Toggled by [flipCamera].
+  bool camMirrored = true;
+  bool _switchingCamera = false;
+
+  /// True while a front/back switch is in flight (disable the button).
+  bool get cameraSwitching => _switchingCamera;
+
+  /// Front/back flip exists only on native mobile capturers. Web and desktop
+  /// pick cameras by device id instead, and screen shares have no camera.
+  bool get canFlipCamera =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS) &&
+      hasCamTrack &&
+      camOn &&
+      !sharingScreen &&
+      !isScreenCall;
+
   bool sharingScreen = false;
 
   /// True after this side has shared at least once (detect local stop vs waiting).
@@ -281,9 +301,7 @@ class CallSession extends ChangeNotifier {
   /// busy / answered audio-only / joined without A/V). Tapping the camera
   /// button calls [retryCamera].
   bool get cameraPending =>
-      (call.mode == 'video' || isControlCall) &&
-      !sharingScreen &&
-      !hasCamTrack;
+      (call.mode == 'video' || isControlCall) && !sharingScreen && !hasCamTrack;
 
   /// Intentionally joined without camera (can still enable later).
   bool get joinedAudioOnly =>
@@ -728,9 +746,7 @@ class CallSession extends ChangeNotifier {
       remoteHasVideo = true;
       // Force unmute/play after video bind — desktop browsers otherwise stay silent.
       if (stream.getAudioTracks().isNotEmpty) {
-        unawaited(
-          ensureRemoteCallAudioPlaying(remoteRenderer: remoteRenderer),
-        );
+        unawaited(ensureRemoteCallAudioPlaying(remoteRenderer: remoteRenderer));
       }
       // Only dedicated screen/control calls treat any remote video as "peer sharing".
       // Mid-call share on video/audio is gated by call.share_started — marking
@@ -1236,6 +1252,35 @@ class CallSession extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Flip between the front and rear camera mid-call (Android/iOS).
+  ///
+  /// The capturer swaps its source in place, so the same video track/sender is
+  /// kept — no renegotiation, and the peer sees the new angle immediately.
+  /// Self-view mirroring follows the lens: front is mirrored, rear is not.
+  Future<void> flipCamera() async {
+    if (_disposed || _switchingCamera || !canFlipCamera) return;
+    final local = _local;
+    final tracks = local?.getVideoTracks() ?? const <MediaStreamTrack>[];
+    if (tracks.isEmpty) return;
+    final cam = tracks.firstWhere(_isCameraTrack, orElse: () => tracks.first);
+    _switchingCamera = true;
+    notifyListeners();
+    try {
+      final switched = await Helper.switchCamera(cam);
+      if (switched) {
+        camMirrored = !camMirrored;
+        error = null;
+      } else {
+        error = 'Could not switch camera.';
+      }
+    } catch (e) {
+      error = 'Could not switch camera: $e';
+    } finally {
+      _switchingCamera = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
   bool _isCameraTrack(MediaStreamTrack track) {
     if (track.kind != 'video') return false;
     final label = (track.label ?? '').toLowerCase();
@@ -1342,6 +1387,8 @@ class CallSession extends ChangeNotifier {
       }
       track = cam.getVideoTracks().first;
       track.enabled = true;
+      // A freshly opened mobile camera starts on the front lens.
+      camMirrored = true;
       _local ??= await createLocalMediaStream('local');
       await _local!.addTrack(track);
       // Detach from the temporary getUserMedia stream WITHOUT disposing it first.
@@ -1529,10 +1576,7 @@ class CallSession extends ChangeNotifier {
   }
 
   /// Attach a display stream captured under a user gesture (share picker).
-  Future<void> startScreenShare(
-    MediaStream display, {
-    String? sourceId,
-  }) async {
+  Future<void> startScreenShare(MediaStream display, {String? sourceId}) async {
     MediaStreamTrack? previousVideoTrack;
     var shareAnnounced = false;
     try {
@@ -2063,8 +2107,8 @@ class CallSession extends ChangeNotifier {
       params.degradationPreference = mode == RemoteControlQuality.quality
           ? RTCDegradationPreference.MAINTAIN_RESOLUTION
           : mode == RemoteControlQuality.speed
-              ? RTCDegradationPreference.MAINTAIN_FRAMERATE
-              : RTCDegradationPreference.BALANCED;
+          ? RTCDegradationPreference.MAINTAIN_FRAMERATE
+          : RTCDegradationPreference.BALANCED;
       await sender.setParameters(params);
     } catch (e) {
       debugPrint('applyRemoteControlQuality setParameters failed: $e');
@@ -2094,6 +2138,7 @@ class CallSession extends ChangeNotifier {
         },
       );
     }
+
     // #endregion
     ready = false;
     _remoteVideoMuteTimer?.cancel();
@@ -2207,10 +2252,7 @@ class CallSession extends ChangeNotifier {
       hypothesisId: 'H4',
       location: 'state.dart:disposeSession',
       message: 'disposeSession end',
-      data: {
-        'callId': call.id,
-        'elapsedMs': disposeSw.elapsedMilliseconds,
-      },
+      data: {'callId': call.id, 'elapsedMs': disposeSw.elapsedMilliseconds},
     );
     // #endregion
   }
@@ -2335,17 +2377,26 @@ class PrivetState extends ChangeNotifier {
   void Function()? _disposeVisibility;
   Timer? _focusedReadTimer;
   Timer? _inboxReconcileTimer;
+
   /// Last time the window regained focus and we re-checked the socket / inbox.
   DateTime? _lastVisibleResyncAt;
   DateTime? _pausedAt;
   bool _resyncingAfterReconnect = false;
   bool _resyncAgainAfterReconnect = false;
+
+  /// Hard cap on a single sync request. A dead mobile network leaves `http`
+  /// futures pending for minutes; without this a stuck fetch keeps
+  /// [_historyLoading] / [_resyncingAfterReconnect] latched and every later
+  /// resume becomes a no-op until the app is restarted.
+  static const Duration _syncTimeout = Duration(seconds: 15);
   final Set<String> _historyResyncQueued = {};
   SharedPreferences? _prefsCache;
+
   /// Keep under the peer clear window and above the server rate limit so
   /// refreshes are not dropped (matched 2s/2s used to lag ~3–4s).
   final _typingThrottle = Throttle(const Duration(milliseconds: 800));
   String? _typingThrottleChatId;
+
   /// conversationId:userId → when we last applied a message from that peer.
   /// Used to drop late typing pulses that race after their send.
   final Map<String, DateTime> _lastPeerMessageAt = {};
@@ -2411,6 +2462,7 @@ class PrivetState extends ChangeNotifier {
 
   /// Active-chat typer (convenience mirror of [typingByChat]).
   String? typingUserId;
+
   /// conversationId → userId currently typing (for inbox + chat chrome).
   final Map<String, String> typingByChat = {};
   final Map<String, Timer> _typingClearTimers = {};
@@ -2912,21 +2964,20 @@ class PrivetState extends ChangeNotifier {
     soundEnabled = prefs.getBool('privet_sound_enabled') ?? true;
     notificationsEnabled =
         prefs.getBool('privet_notifications_enabled') ?? true;
-    autocompleteEnabled =
-        prefs.getBool('privet_autocomplete_enabled') ?? true;
+    autocompleteEnabled = prefs.getBool('privet_autocomplete_enabled') ?? true;
     greetingButtonEnabled =
         prefs.getBool('privet_greeting_button_enabled') ?? true;
     _loadContactGreetingNames(prefs);
     englishTrainerEnabled =
         prefs.getBool('privet_english_trainer_enabled') ?? false;
-    trainerStats =
-        TrainerStats.decode(prefs.getString('privet_english_trainer_stats'));
+    trainerStats = TrainerStats.decode(
+      prefs.getString('privet_english_trainer_stats'),
+    );
     if (greetingButtonEnabled) {
       unawaited(GreetingPools.load());
     }
     autocorrectEnabled = prefs.getBool('privet_autocorrect_enabled') ?? true;
-    terminalCursorEnabled =
-        prefs.getBool('privet_terminal_cursor') ?? true;
+    terminalCursorEnabled = prefs.getBool('privet_terminal_cursor') ?? true;
     customShortcodes = decodeCustomShortcodes(
       prefs.getString('privet_custom_shortcodes'),
     );
@@ -3084,7 +3135,10 @@ class PrivetState extends ChangeNotifier {
 
   Future<void> _saveTrainerStats() async {
     final prefs = await _prefs();
-    await prefs.setString('privet_english_trainer_stats', trainerStats.encode());
+    await prefs.setString(
+      'privet_english_trainer_stats',
+      trainerStats.encode(),
+    );
   }
 
   Future<String> _trainerAi(String input) async {
@@ -3154,8 +3208,9 @@ class PrivetState extends ChangeNotifier {
         'with the trainer on first',
       );
     }
-    final raw =
-        await _trainerAi('# english-level\n${trainerStats.levelReviewPayload()}');
+    final raw = await _trainerAi(
+      '# english-level\n${trainerStats.levelReviewPayload()}',
+    );
     final report = TrainerLevelReport.parse(raw);
     if (report == null) {
       throw StateError('The coach lost the grading sheet — try again');
@@ -3236,10 +3291,7 @@ class PrivetState extends ChangeNotifier {
   }
 
   /// Name the Hi button should address: local alias, else peer display name.
-  String? greetingNameForPeer({
-    String? userId,
-    String? displayName,
-  }) {
+  String? greetingNameForPeer({String? userId, String? displayName}) {
     final alias = contactGreetingName(userId);
     if (alias != null) return greetingFirstName(alias) ?? alias;
     return greetingFirstName(displayName);
@@ -3265,10 +3317,7 @@ class PrivetState extends ChangeNotifier {
 
     final first = isGroup
         ? null
-        : greetingNameForPeer(
-            userId: peerUserId,
-            displayName: peerDisplayName,
-          );
+        : greetingNameForPeer(userId: peerUserId, displayName: peerDisplayName);
     final resolved = style.resolve();
     final recentKey = switch (resolved) {
       GreetingStyle.philosophy =>
@@ -3279,26 +3328,27 @@ class PrivetState extends ChangeNotifier {
         '${resolved.id}|${(englishCategory ?? '').trim().toLowerCase()}',
       _ => resolved.id,
     };
-    final recent =
-        List<String>.from(_recentGreetingDrafts[recentKey] ?? const []);
+    final recent = List<String>.from(
+      _recentGreetingDrafts[recentKey] ?? const [],
+    );
 
     if (resolved.isLocal) {
       try {
         final pools = await GreetingPools.load();
         final pickedPhil = resolved == GreetingStyle.philosophy
             ? (philosopher?.trim().isNotEmpty == true
-                ? philosopher!.trim()
-                : GreetingStyleX.pickPhilosopher())
+                  ? philosopher!.trim()
+                  : GreetingStyleX.pickPhilosopher())
             : null;
         final pickedJoke = resolved == GreetingStyle.joke
             ? (jokeCategory?.trim().isNotEmpty == true
-                ? jokeCategory!.trim().toLowerCase()
-                : null) // null = any type
+                  ? jokeCategory!.trim().toLowerCase()
+                  : null) // null = any type
             : null;
         final pickedEnglish = resolved == GreetingStyle.english
             ? (englishCategory?.trim().isNotEmpty == true
-                ? englishCategory!.trim().toLowerCase()
-                : null) // null = any mode
+                  ? englishCategory!.trim().toLowerCase()
+                  : null) // null = any mode
             : null;
         final text = pools
             .compose(
@@ -3564,10 +3614,10 @@ class PrivetState extends ChangeNotifier {
   }
 
   static String? _forcedFontForStyle(AccentStyle style) => switch (style) {
-        AccentStyle.hacker => 'courier',
-        AccentStyle.tape => 'garamond',
-        _ => null,
-      };
+    AccentStyle.hacker => 'courier',
+    AccentStyle.tape => 'garamond',
+    _ => null,
+  };
 
   /// Clamps [value] to the 11–24 px range and rebuilds the open chat.
   /// Ctrl+scroll and the Profile slider both call this; prefs persist it.
@@ -4072,6 +4122,7 @@ class PrivetState extends ChangeNotifier {
     await attachMobilePushHandlers(
       onOpenPayload: _handleMobilePushPayload,
       onAction: _handleMobilePushAction,
+      onMessage: _handleMobilePushForeground,
     );
   }
 
@@ -4108,6 +4159,9 @@ class PrivetState extends ChangeNotifier {
       return;
     }
     if (callSession != null || ringing != null) return;
+    // Never revive a call whose ring window already closed (delayed FCM /
+    // stale notification tap hours after the call).
+    if (_isStaleIncomingCallPayload(data)) return;
     final me = user;
     if (me == null) return;
     final fromId = data['fromUserId'] ?? '';
@@ -4148,12 +4202,26 @@ class PrivetState extends ChangeNotifier {
     notifyCall();
   }
 
+  /// True when a push/notification payload is older than the server ring window.
+  bool _isStaleIncomingCallPayload(Map<String, String> data) {
+    final createdAt = int.tryParse(data['createdAt'] ?? '') ?? 0;
+    if (createdAt <= 0) return false;
+    return DateTime.now().millisecondsSinceEpoch - createdAt > 90_000;
+  }
+
+  Future<void> _clearPendingIncomingCallStash() async {
+    try {
+      final prefs = await _prefs();
+      await prefs.remove('pending_incoming_call');
+      await prefs.remove('pending_incoming_call_at');
+    } catch (_) {}
+  }
+
   /// On a cold start, check whether the native ring screen stored a pending
   /// accept/decline while the Flutter engine was not yet running. If so,
   /// materialize the call and replay the action.
   Future<void> _replayPendingCallAction() async {
-    if (!_isMobilePlatform ||
-        defaultTargetPlatform != TargetPlatform.android) {
+    if (!_isMobilePlatform || defaultTargetPlatform != TargetPlatform.android) {
       return;
     }
     final pending = await readPendingCallAction();
@@ -4242,8 +4310,7 @@ class PrivetState extends ChangeNotifier {
   /// that launches the app. Materialize the ring even if the
   /// notification-response replay was missed.
   Future<void> _replayPendingIncomingCall() async {
-    if (!_isMobilePlatform ||
-        defaultTargetPlatform != TargetPlatform.android) {
+    if (!_isMobilePlatform || defaultTargetPlatform != TargetPlatform.android) {
       return;
     }
     final prefs = await _prefs();
@@ -4253,9 +4320,12 @@ class PrivetState extends ChangeNotifier {
     await prefs.remove('pending_incoming_call');
     await prefs.remove('pending_incoming_call_at');
     // The server-side ring timeout is 60s — never ring for a stale call.
+    // [stashedAt] is the call's createdAt when known (see background handler).
     if (DateTime.now().millisecondsSinceEpoch - stashedAt > 90_000) return;
     if (callSession != null || ringing != null) return;
-    await _materializeIncomingCallFromPush(decodeNotificationPayload(raw));
+    final data = decodeNotificationPayload(raw);
+    if (_isStaleIncomingCallPayload(data)) return;
+    await _materializeIncomingCallFromPush(data);
   }
 
   /// Dismiss the native ring for [callId] and forget its dedup marker.
@@ -4272,8 +4342,7 @@ class PrivetState extends ChangeNotifier {
   /// ring over to the native full-screen screen (lock / switch apps still
   /// shows the call, Teams-style).
   Future<void> postAndroidRingWhenBackgrounded() async {
-    if (!_isMobilePlatform ||
-        defaultTargetPlatform != TargetPlatform.android) {
+    if (!_isMobilePlatform || defaultTargetPlatform != TargetPlatform.android) {
       return;
     }
     final ring = ringing;
@@ -4284,8 +4353,7 @@ class PrivetState extends ChangeNotifier {
 
   /// Returning to the foreground hands the ring back to the in-app overlay.
   Future<void> cancelAndroidRingOnForeground() async {
-    if (!_isMobilePlatform ||
-        defaultTargetPlatform != TargetPlatform.android) {
+    if (!_isMobilePlatform || defaultTargetPlatform != TargetPlatform.android) {
       return;
     }
     final ring = ringing;
@@ -4295,21 +4363,49 @@ class PrivetState extends ChangeNotifier {
   }
 
   void _handleMobilePushPayload(Map<String, String> data) {
+    final type = data['type'] ?? '';
+    // Silent cancel from another device — never steal focus.
+    if (type == 'call.cancel' || type == 'call.ended') {
+      unawaited(_handleCallEnded(data['callId']));
+      return;
+    }
     // Notification taps often deliver the payload while another app still
     // owns the screen — force MainActivity forward first.
     unawaited(bringMobileAppToFront());
-    final type = data['type'] ?? '';
     if (type == 'call.incoming') {
       unawaited(_materializeIncomingCallFromPush(data));
       return;
     }
     final chatId = data['conversationId'];
     if (chatId != null && chatId.isNotEmpty) {
-      unawaited(_openConversationFromNotification(
-        chatId,
-        messageId: data['messageId'],
-      ));
+      unawaited(
+        _openConversationFromNotification(chatId, messageId: data['messageId']),
+      );
     }
+  }
+
+  /// Foreground FCM for a normal message. The server pushes FCM for every
+  /// message even when a socket is registered, so the push is the only reliable
+  /// signal when the WS went half-open (the classic "notification arrived, but
+  /// the message is not in the chat" case). Verify against the local cache and
+  /// pull over HTTP when the socket missed it.
+  void _handleMobilePushForeground(Map<String, String> data) {
+    if (!mobileAppInForeground) return;
+    final chatId = data['conversationId'];
+    final messageId = data['messageId'];
+    if (chatId == null || chatId.isEmpty) return;
+    final cached = messagesByChat[chatId];
+    final deliveredBySocket =
+        messageId != null &&
+        messageId.isNotEmpty &&
+        (cached?.any((m) => m.id == messageId) ?? false);
+    // Healthy socket: it already applied the message, nothing to repair.
+    if (deliveredBySocket) return;
+    if (cached != null && historyLoaded.contains(chatId)) {
+      unawaited(_resyncHistory(chatId).catchError((_) {}));
+    }
+    // Coalesced HTTP inbox pull so badges/previews do not stay stale either.
+    _scheduleInboxReconcile();
   }
 
   /// FCM / local-notification tap: the WS gap while backgrounded never
@@ -4383,7 +4479,13 @@ class PrivetState extends ChangeNotifier {
 
   Future<void> refreshInbox() async {
     conversations = await _api.conversations();
-    directory = await _api.users();
+    try {
+      directory = await _api.users();
+    } catch (_) {
+      // Keep the previous directory: a failing /users must not skip the
+      // notifyInbox()/stale-history merge below, which is what recovers the
+      // messages that landed while the app was backgrounded.
+    }
     notifyInbox();
     warmRecentMedia();
     // Reconnect/resume refresh the inbox preview over HTTP, but WS message
@@ -4532,7 +4634,9 @@ class PrivetState extends ChangeNotifier {
     }
     _historyLoading.add(id);
     try {
-      final remote = await _api.messages(id, limit: messagePageSize);
+      final remote = await _api
+          .messages(id, limit: messagePageSize)
+          .timeout(_syncTimeout);
       final existing = messagesByChat[id] ?? const <ChatMessage>[];
       messagesByChat[id] = _mergeMessages(remote, existing);
       hasMoreByChat[id] = remote.length >= messagePageSize;
@@ -4589,7 +4693,9 @@ class PrivetState extends ChangeNotifier {
     final sw = Stopwatch()..start();
     // #endregion
     try {
-      final remote = await _api.messages(id, limit: messagePageSize);
+      final remote = await _api
+          .messages(id, limit: messagePageSize)
+          .timeout(_syncTimeout);
       final existing = messagesByChat[id] ?? const <ChatMessage>[];
       messagesByChat[id] = _mergeMessages(remote, existing);
       hasMoreByChat[id] = remote.length >= messagePageSize;
@@ -4637,11 +4743,13 @@ class PrivetState extends ChangeNotifier {
     notifyListeners();
     try {
       final oldest = list.first;
-      final older = await _api.messages(
-        id,
-        limit: messagePageSize,
-        before: _sqlTimestamp(oldest.createdAt),
-      );
+      final older = await _api
+          .messages(
+            id,
+            limit: messagePageSize,
+            before: _sqlTimestamp(oldest.createdAt),
+          )
+          .timeout(_syncTimeout);
       if (older.isEmpty) {
         hasMoreByChat[id] = false;
         return false;
@@ -4655,17 +4763,46 @@ class PrivetState extends ChangeNotifier {
     }
   }
 
-  /// Ensure [messageId] is present in the local cache, loading older pages if needed.
+  /// Ensure [messageId] is present in the local cache, loading older pages as
+  /// needed. Waits out in-flight page loads (they used to make a search jump
+  /// bail out silently) and keeps paging until the message is found or history
+  /// is exhausted.
   Future<bool> ensureMessageLoaded(String chatId, String messageId) async {
-    await ensureHistory(chatId);
-    for (var i = 0; i < 30; i++) {
-      final list = messagesByChat[chatId] ?? const <ChatMessage>[];
-      if (list.any((m) => m.id == messageId)) return true;
-      if (hasMoreByChat[chatId] == false) return false;
-      final loaded = await loadOlderMessages(chatId);
-      if (!loaded) return false;
+    final deadline = DateTime.now().add(const Duration(seconds: 20));
+    while (true) {
+      final list = messagesByChat[chatId];
+      if (list != null && list.any((m) => m.id == messageId)) return true;
+      if (historyLoaded.contains(chatId) && hasMoreByChat[chatId] == false) {
+        return false;
+      }
+      if (DateTime.now().isAfter(deadline)) return false;
+
+      if (_historyLoading.contains(chatId) || loadingOlder.contains(chatId)) {
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        continue;
+      }
+      if (!historyLoaded.contains(chatId)) {
+        try {
+          await ensureHistory(chatId);
+        } catch (_) {
+          return false;
+        }
+        continue;
+      }
+      try {
+        final loaded = await loadOlderMessages(chatId);
+        if (!loaded) {
+          if (hasMoreByChat[chatId] == false) {
+            final cur = messagesByChat[chatId] ?? const <ChatMessage>[];
+            return cur.any((m) => m.id == messageId);
+          }
+          // A page was likely in flight; wait a beat and re-check.
+          await Future<void>.delayed(const Duration(milliseconds: 40));
+        }
+      } catch (_) {
+        return false;
+      }
     }
-    return false;
   }
 
   Future<List<ChatMessage>> searchInConversation(
@@ -5011,7 +5148,8 @@ class PrivetState extends ChangeNotifier {
     return '${displayNameFor(typerId)} is typing…';
   }
 
-  bool isTypingIn(String conversationId) => typingByChat.containsKey(conversationId);
+  bool isTypingIn(String conversationId) =>
+      typingByChat.containsKey(conversationId);
 
   static String _peerMessageKey(String conversationId, String userId) =>
       '$conversationId:$userId';
@@ -5019,9 +5157,11 @@ class PrivetState extends ChangeNotifier {
   void _setPeerTyping(String conversationId, String typerId) {
     // A trailing typing pulse can arrive after their message on the wire.
     // Ignore briefly so the dots do not reappear after the bubble.
-    final lastMsg = _lastPeerMessageAt[_peerMessageKey(conversationId, typerId)];
+    final lastMsg =
+        _lastPeerMessageAt[_peerMessageKey(conversationId, typerId)];
     if (lastMsg != null &&
-        DateTime.now().difference(lastMsg) < const Duration(milliseconds: 2000)) {
+        DateTime.now().difference(lastMsg) <
+            const Duration(milliseconds: 2000)) {
       return;
     }
     typingByChat[conversationId] = typerId;
@@ -5036,8 +5176,7 @@ class PrivetState extends ChangeNotifier {
       () {
         if (typingByChat[conversationId] != typerId) return;
         typingByChat.remove(conversationId);
-        if (typingUserId == typerId &&
-            activeConversationId == conversationId) {
+        if (typingUserId == typerId && activeConversationId == conversationId) {
           typingUserId = null;
         }
         notifyTypingOnly();
@@ -5127,18 +5266,26 @@ class PrivetState extends ChangeNotifier {
   Future<void> onAppResumed() async {
     final token = _api.token;
     if (user == null || token == null) return;
-    final pausedAt = _pausedAt;
     _pausedAt = null;
-    final away = pausedAt == null
-        ? Duration.zero
-        : DateTime.now().difference(pausedAt);
     final inCall = callSession != null || ringing != null;
-    // Isolate was frozen: pingInterval never ran, so [isConnected] can be a
-    // lie. Re-open unless a call is using this socket for signaling.
-    final forceSocket = _isMobilePlatform &&
-        !inCall &&
-        away >= const Duration(seconds: 5);
-    await _rt.ensureConnected(token, force: forceSocket);
+    // Phones freeze the isolate while backgrounded: the socket becomes a
+    // half-open corpse (no FIN, pingInterval never ran) while FCM keeps
+    // delivering notifications, and even a few hundred ms of background is
+    // enough to poison it. There is no reliable "still alive" signal, so always
+    // reopen on resume outside a call. RealtimeClient coalesces back-to-back
+    // resumes and leaves a socket younger than two seconds alone.
+    final forceSocket = _isMobilePlatform && !inCall;
+    // Kick the socket open in the background: the HTTP resync below must never
+    // wait for a handshake that a flaky network can stall.
+    unawaited(() async {
+      try {
+        await _rt.ensureConnected(token, force: forceSocket);
+      } catch (e) {
+        // A dead network or an already-closed sink must never break the resume;
+        // the HTTP resync below is what makes missed messages appear.
+        debugPrint('[privet] resume reconnect failed: $e');
+      }
+    }());
     unawaited(_resyncAfterReconnect(forceActiveHistory: _isMobilePlatform));
     // Notification tap often lands on the already-open chat whose cache
     // missed the FCM-only message. Don't wait for inbox lastMessage.
@@ -5220,10 +5367,13 @@ class PrivetState extends ChangeNotifier {
   }
 
   ConversationTasks taskHistoryBoardFor(String? conversationId) =>
-      ConversationTasks(items: List<TaskItem>.from(taskHistoryFor(conversationId)));
+      ConversationTasks(
+        items: List<TaskItem>.from(taskHistoryFor(conversationId)),
+      );
 
   bool taskHistoryHasMore(String? conversationId) =>
-      conversationId != null && (taskHistoryHasMoreByChat[conversationId] ?? false);
+      conversationId != null &&
+      (taskHistoryHasMoreByChat[conversationId] ?? false);
 
   Future<void> refreshTaskHistory(String conversationId) async {
     try {
@@ -5364,7 +5514,9 @@ class PrivetState extends ChangeNotifier {
     if (orderedIds.length < 2) return;
     // Optimistic: rewrite local sortOrder so the list stays put while the
     // request is in flight (and so numbers update immediately).
-    final current = List<TaskItem>.from(tasksByChat[conversationId] ?? const []);
+    final current = List<TaskItem>.from(
+      tasksByChat[conversationId] ?? const [],
+    );
     if (current.isNotEmpty) {
       final orderIndex = <String, int>{
         for (var i = 0; i < orderedIds.length; i++) orderedIds[i]: i,
@@ -5454,8 +5606,7 @@ class PrivetState extends ChangeNotifier {
   }
 
   Future<void> removeTaskAttachment(TaskItem item, String mediaUrl) async {
-    final next =
-        item.mediaItems.where((m) => m.mediaUrl != mediaUrl).toList();
+    final next = item.mediaItems.where((m) => m.mediaUrl != mediaUrl).toList();
     if (next.isEmpty) {
       await clearTaskMedia(item);
       return;
@@ -5485,7 +5636,9 @@ class PrivetState extends ChangeNotifier {
 
   Future<void> refreshReminderHistory(String conversationId) async {
     try {
-      reminderHistoryByChat[conversationId] = await _api.reminderHistory(conversationId);
+      reminderHistoryByChat[conversationId] = await _api.reminderHistory(
+        conversationId,
+      );
     } catch (_) {
       reminderHistoryByChat[conversationId] = [];
     }
@@ -5526,11 +5679,15 @@ class PrivetState extends ChangeNotifier {
 
   Future<void> snoozeReminder(PaymentReminder r, Duration duration) async {
     final until = DateTime.now().add(duration).toIso8601String();
-    final items = await _api.updateReminder(reminderId: r.id, snoozedUntil: until);
+    final items = await _api.updateReminder(
+      reminderId: r.id,
+      snoozedUntil: until,
+    );
     _setReminders(r.conversationId, items);
   }
 
-  Future<void> updateReminderDetails(PaymentReminder r, {
+  Future<void> updateReminderDetails(
+    PaymentReminder r, {
     int? amountCents,
     String? currency,
     String? direction,
@@ -5565,7 +5722,10 @@ class PrivetState extends ChangeNotifier {
   }
 
   Future<void> toggleReminderPin(PaymentReminder r) async {
-    final items = await _api.updateReminder(reminderId: r.id, pinned: !r.pinned);
+    final items = await _api.updateReminder(
+      reminderId: r.id,
+      pinned: !r.pinned,
+    );
     _setReminders(r.conversationId, items);
   }
 
@@ -6020,7 +6180,10 @@ Examples:
     );
     final placeholderKind = files.length > 1
         ? 'album'
-        : mediaKindFromMime(files.first.mimeType, filename: files.first.filename);
+        : mediaKindFromMime(
+            files.first.mimeType,
+            filename: files.first.filename,
+          );
     final placeholder = ChatMessage(
       id: clientId,
       conversationId: chatId,
@@ -6125,9 +6288,9 @@ Examples:
       );
     } catch (e) {
       // Upload failed — drop the placeholder bubble again.
-      messagesByChat[chatId] = List<ChatMessage>.from(messagesByChat[chatId] ?? [])
-          .where((m) => m.id != clientId)
-          .toList();
+      messagesByChat[chatId] = List<ChatMessage>.from(
+        messagesByChat[chatId] ?? [],
+      ).where((m) => m.id != clientId).toList();
       error = _friendlyError(e);
     } finally {
       uploading = false;
@@ -6482,12 +6645,19 @@ Examples:
     // #endregion
     stopAllCallSounds();
     allowCallTones();
+    // Always drop any cold-start stash so a later reopen cannot revive this call.
+    unawaited(_clearPendingIncomingCallStash());
     if (callId == null || ringing?.call.id == callId) {
       if (ringing != null) {
         unawaited(cancelMobileNotification('call:${ringing!.call.id}'));
         unawaited(_cancelAndroidIncoming(ringing!.call.id));
       }
       ringing = null;
+    } else if (callId != null && callId.isNotEmpty) {
+      // Not our in-app ring, but still dismiss the native heads-up for this id
+      // (answered elsewhere while the overlay was not shown).
+      unawaited(cancelMobileNotification('call:$callId'));
+      unawaited(_cancelAndroidIncoming(callId));
     }
     final ended = callSession;
     if (ended != null && (callId == null || ended.call.id == callId)) {
@@ -6541,8 +6711,8 @@ Examples:
     suppressCallTones();
     // Caller screen share uses the pending click-time stream; control host
     // passes [preparedDisplay] explicitly as the callee.
-    final prepared = preparedDisplay ??
-        (isCaller ? _pendingDisplayStream : null);
+    final prepared =
+        preparedDisplay ?? (isCaller ? _pendingDisplayStream : null);
     if (preparedDisplay == null && isCaller) {
       _pendingDisplayStream = null;
     } else if (identical(prepared, _pendingDisplayStream)) {
@@ -6682,8 +6852,7 @@ Examples:
       }
       // Only fetch history if this chat is open / already loading — never
       // invent a one-message cache for background chats.
-      if (activeConversationId == chatId ||
-          _historyLoading.contains(chatId)) {
+      if (activeConversationId == chatId || _historyLoading.contains(chatId)) {
         unawaited(ensureHistory(chatId).catchError((_) {}));
       }
     } else {
@@ -6749,8 +6918,7 @@ Examples:
     } else {
       final idx = conversations.indexWhere((c) => c.id == chatId);
       if (idx >= 0) {
-        conversations[idx] =
-            conversations[idx].copyWith(lastMessage: message);
+        conversations[idx] = conversations[idx].copyWith(lastMessage: message);
       }
     }
     // Promote the chat without a full HTTP inbox refetch.
@@ -6903,9 +7071,7 @@ Examples:
       case 'typing':
         final chatId = event['conversationId'] as String?;
         final typerId = event['userId'] as String?;
-        if (chatId == null ||
-            typerId == null ||
-            typerId == user?.id) {
+        if (chatId == null || typerId == null || typerId == user?.id) {
           return;
         }
         _setPeerTyping(chatId, typerId);
@@ -7014,12 +7180,16 @@ Examples:
         } else if (ring != null &&
             !ring.isCaller &&
             (callId == null || ring.call.id == callId)) {
-          // Callee: session is started from acceptIncoming; only clear ring UI
-          // if the session is already up (accept raced with this event).
-          if (callSession != null) {
-            ringing = null;
-            notifyCall();
+          // Callee on this device: acceptIncoming clears ringing before the
+          // WS accept is sent. If we're still ringing here, another device
+          // answered — stop the local ring (phone while PC took the call).
+          if (callSession == null) {
+            unawaited(cancelMobileNotification('call:${ring.call.id}'));
+            unawaited(_cancelAndroidIncoming(ring.call.id));
+            unawaited(_clearPendingIncomingCallStash());
           }
+          ringing = null;
+          notifyCall();
         } else if (ring != null && ring.isCaller) {
           ringing = null;
           notifyCall();
@@ -7038,8 +7208,7 @@ Examples:
         if (callId != null && callId != session.call.id) return;
         session.onPeerShareStarted(
           controllable: event['controllable'] == true,
-          controlPlatform:
-              (event['controlPlatform'] as String?)?.trim() ?? '',
+          controlPlatform: (event['controlPlatform'] as String?)?.trim() ?? '',
           controlBackend: (event['controlBackend'] as String?)?.trim() ?? '',
           controlDetail: (event['controlDetail'] as String?)?.trim() ?? '',
         );
@@ -7146,9 +7315,7 @@ Examples:
     try {
       do {
         _resyncAgainAfterReconnect = false;
-        await _resyncAfterReconnectOnce(
-          forceActiveHistory: forceActiveHistory,
-        );
+        await _resyncAfterReconnectOnce(forceActiveHistory: forceActiveHistory);
       } while (_resyncAgainAfterReconnect);
     } finally {
       _resyncingAfterReconnect = false;
@@ -7161,26 +7328,27 @@ Examples:
     final before = <String, int>{
       for (final c in conversations) c.id: c.unreadCount,
     };
-    var refreshed = false;
-    for (var attempt = 0; attempt < 3; attempt++) {
-      try {
-        await refreshInbox();
-        refreshed = true;
-        break;
-      } catch (_) {
-        if (attempt == 2) return;
-        await Future<void>.delayed(
-          Duration(milliseconds: 400 * (attempt + 1)),
-        );
-      }
-    }
-    if (!refreshed) return;
+    // The open chat is what the user sees first. Refresh it even when the inbox
+    // request below fails, so a lonely /users or /conversations error can never
+    // leave the visible messages stale.
     if (forceActiveHistory) {
       final active = activeConversationId;
       if (active != null) {
         await _resyncHistory(active);
       }
     }
+    var refreshed = false;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        await refreshInbox().timeout(_syncTimeout);
+        refreshed = true;
+        break;
+      } catch (_) {
+        if (attempt == 2) return;
+        await Future<void>.delayed(Duration(milliseconds: 400 * (attempt + 1)));
+      }
+    }
+    if (!refreshed) return;
     final backgrounded = documentHidden || !documentHasFocus;
     for (final c in conversations) {
       final last = c.lastMessage;
@@ -7198,8 +7366,8 @@ Examples:
       final senderName = last.sender.displayName.isNotEmpty
           ? last.sender.displayName
           : (last.sender.handle.isNotEmpty
-              ? '@${last.sender.handle}'
-              : 'Privet');
+                ? '@${last.sender.handle}'
+                : 'Privet');
       showWebNotification(
         title: c.isGroup ? c.title : senderName,
         body: _notificationPreview(last),
