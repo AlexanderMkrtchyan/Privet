@@ -61,6 +61,7 @@ flutter build web --release \
 rsync -a --delete \
   --exclude 'downloads/' \
   --exclude 'install/' \
+  --exclude 'habitation/' \
   "$ROOT/app/build/web/" "$ROOT/server/public/"
 rm -f "$ROOT/server/public/flutter_service_worker.js"
 restore_static_extras "$STAGE"
@@ -157,6 +158,7 @@ fi
 rsync -az --delete \
   --exclude 'downloads/' \
   --exclude 'install/' \
+  --exclude 'habitation/' \
   "$ROOT/server/public/" "${REMOTE_HOST}:${REMOTE_DIR}/public/"
 
 # Always ship install + the current release + version.json.
@@ -164,6 +166,9 @@ rsync -az --delete \
 # production disk is 20GB. Upload one copy of each artifact, then hardlink
 # the versioned filename on the server (identical SHA256SUMS entries).
 rsync -az "$ROOT/server/public/install/" "${REMOTE_HOST}:${REMOTE_DIR}/public/install/"
+# habitation/ is a small standalone side app (not part of the Flutter web build);
+# the --delete syncs above would otherwise wipe it from the site.
+rsync -az "$ROOT/server/public/habitation/" "${REMOTE_HOST}:${REMOTE_DIR}/public/habitation/"
 DL="$ROOT/server/public/downloads"
 ssh -o BatchMode=yes "$REMOTE_HOST" "mkdir -p '${REMOTE_DIR}/public/downloads'"
 CURRENT_DOWNLOADS=(
