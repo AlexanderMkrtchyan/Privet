@@ -1266,13 +1266,13 @@ class CallSession extends ChangeNotifier {
     _switchingCamera = true;
     notifyListeners();
     try {
-      final switched = await Helper.switchCamera(cam);
-      if (switched) {
-        camMirrored = !camMirrored;
-        error = null;
-      } else {
-        error = 'Could not switch camera.';
-      }
+      // Do NOT treat the return value as a success flag: flutter_webrtc
+      // returns the NEW facing (front = true, rear = false) on both Android
+      // and iOS. A successful switch to the rear camera therefore returns
+      // false — only a thrown platform error means the flip failed.
+      await Helper.switchCamera(cam);
+      camMirrored = !camMirrored;
+      error = null;
     } catch (e) {
       error = 'Could not switch camera: $e';
     } finally {
@@ -2572,7 +2572,7 @@ class PrivetState extends ChangeNotifier {
   /// Accent option id (device-local). Distinguishes Yellow vs Tape (same hue).
   String accentId = 'lime';
 
-  /// Chat background id (device-local). `none`, `doodle:*`, `custom`.
+  /// Chat background id (device-local). `none`, `doodle:*`, `soft:*`, `custom`.
   String chatWallpaperId = ChatWallpaperCatalog.noneId;
 
   /// Uploaded wallpaper bytes, when [chatWallpaperId] is `custom`.

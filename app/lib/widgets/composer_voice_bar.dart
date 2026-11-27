@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../theme.dart';
+import '../util/duration_format.dart';
 import '../util/voice_playback_source.dart';
 
 /// Staged voice message waiting to be sent from the composer.
@@ -19,13 +20,6 @@ class VoiceDraft {
   final Uint8List bytes;
   final String filename;
   final String mimeType;
-}
-
-String formatVoiceDuration(Duration duration) {
-  final totalSeconds = duration.inSeconds;
-  final minutes = totalSeconds ~/ 60;
-  final seconds = totalSeconds % 60;
-  return '${minutes.toString()}:${seconds.toString().padLeft(2, '0')}';
 }
 
 /// Live recording strip — pulsing mic, level bars, elapsed time, cancel.

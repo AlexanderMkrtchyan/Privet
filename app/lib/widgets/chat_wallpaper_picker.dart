@@ -49,10 +49,17 @@ class ChatWallpaperPicker extends StatelessWidget {
             for (final wall in ChatWallpaperCatalog.doodles) _Tile.wall(wall),
           ],
         ),
+        _section('Soft colors'),
+        _grid(
+          tiles: [
+            for (final wall in ChatWallpaperCatalog.softColors) _Tile.wall(wall),
+          ],
+        ),
         const SizedBox(height: 6),
         Text(
           'On Linux the theme fills the chat at FHD or 2K from your display. '
-          'Phones keep the portrait doodles. Upload sets your own picture.',
+          'Phones keep the portrait doodles. Soft colors follow the light or '
+          'dark app theme. Upload sets your own picture.',
           style: TextStyle(color: PrivetTheme.mist, fontSize: 11),
         ),
       ],

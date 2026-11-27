@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart'
@@ -29,6 +30,8 @@ import '../util/web_select_cursor.dart';
 import 'compact_emoji_picker.dart';
 import 'accent_chrome.dart';
 import 'cached_media_image.dart';
+import '../util/duration_format.dart';
+import '../util/sound_waveform.dart';
 import 'image_lightbox.dart';
 import 'inline_video_player.dart';
 import 'privet_emoji.dart';
@@ -1630,12 +1633,18 @@ class _AlbumBody extends StatelessWidget {
                   final galleryIndex = item.kind == 'image'
                       ? imageItems.indexOf(item)
                       : 0;
+                  // Sound clips need room for the play button + file name, so
+                  // they get a wider tile than photos/videos in the same album.
+                  final sound = item.kind == 'audio' || item.kind == 'voice';
+                  final itemW = items.length == 1
+                      ? 260.0
+                      : (sound ? 184.0 : tileW);
                   return SizedBox(
-                    width: items.length == 1 ? 260 : tileW,
+                    width: itemW,
                     child: _AttachmentTile(
                       item: item,
                       url: _url(item),
-                      width: items.length == 1 ? 260 : tileW,
+                      width: itemW,
                       height: item.kind == 'video' && items.length > 1
                           ? 140
                           : tileH,
@@ -1866,21 +1875,18 @@ class _SingleMediaBody extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ExcludeSemantics(
-                  child: VoicePlayer(
-                    url: _url,
-                    label: voiceLabel || item.kind == 'voice'
-                        ? 'Voice message'
-                        : (item.fileName ?? 'Audio'),
-                  ),
-                ),
-                const SizedBox(width: 4),
-                _DownloadChip(url: _url, filename: _downloadName),
-              ],
+            ExcludeSemantics(
+              child: VoicePlayer(
+                url: _url,
+                label: voiceLabel || item.kind == 'voice'
+                    ? 'Voice message'
+                    : (item.fileName ?? 'Audio'),
+              ),
             ),
+            if (_url.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              _DownloadChip(url: _url, filename: _downloadName),
+            ],
             if (caption.isNotEmpty) ...[
               const SizedBox(height: 6),
               _captionText(),
@@ -2100,9 +2106,8 @@ class _AttachmentTile extends StatelessWidget {
             : InlineVideoPlayer(url: url, width: width, height: height);
       case 'audio':
       case 'voice':
-        content = _clickableFileTile(
-          context: context,
-          icon: Icons.audiotrack_rounded,
+        content = _AudioTilePlayer(
+          url: url,
           label: item.fileName ?? 'Audio',
         );
       default:
@@ -3046,6 +3051,34 @@ class _LinkPreviewCard extends StatelessWidget {
   }
 }
 
+/// Only one sound clip should play at a time inside a chat: starting one
+/// stops whichever bubble was playing before it.
+Object? _activeSoundOwner;
+VoidCallback? _activeSoundStop;
+
+void _claimSound(Object owner, VoidCallback stop) {
+  if (identical(_activeSoundOwner, owner)) return;
+  final previous = _activeSoundStop;
+  _activeSoundOwner = owner;
+  _activeSoundStop = stop;
+  previous?.call();
+}
+
+void _releaseSound(Object owner) {
+  if (identical(_activeSoundOwner, owner)) {
+    _activeSoundOwner = null;
+    _activeSoundStop = null;
+  }
+}
+
+final _soundTimeStyle = TextStyle(
+  fontSize: 11,
+  fontFeatures: const [FontFeature.tabularFigures()],
+  color: PrivetTheme.mist,
+);
+
+/// Single sound sent on its own: play/pause plus a scrubbable waveform that
+/// mirrors the clip's real speech/music envelope.
 class VoicePlayer extends StatefulWidget {
   const VoicePlayer({super.key, required this.url, required this.label});
 
@@ -3058,46 +3091,483 @@ class VoicePlayer extends StatefulWidget {
 
 class _VoicePlayerState extends State<VoicePlayer> {
   final _player = AudioPlayer();
-  StreamSubscription? _completeSub;
+  StreamSubscription<Duration>? _positionSub;
+  StreamSubscription<Duration>? _durationSub;
+  StreamSubscription<void>? _completeSub;
+  Duration _duration = Duration.zero;
+  Duration _position = Duration.zero;
   bool _playing = false;
+  List<double>? _peaks;
+
+  @override
+  void initState() {
+    super.initState();
+    _peaks = cachedSoundWaveform(widget.url);
+    _loadWaveform();
+    // On web the duration only arrives once the media starts playing, so listen
+    // instead of preloading the file (which would fetch every clip in history).
+    _durationSub = _player.onDurationChanged.listen((duration) {
+      if (!mounted || duration <= Duration.zero) return;
+      setState(() => _duration = duration);
+    });
+    _completeSub = _player.onPlayerComplete.listen((_) {
+      if (!mounted) return;
+      _releaseSound(this);
+      setState(() {
+        _playing = false;
+        // Keep the bar full at the end instead of collapsing it to zero.
+        if (_duration > Duration.zero) _position = _duration;
+      });
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant VoicePlayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.url != widget.url) {
+      _peaks = cachedSoundWaveform(widget.url);
+      _loadWaveform();
+    }
+  }
+
+  /// Real speech envelope from the server; until it lands the track stays
+  /// neutral instead of drawing a made-up shape.
+  void _loadWaveform() {
+    final url = widget.url;
+    if (url.isEmpty) return;
+    unawaited(
+      loadSoundWaveform(url).then((peaks) {
+        if (!mounted || peaks == null || widget.url != url) return;
+        setState(() => _peaks = peaks);
+      }),
+    );
+  }
 
   @override
   void dispose() {
+    _releaseSound(this);
+    _positionSub?.cancel();
+    _durationSub?.cancel();
     _completeSub?.cancel();
     _player.dispose();
     super.dispose();
   }
 
+  /// Called when another clip in the chat starts: stop without notifying it.
+  void _stopSilently() {
+    unawaited(_player.stop());
+    _releaseSound(this);
+    if (!mounted) return;
+    if (_playing || _position > Duration.zero) {
+      setState(() {
+        _playing = false;
+        _position = Duration.zero;
+      });
+    }
+  }
+
   Future<void> _toggle() async {
+    if (widget.url.isEmpty) return;
     if (_playing) {
-      await _player.stop();
-      setState(() => _playing = false);
+      await _player.pause();
+      _releaseSound(this);
+      if (mounted) setState(() => _playing = false);
       return;
     }
-    await _player.play(UrlSource(widget.url));
-    setState(() => _playing = true);
-    await _completeSub?.cancel();
-    _completeSub = _player.onPlayerComplete.listen((_) {
+    _claimSound(this, _stopSilently);
+    // A finished clip released its source, so resume() would be a silent no-op:
+    // restart it with a fresh play() from the beginning.
+    final atEnd =
+        _duration > Duration.zero && _position >= _duration;
+    try {
+      if (atEnd) {
+        if (mounted) setState(() => _position = Duration.zero);
+        await _player.play(UrlSource(widget.url));
+      } else if (_position > Duration.zero) {
+        await _player.resume();
+      } else {
+        await _player.play(UrlSource(widget.url));
+      }
+    } catch (_) {
+      _releaseSound(this);
       if (mounted) setState(() => _playing = false);
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _playing = true);
+    await _positionSub?.cancel();
+    _positionSub = _player.onPositionChanged.listen((next) {
+      if (!mounted) return;
+      setState(() => _position = next);
     });
+  }
+
+  Future<void> _seekFraction(double fraction) async {
+    final total = _duration;
+    if (total <= Duration.zero) return;
+    if (!_playing && _position <= Duration.zero) return;
+    final target = Duration(
+      milliseconds: (total.inMilliseconds * fraction).round(),
+    );
+    await _player.seek(target);
+    if (mounted) setState(() => _position = target);
   }
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        IconButton(
-          onPressed: _toggle,
-          icon: Icon(
-            _playing
-                ? Icons.stop_circle_rounded
-                : Icons.play_circle_filled_rounded,
-            color: PrivetTheme.signal,
+    final durationKnown = _duration > Duration.zero;
+    // Only trust the ratio once the duration is known: falling back to the
+    // position as the total made the old dot jump to the end on frame one.
+    final progress = durationKnown
+        ? (_position.inMilliseconds / _duration.inMilliseconds)
+              .clamp(0.0, 1.0)
+        : 0.0;
+    final showPosition = _playing || _position > Duration.zero;
+    final timeLabel = durationKnown
+        ? formatVoiceDuration(showPosition ? _position : _duration)
+        : (showPosition ? formatVoiceDuration(_position) : '');
+
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 250),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            tooltip: _playing ? 'Pause' : 'Play',
+            onPressed: widget.url.isEmpty ? null : _toggle,
+            visualDensity: VisualDensity.compact,
+            icon: Icon(
+              _playing
+                  ? Icons.pause_circle_filled_rounded
+                  : Icons.play_circle_filled_rounded,
+              color: PrivetTheme.signal,
+              size: 30,
+            ),
+          ),
+          const SizedBox(width: 4),
+          Flexible(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        widget.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13.5),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    SizedBox(
+                      width: 38,
+                      child: Text(
+                        timeLabel,
+                        textAlign: TextAlign.right,
+                        style: _soundTimeStyle,
+                      ),
+                    ),
+                  ],
+                ),
+                SoundWaveTrack(
+                  peaks: _peaks,
+                  progress: progress,
+                  active: _playing,
+                  onSeek: _seekFraction,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Neutral placeholder drawn while the real levels are still on the way: a
+/// flat low track, never a fabricated pattern.
+List<double> _placeholderBars(int count) =>
+    List<double>.filled(count, 0.12, growable: false);
+
+/// Telegram-style sound-level bars for a single audio bubble; drag/tap seeks.
+/// Bars come from the server's real RMS analysis of the clip.
+class SoundWaveTrack extends StatelessWidget {
+  const SoundWaveTrack({
+    super.key,
+    required this.peaks,
+    required this.progress,
+    required this.active,
+    required this.onSeek,
+    this.barCount = 48,
+    this.height = 28,
+  });
+
+  /// Normalised RMS per bar from the server, or `null` while loading.
+  final List<double>? peaks;
+  final double progress;
+  final bool active;
+  final ValueChanged<double> onSeek;
+  final int barCount;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    final bars = peaks ?? _placeholderBars(barCount);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        if (!width.isFinite || width <= 0) {
+          return SizedBox(height: height);
+        }
+        void seek(Offset local) => onSeek((local.dx / width).clamp(0.0, 1.0));
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (details) => seek(details.localPosition),
+          onHorizontalDragStart: (details) => seek(details.localPosition),
+          onHorizontalDragUpdate: (details) => seek(details.localPosition),
+          child: SizedBox(
+            height: height,
+            width: width,
+            child: CustomPaint(
+              painter: _SoundWavePainter(
+                bars: bars,
+                progress: progress.clamp(0.0, 1.0),
+                active: active,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _SoundWavePainter extends CustomPainter {
+  const _SoundWavePainter({
+    required this.bars,
+    required this.progress,
+    required this.active,
+  });
+
+  final List<double> bars;
+  final double progress;
+  final bool active;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (bars.isEmpty || size.width <= 0 || size.height <= 0) return;
+    final slot = size.width / bars.length;
+    final gap = slot >= 6 ? 2.0 : slot * 0.35;
+    final barWidth = (slot - gap).clamp(0.8, 4.0);
+    final played = active
+        ? PrivetTheme.signal
+        : PrivetTheme.signal.withValues(alpha: 0.7);
+    final rest = PrivetTheme.paper.withValues(alpha: 0.2);
+    final limit = progress * size.width;
+    final paint = Paint()..style = PaintingStyle.fill;
+    final centerY = size.height / 2;
+    for (var i = 0; i < bars.length; i++) {
+      final barHeight = (bars[i] * size.height).clamp(3.0, size.height);
+      final left = i * slot + (slot - barWidth) / 2;
+      paint.color = left + barWidth / 2 <= limit ? played : rest;
+      final rect = Rect.fromLTWH(
+        left,
+        centerY - barHeight / 2,
+        barWidth,
+        barHeight,
+      );
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(rect, Radius.circular(barWidth / 2)),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _SoundWavePainter oldDelegate) {
+    return oldDelegate.progress != progress ||
+        oldDelegate.active != active ||
+        !identical(oldDelegate.bars, bars);
+  }
+}
+
+/// A sound inside a multi-attachment album: one play/stop button and the file
+/// name, deliberately without the progress bar (that belongs to single clips).
+class _AudioTilePlayer extends StatefulWidget {
+  const _AudioTilePlayer({required this.url, required this.label});
+
+  final String url;
+  final String label;
+
+  @override
+  State<_AudioTilePlayer> createState() => _AudioTilePlayerState();
+}
+
+class _AudioTilePlayerState extends State<_AudioTilePlayer>
+    with SingleTickerProviderStateMixin {
+  final _player = AudioPlayer();
+  late final AnimationController _pulse;
+  StreamSubscription<void>? _completeSub;
+  bool _playing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    );
+    _completeSub = _player.onPlayerComplete.listen((_) {
+      if (!mounted) return;
+      _releaseSound(this);
+      _setPlaying(false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _releaseSound(this);
+    _completeSub?.cancel();
+    _pulse.dispose();
+    _player.dispose();
+    super.dispose();
+  }
+
+  void _setPlaying(bool playing) {
+    if (!mounted) return;
+    if (playing) {
+      _pulse.repeat();
+    } else {
+      _pulse.stop();
+      _pulse.value = 0;
+    }
+    setState(() => _playing = playing);
+  }
+
+  void _stopSilently() {
+    unawaited(_player.stop());
+    _releaseSound(this);
+    if (_playing) _setPlaying(false);
+  }
+
+  Future<void> _toggle() async {
+    if (widget.url.isEmpty) return;
+    if (_playing) {
+      await _player.stop();
+      _releaseSound(this);
+      _setPlaying(false);
+      return;
+    }
+    _claimSound(this, _stopSilently);
+    try {
+      await _player.play(UrlSource(widget.url));
+    } catch (_) {
+      _releaseSound(this);
+      _setPlaying(false);
+      return;
+    }
+    _setPlaying(true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final playing = _playing;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      hitTestBehavior: HitTestBehavior.opaque,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _toggle,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          decoration: BoxDecoration(
+            // Playing clip: accent wash + border + equalizer + brighter name,
+            // so it stands out from the other sounds in the album.
+            color: playing
+                ? PrivetTheme.signal.withValues(alpha: 0.16)
+                : PrivetTheme.ink,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: playing
+                  ? PrivetTheme.signal.withValues(alpha: 0.75)
+                  : Colors.transparent,
+              width: 1.2,
+            ),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: Row(
+            children: [
+              Icon(
+                playing
+                    ? Icons.stop_circle_rounded
+                    : Icons.play_circle_filled_rounded,
+                color: PrivetTheme.signal,
+                size: 28,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  widget.label,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.2,
+                    fontWeight: playing ? FontWeight.w600 : FontWeight.w400,
+                    color: playing ? PrivetTheme.signal : null,
+                  ),
+                ),
+              ),
+              if (playing) ...[
+                const SizedBox(width: 6),
+                _EqualizerBars(animation: _pulse),
+              ],
+            ],
           ),
         ),
-        Text(widget.label, style: const TextStyle(fontSize: 14)),
-      ],
+      ),
+    );
+  }
+}
+
+/// Three animated bars next to the playing clip in an album.
+class _EqualizerBars extends StatelessWidget {
+  const _EqualizerBars({required this.animation});
+
+  final Animation<double> animation;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 18,
+      height: 26,
+      child: AnimatedBuilder(
+        animation: animation,
+        builder: (context, _) {
+          final t = animation.value;
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              for (var i = 0; i < 3; i++)
+                Container(
+                  width: 3,
+                  height:
+                      6 +
+                      16 *
+                          (0.5 + 0.5 * math.sin(2 * math.pi * t + i * 2.1))
+                              .abs(),
+                  decoration: BoxDecoration(
+                    color: PrivetTheme.signal,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
     );
   }
 }

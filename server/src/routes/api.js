@@ -7,6 +7,7 @@ import multipart from '@fastify/multipart';
 import bcrypt from 'bcryptjs';
 import { publicUser, uploadsDir, db } from '../db.js';
 import { remuxFaststart } from '../media/faststart.js';
+import { computeWaveform } from '../media/waveform.js';
 import { registerHabitationActivityRoutes } from './habitation_activity.js';
 import { registerHabitationStateRoutes } from './habitation_state.js';
 import {
@@ -304,6 +305,35 @@ export async function registerRoutes(app) {
   await registerHabitationStateRoutes(app);
 
   app.get('/health', async () => ({ ok: true, name: 'privet' }));
+
+  // Real sound levels for a media file, so chat bubbles draw the actual speech
+  // envelope instead of a decorative pattern. Public like /media/ itself: the
+  // only accepted input is an existing UUID-named upload.
+  app.get('/waveform', async (request, reply) => {
+    const raw = String(request.query?.u || '');
+    const match = /^\/media\/([A-Za-z0-9][A-Za-z0-9._-]{0,199})$/.exec(raw);
+    if (!match) {
+      return reply.code(400).send({ error: 'u must be /media/<file>' });
+    }
+    const filePath = path.join(uploadsDir, match[1]);
+    try {
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile()) return reply.code(404).send({ error: 'not found' });
+    } catch {
+      return reply.code(404).send({ error: 'not found' });
+    }
+    try {
+      const result = await computeWaveform(filePath);
+      if (!result.peaks.length) {
+        return reply.code(415).send({ error: 'no audio in file' });
+      }
+      reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+      return result;
+    } catch (err) {
+      request.log.warn({ err }, 'waveform failed');
+      return reply.code(422).send({ error: 'could not analyze audio' });
+    }
+  });
 
   app.get('/debug/sockets', async () => {
     const byUser = socketStats();

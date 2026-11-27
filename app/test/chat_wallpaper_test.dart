@@ -56,6 +56,45 @@ void main() {
     );
   });
 
+  test('soft colors ship a light and dark tone each', () {
+    expect(ChatWallpaperCatalog.softColors, hasLength(6));
+    expect(ChatWallpaperCatalog.softColors.first.id, 'soft:blue');
+    expect(ChatWallpaperCatalog.byId('soft:blue').label, 'Blue');
+    for (final wall in ChatWallpaperCatalog.softColors) {
+      expect(ChatWallpaperCatalog.byId(wall.id).id, wall.id);
+      expect(wall.kind, ChatWallpaperKind.soft);
+      expect(wall.tintFor(Brightness.light), isNotNull);
+      expect(wall.tintFor(Brightness.dark), isNotNull);
+      expect(wall.tintFor(Brightness.light), isNot(wall.tintFor(Brightness.dark)));
+      expect(wall.assetFor(Brightness.light), isNull);
+    }
+  });
+
+  testWidgets('picker selects a soft color', (tester) async {
+    var selected = ChatWallpaperCatalog.noneId;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: ChatWallpaperPicker(
+              selectedId: selected,
+              onSelect: (id) => selected = id,
+              onUpload: () {},
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final blue = find.byTooltip('Blue');
+    await tester.ensureVisible(blue);
+    await tester.pump();
+    await tester.tap(blue);
+    await tester.pump();
+    expect(selected, 'soft:blue');
+    expect(find.text('Soft colors'), findsOneWidget);
+  });
+
   testWidgets('picker selects a doodle theme', (tester) async {
     var selected = ChatWallpaperCatalog.noneId;
     await tester.pumpWidget(
